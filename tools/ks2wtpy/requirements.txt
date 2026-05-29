@@ -1,0 +1,6 @@
+# Optional runtime dependencies for ks2wtpy outputs/data sources
+# CSV-only/local conversion works with Python stdlib.
+lmdb>=1.4.1          # LMDB writer/verification (--lmdb)
+zstandard>=0.22.0   # DSB zstd compression (--dsb)
+minio>=7.2.0        # S3 data source (--s3)
+pytest>=8.0.0       # regression tests

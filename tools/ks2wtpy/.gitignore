@@ -1,0 +1,56 @@
+# ─────────────────────────────────────────────────────────
+# Local ks2wtpy credentials and helper scripts; never commit secrets.
+# ─────────────────────────────────────────────────────────
+credentials.json
+load_s3_env.sh
+.env
+*.env
+
+# ─────────────────────────────────────────────────────────
+# Local data caches (大体积、机器本地状态)
+# ─────────────────────────────────────────────────────────
+storage/
+s3_cache/
+.s3_cache/
+*.tar.gz
+*.tar
+*.dsb
+*.lmdb
+data.mdb
+lock.mdb
+
+# ─────────────────────────────────────────────────────────
+# Python build / cache
+# ─────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# ─────────────────────────────────────────────────────────
+# Editor / OS
+# ─────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ─────────────────────────────────────────────────────────
+# Run-time outputs / 临时
+# ─────────────────────────────────────────────────────────
+logs/
+*.log
+tmp/
+output/
+conversion_manifest.json
+quality_report.json
+state.json

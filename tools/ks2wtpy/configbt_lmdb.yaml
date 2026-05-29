@@ -1,0 +1,22 @@
+# LMDB模式回测配置模板
+# 使用WtDataStorageAD模块读取LMDB数据库
+# 数据路径指向ks2wtpy LMDB输出目录
+
+env:
+    mocker: cta
+
+replayer:
+    mode: wtp
+    path: ../storage/ks_converted/lmdb/
+    store:
+        path: ../storage/ks_converted/lmdb/
+        module: WtDataStorageAD
+    basefiles:
+        commodity: ../storage/ks_converted/common/commodities.json
+        contract: ../storage/ks_converted/common/contracts.json
+        holiday: ../storage/ks_converted/common/holidays.json
+        hot: ../storage/ks_converted/common/hots.json
+        session: ../storage/ks_converted/common/sessions.json
+    fees: ../storage/ks_converted/common/fees.json
+    stime: 202101010900
+    etime: 202605011500
