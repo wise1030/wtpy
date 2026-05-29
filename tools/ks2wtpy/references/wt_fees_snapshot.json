@@ -1,0 +1,218 @@
+{
+    "CFFEX.IC": {
+        "byvolume": false,
+        "close": 2.3e-05,
+        "closetoday": 2.3e-05,
+        "open": 2.3e-05
+    },
+    "CFFEX.IF": {
+        "byvolume": false,
+        "close": 2.3e-05,
+        "closetoday": 2.3e-05,
+        "open": 2.3e-05
+    },
+    "CZCE.AP": {
+        "byvolume": true,
+        "close": 0.5,
+        "closetoday": 0.0,
+        "open": 0.5
+    },
+    "CZCE.CF": {
+        "byvolume": true,
+        "close": 4.3,
+        "closetoday": 0.0,
+        "open": 4.3
+    },
+    "CZCE.FG": {
+        "byvolume": true,
+        "close": 3.0,
+        "closetoday": 3.0,
+        "open": 3.0
+    },
+    "CZCE.MA": {
+        "byvolume": true,
+        "close": 1.4,
+        "closetoday": 0,
+        "open": 1.4
+    },
+    "CZCE.OI": {
+        "byvolume": true,
+        "close": 2.0,
+        "closetoday": 0.0,
+        "open": 2.0
+    },
+    "CZCE.RM": {
+        "byvolume": true,
+        "close": 1.5,
+        "closetoday": 0.0,
+        "open": 1.5
+    },
+    "CZCE.SR": {
+        "byvolume": true,
+        "close": 3.0,
+        "closetoday": 0.0,
+        "open": 3.0
+    },
+    "CZCE.TA": {
+        "byvolume": true,
+        "close": 3.0,
+        "closetoday": 3.0,
+        "open": 3.0
+    },
+    "CZCE.ZC": {
+        "byvolume": true,
+        "close": 4.0,
+        "closetoday": 0.0,
+        "open": 4.0
+    },
+    "DCE.a": {
+        "byvolume": true,
+        "close": 2.0,
+        "closetoday": 0.0,
+        "open": 2.0
+    },
+    "DCE.c": {
+        "byvolume": true,
+        "close": 1.2,
+        "closetoday": 0.0,
+        "open": 1.2
+    },
+    "DCE.cs": {
+        "byvolume": true,
+        "close": 1.5,
+        "closetoday": 0.0,
+        "open": 1.5
+    },
+    "DCE.eb": {
+        "byvolume": true,
+        "close": 0.3,
+        "closetoday": 0.3,
+        "open": 0.3
+    },
+    "DCE.eg": {
+        "byvolume": true,
+        "close": 3.0,
+        "closetoday": 0.0,
+        "open": 3.0
+    },
+    "DCE.i": {
+        "byvolume": false,
+        "close": 6e-05,
+        "closetoday": 3e-05,
+        "open": 6e-05
+    },
+    "DCE.j": {
+        "byvolume": false,
+        "close": 6e-05,
+        "closetoday": 3e-05,
+        "open": 6e-05
+    },
+    "DCE.jd": {
+        "byvolume": false,
+        "close": 0.00015,
+        "closetoday": 0.00015,
+        "open": 0.00015
+    },
+    "DCE.l": {
+        "byvolume": true,
+        "close": 2.0,
+        "closetoday": 0.0,
+        "open": 2.0
+    },
+    "DCE.m": {
+        "byvolume": true,
+        "close": 1.5,
+        "closetoday": 0.0,
+        "open": 1.5
+    },
+    "DCE.p": {
+        "byvolume": true,
+        "close": 2.5,
+        "closetoday": 0.0,
+        "open": 2.5
+    },
+    "DCE.pg": {
+        "byvolume": false,
+        "close": 0.0002,
+        "closetoday": 0.0004,
+        "open": 0.0002
+    },
+    "DCE.pp": {
+        "byvolume": false,
+        "close": 5e-05,
+        "closetoday": 2.5e-05,
+        "open": 5e-05
+    },
+    "DCE.v": {
+        "byvolume": true,
+        "close": 1.0,
+        "closetoday": 1.0,
+        "open": 1.0
+    },
+    "DCE.y": {
+        "byvolume": true,
+        "close": 2.5,
+        "closetoday": 0.0,
+        "open": 2.5
+    },
+    "SHFE.ag": {
+        "byvolume": false,
+        "close": 5e-05,
+        "closetoday": 5e-05,
+        "open": 5e-05
+    },
+    "SHFE.al": {
+        "byvolume": true,
+        "close": 3.0,
+        "closetoday": 0.0,
+        "open": 3.0
+    },
+    "SHFE.au": {
+        "byvolume": true,
+        "close": 10.0,
+        "closetoday": 0.0,
+        "open": 10.0
+    },
+    "SHFE.bu": {
+        "byvolume": false,
+        "close": 0.0001,
+        "closetoday": 0.0001,
+        "open": 0.0001
+    },
+    "SHFE.cu": {
+        "byvolume": false,
+        "close": 0.0001,
+        "closetoday": 0.0001,
+        "open": 0.0001
+    },
+    "SHFE.hc": {
+        "byvolume": false,
+        "close": 5e-05,
+        "closetoday": 0.0,
+        "open": 5e-05
+    },
+    "SHFE.ni": {
+        "byvolume": true,
+        "close": 6.0,
+        "closetoday": 6.0,
+        "open": 6.0
+    },
+    "SHFE.rb": {
+        "byvolume": false,
+        "close": 0.0001,
+        "closetoday": 0.0001,
+        "open": 0.0001
+    },
+    "SHFE.ru": {
+        "byvolume": false,
+        "close": 4.5e-05,
+        "closetoday": 4.5e-05,
+        "open": 4.5e-05
+    },
+    "SHFE.sp": {
+        "byvolume": false,
+        "close": 5e-05,
+        "closetoday": 0.0,
+        "open": 5e-05
+    }
+}
