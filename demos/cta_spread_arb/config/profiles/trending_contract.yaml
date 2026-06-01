@@ -1,0 +1,14 @@
+# ============================================================
+# profiles/trending_contract.yaml — 趋势单边市场参数覆盖包
+# 来源: strategy_config.yaml 的 param_profiles.trending_contract (第64-67行)
+# 用途: 应用于强趋势合约 (如 rb/hc 2510 — 2025 全年价差从 -89 单边跌至 -660)
+# 关键: 提高开仓阈值 + 抑制 LONG_SPREAD 方向 (逆势开仓亏损源头)
+# ============================================================
+
+name: trending_contract
+description: "趋势单边市场: 提高入场门槛, 偏向顺势 SHORT_SPREAD"
+
+overrides:
+  signal:
+    entry_threshold: 0.60        # 0.45 → 0.60, 过滤弱信号
+    short_entry_multiplier: 0.7  # 1.0 → 0.7, 提升 SHORT_SPREAD 通过率(顺势)

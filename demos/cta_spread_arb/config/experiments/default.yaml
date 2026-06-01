@@ -1,0 +1,57 @@
+# ============================================================
+# experiments/default.yaml — 默认实验/实例定义 (唯一入口)
+# 来源: strategy_config.yaml 的 strategies[] + param_profile_auto 段
+# 用途: 声明本次回测/实盘的 instances × contracts × profiles 装配关系,
+#       包含 backtest 段(回测区间/资金/滑点)与 auto_profile 全局开关。
+# 说明:
+#   - 每个 instance 通过 contract 引用 contracts/*.yaml 模板
+#   - contract_month 决定 stdCode 中的合约月份后缀
+#   - auto_profile=true 时由 Hurst 自动选 profile, 否则可显式
+#     设置 param_profile: trending_contract | mr_contract
+# ============================================================
+
+name: default
+description: "rb/hc 跨品种套利 - 双合约 auto profile"
+
+backtest:
+  start: 202501200900
+  end: 202510151500
+  capital: 1000000
+  slippage: 0
+
+# auto_profile 全局配置 (从 strategy_config.yaml 的 param_profile_auto 搬入)
+# enable=true 时, 对所有未显式声明 param_profile 的 instance 自动判定 profile.
+# 也可在 instances[].auto_profile=true 单独启用某个 instance 的 auto.
+# Hurst > trend_hurst → trending_contract;  < mr_hurst → mr_contract;  否则 baseline
+auto_profile:
+  enable: true                     # v8.1 启用: 双合约 auto 判定 (rb_hc_2510→trending, rb_hc_2601→mr)
+  trend_hurst: 0.55                # H > 0.55 判定趋势
+  mr_hurst: 0.45                   # H < 0.45 判定均值回归
+  trend_r2: 0.55                   # 线性趋势 R² > 0.55 → trending (绕过 Hurst, 防止单边强趋势被假性低估)
+  lookback_days: 120               # 日线回看根数
+  storage_csv_dir: ./storage/csv
+
+instances:
+  - name: rb_hc_2510_m5
+    contract: rb_hc                # 引用 contracts/rb_hc.yaml
+    contract_month: "2510"         # 填入 legs 的合约月份后缀 → SHFE.rb.2510 / SHFE.hc.2510
+    periods:
+      main_period: m5
+      main_bar_cnt: 200
+      aux_periods:
+        - period: d1
+          bar_cnt: 15
+    signal_mode: adaptive
+    auto_profile: true             # 由 Hurst 决定 profile (预期 → trending_contract)
+
+  - name: rb_hc_2601_m5
+    contract: rb_hc                # 引用 contracts/rb_hc.yaml
+    contract_month: "2601"         # → SHFE.rb.2601 / SHFE.hc.2601
+    periods:
+      main_period: m5
+      main_bar_cnt: 200
+      aux_periods:
+        - period: d1
+          bar_cnt: 15
+    signal_mode: adaptive
+    auto_profile: true             # 由 Hurst 决定 profile (预期 → mr_contract)

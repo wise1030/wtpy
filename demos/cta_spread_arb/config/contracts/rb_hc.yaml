@@ -1,0 +1,31 @@
+# ============================================================
+# contracts/rb_hc.yaml — rb/hc 跨品种套利合约对定义
+# 来源: 由 strategy_config.yaml 中 strategies[].legs 抽象出的合约结构模板
+# 用途: 描述 product_pair = rb_hc 的腿结构与价差模式
+# 说明:
+#   - 具体合约月份 (2510/2601) 不在此处定义, 由 experiments/*.yaml
+#     的 instance.contract_month 注入, 拼接成最终的 stdCode:
+#       SHFE.rb.{month}  和  SHFE.hc.{month}
+#   - legs_template 仅描述腿的对冲方向(ratio)与默认手数/乘数, 真实
+#     合约代码在加载时由代码层根据 contract_month 渲染。
+# ============================================================
+
+product_pair: rb_hc
+type: cross_commodity
+spread_mode: coint
+
+legs_template:
+  # 正腿(rb): 多 rb / 空 rb 由价差方向决定, 这里 ratio=+1
+  - symbol: rb
+    exchange: SHFE
+    stdCode_template: "SHFE.rb.{month}"
+    ratio: 1
+    lots: 1
+    multiplier: 10
+  # 反腿(hc): ratio=-1, 与 rb 形成跨品种对冲
+  - symbol: hc
+    exchange: SHFE
+    stdCode_template: "SHFE.hc.{month}"
+    ratio: -1
+    lots: 1
+    multiplier: 10

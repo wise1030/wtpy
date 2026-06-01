@@ -76,6 +76,116 @@ class SpreadArbStrategy(BaseCtaStrategy):
             for leg in sub.legs:
                 self._code_to_subs.setdefault(leg.code, []).append(sub)
 
+        # P1-e: leg 唯一性校验 — WT stra_set_position 是 code 级覆盖语义,
+        # 同一 stdCode 被多个 sub 操作会导致仓位互相覆盖。
+        # PositionRouter (P3) 上线后此校验可放宽为 "同 code 允许多 sub, 但方向须一致"。
+        self._check_leg_uniqueness()
+
+    @classmethod
+    def from_experiment(cls, name: str, experiment: str = 'default',
+                        config_root: str = './config',
+                        is_backtest: bool = False):
+        """v9 工厂方法: 从分层配置创建策略实例。
+
+        替代 __init__(strategy_config_path, factor_config_path) 的新入口,
+        内部走 ConfigResolver 4级合并, 但装出与 __init__ 等价的实例状态。
+
+        Args:
+            name: 策略实例名 (传给 BaseCtaStrategy)
+            experiment: 实验名 (对应 config/experiments/<name>.yaml)
+            config_root: config/ 目录路径
+            is_backtest: 是否回测模式
+        """
+        from ConfigResolver import ConfigResolver
+        rc = ConfigResolver(config_root).resolve(experiment)
+
+        obj = cls.__new__(cls)
+        BaseCtaStrategy.__init__(obj, name)
+
+        obj._is_backtest = is_backtest
+        obj._cfg_mgr = rc   # ResolvedConfig 鸭子兼容 ConfigManager
+        # v9: factor_config_path 直接指向 base/factors.yaml (FactorEngine 读 yaml)
+        import os as _os
+        obj._factor_config_path = _os.path.join(
+            _os.path.abspath(config_root), 'base', 'factors.yaml')
+        obj._cur_date = 0
+        obj._code_to_subs = {}
+
+        obj._signal_cfg = rc.signal_cfg
+        obj._risk_cfg = rc.risk_cfg
+        obj._regime_cfg = rc.regime_cfg
+        obj._exec_cfg = rc.exec_cfg
+
+        # v8.1 兼容字段 — ResolvedConfig.param_profiles 已加载 profiles/*.yaml
+        obj._param_profiles = rc.param_profiles
+        obj._auto_profile_cfg = rc.auto_profile_cfg
+
+        # 创建子策略 (与 __init__ 同逻辑)
+        obj._subs = []
+        for sub_cfg in rc.strategies:
+            obj._maybe_apply_auto_profile(sub_cfg)
+            sub_config = SubStrategyConfig.from_yaml(sub_cfg)
+            sub_signal_cfg, sub_risk_cfg = obj._resolve_sub_cfg(sub_cfg)
+            sub = SubStrategy(
+                sub_config=sub_config,
+                risk_cfg=sub_risk_cfg,
+                signal_cfg=sub_signal_cfg,
+                adaptive_cfg=obj._regime_cfg,
+                factor_config_path=obj._factor_config_path,
+                exec_cfg=obj._exec_cfg,
+                is_backtest=is_backtest,
+            )
+            obj._subs.append(sub)
+
+            for leg in sub.legs:
+                obj._code_to_subs.setdefault(leg.code, []).append(sub)
+
+        obj._check_leg_uniqueness()
+        return obj
+
+    def _check_leg_uniqueness(self):
+        """P1-e: 校验同一 stdCode 不出现在多个 sub 的 legs 中。
+
+        WT 的 `stra_set_position(stdCode, qty)` 是 code 级覆盖语义,
+        若两个 sub 都把 rb2510 列为腿, A 设置 +2 后 B 设置 -1, rb2510 实际净仓
+        会被覆盖为 -1, A 的开仓意图丢失。
+
+        解决方案 (按阶段):
+          - P1 (当前): 启动时硬拦截, 同 code 不允许多 sub
+          - P3 (PositionRouter): 同 code 允许多 sub, 通过外部账本净额化下单
+
+        若用户确实需要并行多 sub 共享同一 code, 可在 experiment yaml 顶层加
+        `allow_leg_overlap: true` 来 bypass (P3 前不推荐)。
+        """
+        # 检查 ResolvedConfig 是否设了 allow 开关
+        allow = False
+        if hasattr(self._cfg_mgr, 'experiment_meta'):
+            allow = self._cfg_mgr.experiment_meta.get('allow_leg_overlap', False)
+        elif hasattr(self._cfg_mgr, '_strat_cfg'):
+            # v8.1 ConfigManager 兼容: 读 raw dict 顶层
+            allow = self._cfg_mgr._strat_cfg.get('allow_leg_overlap', False)
+
+        if allow:
+            print("[leg_uniqueness] bypass enabled via experiment.allow_leg_overlap=true")
+            return
+
+        violations = []
+        for code, subs in self._code_to_subs.items():
+            if len(subs) > 1:
+                sub_names = [s.name for s in subs]
+                violations.append(f"  - {code}: shared by {sub_names}")
+
+        if violations:
+            raise ValueError(
+                "P1-e leg uniqueness check failed — multiple subs operating same stdCode "
+                "would corrupt positions under WT's code-level set_position semantics.\n"
+                + "\n".join(violations) +
+                "\n\nFix options:\n"
+                "  1) Use distinct contract months for parallel subs (recommended)\n"
+                "  2) Wait for P3 PositionRouter (账本化下单)\n"
+                "  3) Set `allow_leg_overlap: true` in experiment yaml (UNSAFE, P1)"
+            )
+
     def _maybe_apply_auto_profile(self, sub_cfg: dict):
         """v8.1: 若 sub 启用 auto_profile, 用历史 d1 价差 Hurst 自动判定 profile.
 

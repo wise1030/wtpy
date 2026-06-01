@@ -1,0 +1,15 @@
+# ============================================================
+# profiles/mr_contract.yaml — 均值回归市场参数覆盖包
+# 来源: strategy_config.yaml 的 param_profiles.mr_contract (第71-74行)
+# 用途: 应用于均值回归特征显著的合约月 (rb/hc 价差有显著回归)
+# 关键: 与 trending_contract 对偶 — 降低 entry_threshold 多捕捉机会,
+#       保持 SHORT 中性
+# ============================================================
+
+name: mr_contract
+description: "均值回归市场: 降低入场门槛, 多捕捉回归机会"
+
+overrides:
+  signal:
+    entry_threshold: 0.40        # 0.45 → 0.40, 多捕捉回归机会
+    short_entry_multiplier: 1.0  # 保持中性
