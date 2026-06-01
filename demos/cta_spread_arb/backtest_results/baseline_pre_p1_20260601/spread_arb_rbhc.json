@@ -1,0 +1,79 @@
+{
+    "positions": [
+        {
+            "code": "SHFE.rb.2510",
+            "volume": 0.0,
+            "closeprofit": -190.0,
+            "dynprofit": 0.0,
+            "lastentertime": 202510151115,
+            "lastexittime": 202510151120,
+            "details": []
+        },
+        {
+            "code": "SHFE.hc.2510",
+            "volume": 0.0,
+            "closeprofit": 80.0,
+            "dynprofit": 0.0,
+            "lastentertime": 202510151115,
+            "lastexittime": 202510151120,
+            "details": []
+        },
+        {
+            "code": "SHFE.rb.2601",
+            "volume": -1.0,
+            "closeprofit": 3410.0,
+            "dynprofit": 100.0,
+            "lastentertime": 202510151110,
+            "lastexittime": 202510151100,
+            "details": [
+                {
+                    "long": false,
+                    "price": 3044.0,
+                    "maxprice": 3044.0,
+                    "minprice": 3027.0,
+                    "volume": 1.0,
+                    "opentime": 202510151110,
+                    "opentdate": 20251015,
+                    "profit": 100.0,
+                    "maxprofit": 170.0,
+                    "maxloss": 0.0,
+                    "opentag": "Open_rb_hc_2601_m5_SHFE.rb.2601"
+                }
+            ]
+        },
+        {
+            "code": "SHFE.hc.2601",
+            "volume": 1.0,
+            "closeprofit": 2320.0,
+            "dynprofit": -80.0,
+            "lastentertime": 202510151110,
+            "lastexittime": 202510151100,
+            "details": [
+                {
+                    "long": true,
+                    "price": 3220.0,
+                    "maxprice": 3221.0,
+                    "minprice": 3206.0,
+                    "volume": 1.0,
+                    "opentime": 202510151110,
+                    "opentdate": 20251015,
+                    "profit": -80.0,
+                    "maxprofit": 10.0,
+                    "maxloss": -140.0,
+                    "opentag": "Open_rb_hc_2601_m5_SHFE.hc.2601"
+                }
+            ]
+        }
+    ],
+    "fund": {
+        "total_profit": 5620.0,
+        "total_dynprofit": 20.0,
+        "total_fees": 4637.74999999999,
+        "tdate": 20251015
+    },
+    "signals": {},
+    "conditions": {
+        "settime": 202510151455,
+        "items": {}
+    }
+}

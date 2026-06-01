@@ -1,0 +1,28 @@
+# 套利策略执行器配置
+executers:
+-   active: true
+    id: exec
+    trader: simnow
+    scale: 1
+    local: true
+    strict_sync: false
+
+    policy:
+        default:
+            name: WtExeFact.WtMinImpactExeUnit
+            offset: 0
+            expire: 5
+            pricemode: 1
+            span: 500
+            byrate: false
+            lots: 1
+            rate: 0
+
+    clear:
+        active: false
+        excludes:
+        - CFFEX.IF
+        - CFFEX.IC
+        includes:
+        - SHFE.rb
+        - DCE.i

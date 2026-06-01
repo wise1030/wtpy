@@ -1,0 +1,12 @@
+# 行情源配置 - 使用SimNow 7x24环境CTP行情
+# 使用做市项目验证过的行情前置(30011端口)
+parsers:
+-   active: true
+    id: parser1
+    module: ParserCTP
+    front: tcp://182.254.243.31:30011
+    broker: '9999'
+    appid: simnow_client_test
+    authcode: '0000000000000000'
+    user: "048363"
+    pass: "clx@#10300"

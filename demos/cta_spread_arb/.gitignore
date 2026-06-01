@@ -1,0 +1,53 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# ── WT 运行时产物 ─────────────────────────────────────────
+BtLogs/
+logs/
+Logs/
+outputs_bt/
+CTPMDFlow/
+CTPTDFlow/
+*.db
+*.dmp
+
+# ── 优化 / 实验产物 ──────────────────────────────────────
+_opt_results/
+_opt_tmp_*/
+_scan_results/
+_trash/
+generated/
+grid_progress.txt
+grid_search_results.json
+opt_results*.json
+_result.json
+_runner.py
+_test_fixes.py
+test_*.py
+test_*.txt
+
+# ── 历史 PnL 报表（per-run，外部分析用，不入 git） ────────────
+Strategy[*]_PnLAnalyzing_*.xlsx
+*.xlsx
+
+# ── 数据 storage (DSB / CSV，本地共享 ../common 数据) ─────────
+storage/
+
+# ── Baseline indice.csv 太大不入 git ────────────────────────
+backtest_results/**/indice.csv
+
+# ── 编辑器 / 系统 ───────────────────────────────────────
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~
+
+# ── 凭据 ───────────────────────────────────────────────
+credentials.json
+.env
+.env.local

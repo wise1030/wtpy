@@ -1,0 +1,37 @@
+basefiles:
+    commodity: ../common/commodities.json
+    contract: ../common/contracts.json
+    holiday: ../common/holidays.json
+    hot: ../common/hots.json
+    session: ../common/sessions.json
+data:
+    store:
+        module: WtDataStorage
+        path: ../storage/
+env:
+    name: cta
+    fees: ../common/fees.json
+    filters: filters.yaml
+    product:
+        session: TRADING
+    riskmon:
+        active: true
+        module: WtRiskMonFact
+        name: SimpleRiskMon
+        base_amount: 5000000
+        basic_ratio: 101
+        calc_span: 5
+        inner_day_active: true
+        inner_day_fd: 20.0
+        multi_day_active: false
+        multi_day_fd: 60.0
+        risk_scale: 0.3
+        risk_span: 30
+executers: executers.yaml
+parsers: tdparsers.yaml
+traders: tdtraders.yaml
+bspolicy: actpolicy.yaml
+
+notifier:
+    active: true
+    url: ipc:///wtpy/wt_cat_arb.ipc

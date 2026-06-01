@@ -1,0 +1,8 @@
+{
+    "rb_hc_2510_m5_direction": "0",
+    "rb_hc_2510_m5_risk_state": "{\"hold_bars\": 0, \"cooldown\": 4, \"realized_pnl\": 30.0, \"closing\": false}",
+    "rb_hc_2510_m5_last_signal_time": "202510151455",
+    "rb_hc_2601_m5_direction": "-1",
+    "rb_hc_2601_m5_risk_state": "{\"hold_bars\": 22, \"cooldown\": 0, \"realized_pnl\": 5990.0, \"closing\": false}",
+    "rb_hc_2601_m5_last_signal_time": "202510151455"
+}

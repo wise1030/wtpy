@@ -1,0 +1,120 @@
+{
+    "kline": {
+        "code": "SHFE.rb.2601",
+        "period": "m5"
+    },
+    "index": [
+        {
+            "name": "Factors_rb_hc_2601_m5",
+            "index_type": 1,
+            "lines": [
+                {
+                    "name": "spread_momentum",
+                    "line_type": 0
+                },
+                {
+                    "name": "half_life",
+                    "line_type": 0
+                },
+                {
+                    "name": "coint_residual",
+                    "line_type": 0
+                }
+            ],
+            "baselines": {}
+        },
+        {
+            "name": "Spread_rb_hc_2601_m5",
+            "index_type": 1,
+            "lines": [
+                {
+                    "name": "regime_conf",
+                    "line_type": 0
+                },
+                {
+                    "name": "regime_dir",
+                    "line_type": 1
+                },
+                {
+                    "name": "regime_val",
+                    "line_type": 1
+                },
+                {
+                    "name": "signal",
+                    "line_type": 1
+                },
+                {
+                    "name": "lower",
+                    "line_type": 0
+                },
+                {
+                    "name": "upper",
+                    "line_type": 0
+                },
+                {
+                    "name": "spread",
+                    "line_type": 0
+                }
+            ],
+            "baselines": {
+                "signal": 0.0
+            }
+        },
+        {
+            "name": "Factors_rb_hc_2510_m5",
+            "index_type": 1,
+            "lines": [
+                {
+                    "name": "spread_momentum",
+                    "line_type": 0
+                },
+                {
+                    "name": "half_life",
+                    "line_type": 0
+                },
+                {
+                    "name": "coint_residual",
+                    "line_type": 0
+                }
+            ],
+            "baselines": {}
+        },
+        {
+            "name": "Spread_rb_hc_2510_m5",
+            "index_type": 1,
+            "lines": [
+                {
+                    "name": "regime_conf",
+                    "line_type": 0
+                },
+                {
+                    "name": "regime_dir",
+                    "line_type": 1
+                },
+                {
+                    "name": "regime_val",
+                    "line_type": 1
+                },
+                {
+                    "name": "signal",
+                    "line_type": 1
+                },
+                {
+                    "name": "lower",
+                    "line_type": 0
+                },
+                {
+                    "name": "upper",
+                    "line_type": 0
+                },
+                {
+                    "name": "spread",
+                    "line_type": 0
+                }
+            ],
+            "baselines": {
+                "signal": 0.0
+            }
+        }
+    ]
+}
