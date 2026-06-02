@@ -5,7 +5,7 @@ types.py — 统一数据结构定义
 新增字段只需修改此处，下游自动适配。
 """
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 import numpy as np
 
 
@@ -18,7 +18,7 @@ class BarData:
     """DataPipe输出 — K线数据+价差+趋势"""
     prices: Dict[str, np.ndarray]       # code -> closes数组
     volumes: Dict[str, np.ndarray]      # code -> volumes数组
-    aux_bars: dict                       # key -> HbData
+    aux_bars: Dict[str, object]          # key -> HbData
     spread: np.ndarray                   # 当前价差序列
     spread_trend_filter: int = 0         # 日线趋势方向(1/-1/0)
     beta: Optional[float] = None         # 协整beta(非coint模式为None)
@@ -277,7 +277,7 @@ class ArbCoreConfig:
     legs: List[LegConfig]
     main_period: str
     main_bar_cnt: int
-    aux_periods: list
+    aux_periods: List[Dict[str, Any]]
     signal_mode: str = 'adaptive'
     spread_mode: str = 'coint'
     type: str = 'cross_commodity'
