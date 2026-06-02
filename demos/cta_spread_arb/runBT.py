@@ -72,17 +72,19 @@ if __name__ == "__main__":
 
     # === 创建策略实例 ===
     if use_legacy:
+        stra_name = 'spread_arb_rbhc'
         stra_cfg = args.config or os.path.join(config_dir, 'strategy_config.yaml')
         fact_cfg = args.factor_config or os.path.join(config_dir, 'factor_config.yaml')
         straInfo = SpreadArbStrategy(
-            name='spread_arb_rbhc',
+            name=stra_name,
             strategy_config_path=stra_cfg,
             factor_config_path=fact_cfg,
             is_backtest=True
         )
     else:
+        stra_name = f'spread_arb_{args.experiment}'
         straInfo = SpreadArbStrategy.from_experiment(
-            name='spread_arb_rbhc',
+            name=stra_name,
             experiment=args.experiment,
             config_root=config_dir,
             is_backtest=True,
@@ -92,7 +94,7 @@ if __name__ == "__main__":
     engine.run_backtest(bAsync=False)
 
     analyst = WtBtAnalyst()
-    analyst.add_strategy("spread_arb_rbhc", folder="./outputs_bt/",
+    analyst.add_strategy(stra_name, folder="./outputs_bt/",
                          init_capital=args.capital, rf=0.02, annual_trading_days=240)
     analyst.run_new()
 
