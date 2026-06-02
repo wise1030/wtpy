@@ -194,6 +194,22 @@ class ArbCore:
 
         self._last_coint_p = factor_signal.coint_p
 
+        # 因子异常诊断: 记录失败因子
+        if factor_signal.failed_factors:
+            for fname in factor_signal.failed_factors:
+                self._diag.factor(
+                    factor_name=fname, event='calc_failed',
+                    detail=f'coint_p={factor_signal.coint_p:.4f}',
+                    pair=self.name)
+
+        # 协整退化诊断: coint_p超出安全阈值且有持仓
+        coint_force_p = self._risk_cfg.coint_force_exit_p
+        if factor_signal.coint_p >= coint_force_p and self.eh.direction != 0:
+            self._diag.factor(
+                factor_name='coint_residual', event='degraded',
+                detail=f'coint_p={factor_signal.coint_p:.4f} >= force_exit_p={coint_force_p}',
+                pair=self.name)
+
         # === SignalGen ===
         current_direction = self.eh.direction
         actual_direction = self.eh.infer_direction(context)

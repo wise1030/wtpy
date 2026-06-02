@@ -83,21 +83,7 @@ class SignalResult:
     trend_blocked: bool = False          # 是否被趋势过滤衰减
     pnl_trailing_exit: bool = False     # v7: 是否由浮盈追踪止盈触发
 
-    def _asdict(self) -> dict:
-        """[DEPRECATED] 兼容旧接口 — 已不再使用，ArbExecHelper直接接收SignalResult对象"""
-        import warnings
-        warnings.warn("SignalResult._asdict() is deprecated, pass SignalResult directly",
-                       DeprecationWarning, stacklevel=2)
-        return {
-            'entry_signal': self.entry_signal,
-            'direction': self.direction,
-            'should_trade': self.should_trade,
-            'should_exit': self.should_exit,
-            'should_reverse': self.should_reverse,
-            'regime': self.regime,
-            'regime_confidence': self.regime_confidence,
-            'regime_direction': self.regime_direction,
-        }
+
 
 
 # ============================================================
@@ -312,14 +298,7 @@ class ArbCoreConfig:
             type=sub_cfg.get('type', 'cross_commodity'),
         )
 
-    def to_leg_dicts(self) -> list:
-        """[DEPRECATED] 兼容旧接口"""
-        import warnings
-        warnings.warn("ArbCoreConfig.to_leg_dicts() is deprecated, use legs directly",
-                       DeprecationWarning, stacklevel=2)
-        return [{'code': l.code, 'lots': l.lots,
-                 'multiplier': l.multiplier, 'ratio': l.ratio}
-                for l in self.legs]
+
 
 
 @dataclass
