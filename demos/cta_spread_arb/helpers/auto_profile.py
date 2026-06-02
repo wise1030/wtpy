@@ -186,3 +186,28 @@ def auto_select_for_legs(legs: list, storage_csv_dir: str,
     info = (f'spread_len={len(spread)}, hurst={h:.3f}, r2={r2:.3f}, slope_norm={slope:.3f}, '
             f'thr=[mr<{mr_threshold},trend_h>{trend_threshold},trend_r2>{trend_r2_threshold}]')
     return profile, h, info
+
+
+def auto_select_from_spread(spread: List[float],
+                             trend_threshold: float = 0.55,
+                             mr_threshold: float = 0.45,
+                             lookback: int = 120,
+                             trend_r2_threshold: float = 0.55) -> Tuple[Optional[str], float, str]:
+    """实盘模式: 直接从价差序列计算 profile (无需CSV文件).
+
+    适用于 ArbCore 在 on_calculate 中增量重算 profile 的场景。
+    spread 应为日线价差序列(由 DataPipe 或 ArbCore 维护)。
+
+    Returns:
+        (profile_name, hurst, info_msg)
+    """
+    if not spread or len(spread) < 30:
+        return None, 0.5, f'spread数据不足({len(spread)}bars), 跳过auto_profile'
+    ts = spread[-lookback:] if len(spread) > lookback else spread
+    h = calc_hurst(ts)
+    r2, slope = calc_trend_r2(ts)
+    profile, _ = select_profile_by_hurst(spread, trend_threshold, mr_threshold,
+                                         lookback, trend_r2_threshold)
+    info = (f'spread_len={len(spread)}, hurst={h:.3f}, r2={r2:.3f}, slope_norm={slope:.3f}, '
+            f'thr=[mr<{mr_threshold},trend_h>{trend_threshold},trend_r2>{trend_r2_threshold}]')
+    return profile, h, info

@@ -53,6 +53,9 @@ class ArbCore:
         self._exec_cfg = exec_cfg or ExecConfig()
         self._is_backtest = is_backtest
         self._last_coint_p = 1.0  # 缓存上一bar的coint_p
+        self._current_profile = None  # 当前生效的param_profile名
+        self._daily_spread_history = []  # 实盘增量: 日线价差序列
+        self._last_profile_recheck_date = 0  # 上次重算profile的日期
 
         # === 创建组件 ===
         self.fe = FactorEngine(factor_config_path, signal_cfg=signal_cfg,
@@ -148,6 +151,7 @@ class ArbCore:
     def process(self, context, cur_date: int):
         """主入口: sync → compute → execute → persist"""
         self.sync_state(context)
+        self._recheck_profile(context, cur_date)
         decision = self.compute_decision(context, cur_date)
         if decision is None:
             return
@@ -171,6 +175,49 @@ class ArbCore:
 
         # 状态机推进(统一在process中执行)
         self.eh.on_tick_check(context, self._config)
+
+    def _recheck_profile(self, context, cur_date: int):
+        """实盘模式: 每隔N天用累积日线价差重算 auto_profile.
+
+        仅在非回测模式且有 auto_profile 配置时生效。
+        回测模式在 __init__ 时一次性确定, 不动态调整。
+        """
+        if self._is_backtest:
+            return
+        if not self._current_profile and not hasattr(self, '_auto_profile_cfg'):
+            return
+
+        # 累积日线价差 (取当日最新spread值)
+        if hasattr(self.dp, 'spread') and self.dp.spread is not None and len(self.dp.spread) > 0:
+            latest_spread = float(self.dp.spread[-1])
+            # 每日只追加一次(以cur_date变化为判据)
+            if cur_date != self._last_profile_recheck_date:
+                self._daily_spread_history.append(latest_spread)
+                # 保留最近250天
+                if len(self._daily_spread_history) > 250:
+                    self._daily_spread_history = self._daily_spread_history[-250:]
+                self._last_profile_recheck_date = cur_date
+
+        # 每10个交易日重算一次
+        if len(self._daily_spread_history) < 60:
+            return
+        if cur_date - self._last_profile_recheck_date > 0:
+            return  # 同一bar不重算
+
+        from auto_profile import auto_select_from_spread
+        profile, hurst, info = auto_select_from_spread(self._daily_spread_history)
+
+        if profile != self._current_profile:
+            old_profile = self._current_profile
+            self._current_profile = profile
+            context.stra_log_text(
+                f'[auto_profile] {self.name}: profile changed '
+                f'{old_profile} → {profile} ({info})')
+            # 动态调整信号参数(仅调整entry_threshold)
+            if profile == 'trending_contract':
+                self.sg.entry_threshold = min(self.sg.entry_threshold * 1.2, 0.8)
+            elif profile == 'mr_contract':
+                self.sg.entry_threshold = max(self.sg.entry_threshold * 0.8, 0.3)
 
     def compute_decision(self, context, cur_date: int):
         """计算本bar的决策对象"""
