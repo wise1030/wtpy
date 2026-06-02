@@ -30,6 +30,8 @@ def parse_args():
                         help='回测结束 YYYYMMDDHHMM (留空则读 experiment yaml)')
     parser.add_argument('--capital', type=float, default=500000, help='初始资金')
     parser.add_argument('--slippage', type=int, default=0, help='滑点')
+    parser.add_argument('--config-root', type=str, default=None,
+                        help='[v9] config目录路径；默认使用项目根 config/。grid回测用隔离配置目录')
     return parser.parse_args()
 
 
@@ -37,7 +39,7 @@ if __name__ == "__main__":
     args = parse_args()
 
     # === 决定配置加载方式 ===
-    config_dir = os.path.join(_PROJECT_ROOT, 'config')
+    config_dir = os.path.abspath(args.config_root) if args.config_root else os.path.join(_PROJECT_ROOT, 'config')
     use_legacy = args.config is not None  # 显式提供 --config → v8.1 老路径
 
     # === 回测时段 + capital + slippage: CLI > experiment yaml > 默认 ===

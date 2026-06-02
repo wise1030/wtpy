@@ -1,6 +1,6 @@
 """RegimeDispatchStep — Step 1: Regime信号分派(v4)
 
-v4: 不再内部检测regime。regime由外部(SubStrategy)前置检测并注入SignalContext。
+v4: 不再内部检测regime。regime由外部(ArbCore)前置检测并注入SignalContext。
 P0-2修复: 不再做trend_aligned_boost/trend_counter_decay/range_signal_decay调整。
 信号调整统一由FactorEngine.apply_regime_weights()处理，避免双重调整。
 本Step只负责:

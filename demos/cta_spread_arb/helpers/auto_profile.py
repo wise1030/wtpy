@@ -156,7 +156,7 @@ def auto_select_for_legs(legs: list, storage_csv_dir: str,
     """根据 sub 的 legs 配置, 读取 d1 CSV 数据计算价差 Hurst+R², 返回 profile.
 
     Args:
-        legs: SubStrategyConfig.legs (LegConfig list, 至少 2 条)
+        legs: ArbCoreConfig.legs (LegConfig list, 至少 2 条)
         storage_csv_dir: storage/csv/ 路径
         trend/mr_threshold: Hurst 阈值
         lookback: 回看根数

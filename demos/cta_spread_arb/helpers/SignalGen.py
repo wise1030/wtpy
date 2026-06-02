@@ -1,7 +1,7 @@
 """
 SignalGen — 信号生成器(v4)
 
-v4: regime检测从Pipeline中解耦，由SubStrategy前置调用。
+v4: regime检测从Pipeline中解耦，由ArbCore前置调用。
 Pipeline只负责信号处理(权重调整+持续性+出场)，不再检测regime。
 SignalGen新增detect_regime()和generate_with_regime()方法。
 

@@ -2,7 +2,7 @@
 
 组合多个Step，顺序执行。
 
-v4: regime检测由外部(SubStrategy)前置完成，通过regime_dict传入。
+v4: regime检测由外部(ArbCore)前置完成，通过regime_dict传入。
 RegimeDispatchStep不再内部调用RegimeDetector，直接使用传入的regime。
 """
 import numpy as np

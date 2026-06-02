@@ -248,7 +248,7 @@ class FactorEngine:
     def apply_regime_weights(self, regime: str):
         """根据regime动态调整因子权重(仅adaptive模式有效)
         
-        由SubStrategy在每次process前调用。
+        由ArbCore在每次process前调用。
         根据当前regime(trend/mr/range)调整:
         - momentum因子: trend↑, mr↓, range↓↓
         - reversal因子: trend↓, mr↑, range↓↓
@@ -320,7 +320,7 @@ class FactorEngine:
 
         # v8.1: direction 简化为 sign(total_score)。
         # 历史 direction_threshold 参数已废除——下游 ctx.factor_direction 实际从未被
-        # 任何 SignalPipeline 步骤读取（仅 SubStrategy DiagLogger 用 signal.direction，
+        # 任何 SignalPipeline 步骤读取（仅 ArbCore DiagLogger 用 signal.direction，
         # 那是 SignalGen 输出的 sign(entry_signal)，与本字段无关）。
         # 保留 direction 字段仅为 FactorOutput schema 完整性。
         direction = 1 if total_score > 0 else (-1 if total_score < 0 else 0)

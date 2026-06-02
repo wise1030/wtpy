@@ -254,11 +254,11 @@ class ExecConfig:
     
     P1-2: 将ArbExecHelper硬编码参数配置化
     """
-    leg_timeout: int = 5           # P1-3修复: 单腿超时(秒/回测tick数)，默认5bar(原30bar=150分钟过长)
+    leg_timeout: int = 5           # 单腿超时(秒/回测tick数)
     max_retry: int = 3             # 最大追单次数
     bollinger_lookback: int = 60   # DataPipe布林带回看窗口
     bollinger_threshold: float = 2.0  # DataPipe布林带倍数
-    min_bar_length: int = 20       # DataPipe最小K线长度(与因子lookback对齐)
+    min_bar_length: int = 20       # DataPipe最小K线长度
 
     @classmethod
     def from_yaml(cls, exec_cfg: dict) -> 'ExecConfig':
@@ -282,8 +282,11 @@ class LegConfig:
 
 
 @dataclass
-class SubStrategyConfig:
-    """子策略完整配置"""
+class ArbCoreConfig:
+    """套利核心配置 — 单品种组合完整配置
+    
+    v10: 从SubStrategyConfig重命名, 去除多sub概念
+    """
     name: str
     legs: List[LegConfig]
     main_period: str
@@ -294,7 +297,7 @@ class SubStrategyConfig:
     type: str = 'cross_commodity'
 
     @classmethod
-    def from_yaml(cls, sub_cfg: dict) -> 'SubStrategyConfig':
+    def from_yaml(cls, sub_cfg: dict) -> 'ArbCoreConfig':
         """从YAML配置dict创建"""
         legs = [LegConfig(**leg) for leg in sub_cfg['legs']]
         periods = sub_cfg.get('periods', {})
@@ -310,9 +313,9 @@ class SubStrategyConfig:
         )
 
     def to_leg_dicts(self) -> list:
-        """[DEPRECATED] 兼容旧接口 — 已不再使用，组件直接接收LegConfig对象"""
+        """[DEPRECATED] 兼容旧接口"""
         import warnings
-        warnings.warn("SubStrategyConfig.to_leg_dicts() is deprecated, use legs directly",
+        warnings.warn("ArbCoreConfig.to_leg_dicts() is deprecated, use legs directly",
                        DeprecationWarning, stacklevel=2)
         return [{'code': l.code, 'lots': l.lots,
                  'multiplier': l.multiplier, 'ratio': l.ratio}
@@ -322,7 +325,7 @@ class SubStrategyConfig:
 @dataclass
 class RiskContext:
     """风控检查上下文 — RiskMgr.check()的参数打包"""
-    sub_config: SubStrategyConfig
+    sub_config: ArbCoreConfig
     spread: np.ndarray
     spread_calc: object  # SpreadCalculator
     positions: Dict[str, int]

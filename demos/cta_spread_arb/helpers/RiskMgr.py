@@ -111,7 +111,7 @@ class RiskMgr:
 
         Args:
             context: CtaContext
-            sub_config: SubStrategyConfig — 结构化子策略配置
+            sub_config: ArbCoreConfig — 结构化核心配置
             spread: 价差序列
             spread_calc: SpreadCalculator实例
             coint_p: 协整p值(供coint_quality规则使用)

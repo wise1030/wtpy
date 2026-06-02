@@ -8,9 +8,9 @@ DataPipe — 数据获取与价差计算模块
 4. 返回结构化BarData供下游使用
 
 优化:
-- min_len硬编码30→从SubStrategyConfig.min_bar_length读取(默认20)
+- min_len硬编码30→从ArbCoreConfig.min_bar_length读取(默认20)
 - update_bands冗余调用清理: 只在fetch()末尾调用一次
-- bollinger参数(lookback/threshold)从SubStrategyConfig读取
+- bollinger参数(lookback/threshold)从ArbCoreConfig读取
 """
 import numpy as np
 from schemas import BarData
@@ -26,7 +26,7 @@ class DataPipe:
     def __init__(self, sub_config, spread_calc, factor_engine=None, exec_cfg=None):
         """
         Args:
-            sub_config: SubStrategyConfig — 结构化子策略配置
+            sub_config: ArbCoreConfig — 结构化核心配置
             spread_calc: SpreadCalculator实例
             factor_engine: FactorEngine实例(coint模式需要)
             exec_cfg: ExecConfig — 执行参数配置(P1-2)

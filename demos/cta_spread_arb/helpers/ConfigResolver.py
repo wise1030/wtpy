@@ -27,7 +27,7 @@ import os
 import copy
 import yaml
 from typing import Dict, List, Optional, Any
-from schemas import SignalConfig, RiskConfig, RegimeConfig, ExecConfig
+from schemas import SignalConfig, RiskConfig, RegimeConfig, ExecConfig, ArbCoreConfig
 
 
 # ============================================================
@@ -296,7 +296,7 @@ class ConfigResolver:
 
         # === instance 级展开 + profile 应用 ===
         # 注意: profile 的 signal overrides 只影响该 instance 的运行时参数,
-        # 但 v8.1 把 param_profiles 放在全局, 由 SubStrategy.__init__ 时按 name 查找应用.
+        # 但 v8.1 把 param_profiles 放在全局, 由 ArbCore.__init__ 时按 name 查找应用.
         # 这里我们保留 v8.1 行为, 把 profiles 装回 strategies[] 兼容字段.
         param_profiles_compat = self._build_profiles_compat(auto_profile_global, instances)
 
@@ -307,7 +307,8 @@ class ConfigResolver:
         signal_dict = base['signal']
         risk_dict = base['risk_control']
         regime_dict = base['regime']
-        exec_dict = base['execution']
+        # C3: experiment 级 execution overrides 支持(用于 router on/off 等开关).
+        exec_dict = deep_merge(base['execution'], exp.get('execution', {}) or {})
 
         # === auto_profile 全局段写入 strategies 同级, 兼容 v8.1 ConfigManager 读取 ===
         # v8.1 helpers/auto_profile.py 读的是 strat_cfg['param_profile_auto'] 和

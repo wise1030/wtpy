@@ -11,7 +11,7 @@ ConfigManager — 统一配置管理
 """
 import yaml
 import os
-from schemas import SignalConfig, RiskConfig, RegimeConfig, ExecConfig
+from schemas import SignalConfig, RiskConfig, RegimeConfig, ExecConfig, ArbCoreConfig
 
 
 class ConfigManager:
