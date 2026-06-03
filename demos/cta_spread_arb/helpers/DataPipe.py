@@ -45,6 +45,36 @@ class DataPipe:
             self._bollinger_threshold = getattr(sub_config, 'bollinger_threshold', 2.0)
             self._min_bar_length = getattr(sub_config, 'min_bar_length', 20)
 
+        # P4-3: K线缓存。DataPipe在同一bar内会多次访问相同 code/period/count，
+        # 用当前bar签名(date+time)+请求签名做保守缓存；bar切换或手动reset时刷新。
+        self._bar_cache = {}
+        self._bar_cache_bar_key = None
+
+    def _bar_cache_key(self, context, cur_date):
+        """生成当前bar缓存签名；优先使用交易日+HHMM时间，避免日内复用旧K线。"""
+        get_time = getattr(context, 'stra_get_time', None)
+        if callable(get_time):
+            return (cur_date, get_time())
+        return cur_date
+
+    def _get_bars_cached(self, context, code, period, count, cur_date, is_main=False):
+        """获取K线并按当前bar签名+请求签名缓存。"""
+        bar_key = self._bar_cache_key(context, cur_date)
+        if self._bar_cache_bar_key != bar_key:
+            self.reset_bar_cache()
+            self._bar_cache_bar_key = bar_key
+
+        key = (code, period, count, is_main)
+        if key not in self._bar_cache:
+            self._bar_cache[key] = context.stra_get_bars(
+                code, period, count, isMain=is_main)
+        return self._bar_cache[key]
+
+    def reset_bar_cache(self):
+        """清空K线缓存，供session切换/测试/外部强制刷新调用。"""
+        self._bar_cache.clear()
+        self._bar_cache_bar_key = None
+
     def fetch(self, context, cur_date: int) -> BarData:
         """
         获取并预处理数据
@@ -58,9 +88,9 @@ class DataPipe:
         # 1. 获取主周期K线
         bars_data = {}
         for leg in sub.legs:
-            bars = context.stra_get_bars(
-                leg.code, sub.main_period,
-                sub.main_bar_cnt, isMain=False)
+            bars = self._get_bars_cached(
+                context, leg.code, sub.main_period,
+                sub.main_bar_cnt, cur_date, is_main=False)
             if bars is None or len(bars) == 0:
                 context.stra_log_text(
                     f"{sub_name} no bars for {leg.code}@{sub.main_period}, "
@@ -72,9 +102,9 @@ class DataPipe:
         aux_bars = {}
         for aux in sub.aux_periods:
             for leg in sub.legs:
-                bars = context.stra_get_bars(
-                    leg.code, aux['period'],
-                    aux['bar_cnt'], isMain=False)
+                bars = self._get_bars_cached(
+                    context, leg.code, aux['period'],
+                    aux['bar_cnt'], cur_date, is_main=False)
                 if bars is not None and len(bars) > 0:
                     key = f"{leg.code}#{aux['period']}"
                     aux_bars[key] = bars

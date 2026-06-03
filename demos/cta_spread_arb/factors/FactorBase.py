@@ -1,3 +1,4 @@
+import bisect
 import numpy as np
 from collections import deque
 
@@ -36,6 +37,7 @@ class FactorBase:
         # rank标准化: 滚动窗口存储raw_value
         rank_window = params.get('rank_window', 200)
         self._rank_window = deque(maxlen=rank_window)
+        self._rank_sorted = []
         self._use_rank = params.get('use_rank', True)
 
     @property
@@ -64,26 +66,35 @@ class FactorBase:
         """
         if self._use_rank and len(self._rank_window) >= 20:
             return self._rank_normalize(raw_value)
-        else:
-            # fallback: clip归一化
-            clipped = np.clip(raw_value, -clip_val, clip_val)
-            return float(clipped / clip_val)
+
+        # fallback: clip归一化。保持旧语义: fallback阶段不预热rank窗口，
+        # 避免性能优化改变策略信号分布。
+        clipped = np.clip(raw_value, -clip_val, clip_val)
+        return float(clipped / clip_val)
+
+    def _append_rank_value(self, raw_value: float):
+        """维护原始顺序窗口和排序窗口。"""
+        if self._rank_window.maxlen is not None and len(self._rank_window) == self._rank_window.maxlen:
+            oldest = self._rank_window[0]
+            idx = bisect.bisect_left(self._rank_sorted, oldest)
+            if idx < len(self._rank_sorted) and self._rank_sorted[idx] == oldest:
+                self._rank_sorted.pop(idx)
+
+        self._rank_window.append(raw_value)
+        bisect.insort(self._rank_sorted, raw_value)
 
     def _rank_normalize(self, raw_value: float) -> float:
         """
-        排名百分位标准化 — O(log n) bisect实现
+        排名百分位标准化 — 维护有序窗口，避免每bar重新sorted()
         
         当前raw_value在历史窗口中的排名 → 映射到[-1, 1]
         排名最高(最大) → +1, 排名最低(最小) → -1, 中位数 → 0
         """
-        self._rank_window.append(raw_value)
-        window = list(self._rank_window)
-        n = len(window)
-        
-        # O(n log n)排序一次, O(log n)二分查找排名
-        sorted_vals = sorted(window)
-        import bisect
-        rank = bisect.bisect_right(sorted_vals, raw_value)
+        n = len(self._rank_sorted)
+        if n == 0:
+            return 0.0
+
+        rank = bisect.bisect_right(self._rank_sorted, raw_value)
         
         # 映射到[-1, 1]: rank/n → percentile → [-1, 1]
         percentile = rank / n
@@ -93,3 +104,4 @@ class FactorBase:
     def reset_rank_window(self):
         """重置排名窗口，供on_session_begin调用"""
         self._rank_window.clear()
+        self._rank_sorted.clear()

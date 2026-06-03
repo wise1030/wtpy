@@ -84,6 +84,16 @@ class RegimeDetector:
         self._regime_history = []
         self._last_regime = 'range'
         self._last_direction = 0
+        # Hurst/ADF缓存: 统计量变化慢, detect仍每bar执行投票和平滑
+        # 默认 cache_every=1 (每bar重算), 保证回测基线等价;
+        # 用户显式配置 >1 时才启用缓存以换取性能。
+        self._hurst_cache_every = max(1, int(p.get('hurst_cache_every', 1)))
+        self._adf_cache_every = max(1, int(p.get('adf_cache_every', 1)))
+        self._detect_count = 0
+        self._cached_hurst = None
+        self._cached_adf_p = None
+        self._last_hurst_calc_count = -1
+        self._last_adf_calc_count = -1
 
     def detect(self, spread: np.ndarray) -> RegimeResult:
         """
@@ -99,11 +109,11 @@ class RegimeDetector:
             return RegimeResult(regime='range', confidence=0.0)
 
         # 1. Hurst指数
-        hurst = self._calc_hurst(spread)
+        hurst = self._get_cached_hurst(spread)
         hurst_vote, hurst_conf = self._hurst_vote(hurst)
 
         # 2. ADF检验
-        adf_p = self._calc_adf(spread)
+        adf_p = self._get_cached_adf(spread)
         adf_vote, adf_conf = self._adf_vote(adf_p)
 
         # 3. ADX趋势强度
@@ -166,6 +176,7 @@ class RegimeDetector:
 
         self._last_regime = smoothed_regime
         self._last_direction = direction
+        self._detect_count += 1
 
         return RegimeResult(
             regime=smoothed_regime,
@@ -210,6 +221,22 @@ class RegimeDetector:
             return float(result[1])
         except Exception:
             return 1.0
+
+    def _get_cached_hurst(self, spread: np.ndarray) -> float:
+        """按bar间隔缓存Hurst指数，避免每bar重复做log-polyfit。"""
+        if (self._cached_hurst is None or
+                self._detect_count - self._last_hurst_calc_count >= self._hurst_cache_every):
+            self._cached_hurst = self._calc_hurst(spread)
+            self._last_hurst_calc_count = self._detect_count
+        return float(self._cached_hurst)
+
+    def _get_cached_adf(self, spread: np.ndarray) -> float:
+        """按bar间隔缓存ADF p值，避免每bar重复调用statsmodels adfuller。"""
+        if (self._cached_adf_p is None or
+                self._detect_count - self._last_adf_calc_count >= self._adf_cache_every):
+            self._cached_adf_p = self._calc_adf(spread)
+            self._last_adf_calc_count = self._detect_count
+        return float(self._cached_adf_p)
 
     def _calc_adx(self, spread: np.ndarray) -> float:
         """简化ADX计算"""
@@ -307,6 +334,11 @@ class RegimeDetector:
         self._regime_history.clear()
         self._last_regime = 'range'
         self._last_direction = 0
+        self._detect_count = 0
+        self._cached_hurst = None
+        self._cached_adf_p = None
+        self._last_hurst_calc_count = -1
+        self._last_adf_calc_count = -1
 
 
 def create_regime_detector(regime_cfg) -> RegimeDetector:
