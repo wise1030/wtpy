@@ -15,6 +15,31 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# P0-5: WT _usertag/_opentag 32字节硬约束
+_MAX_TAG_LEN = 31  # 含\0
+
+
+def _make_tag(prefix: str, sub_name: str, code: str) -> str:
+    """生成WT usertag, 保证<=31字节; 超长时截断sub_name保prefix+code。"""
+    tag = f"{prefix}_{sub_name}_{code}"
+    if len(tag) <= _MAX_TAG_LEN:
+        return tag
+    # 截断策略: 保留 prefix(3) + _ + code + _ + sub_name截断
+    # 例: "Opn_xxx_SHFE.rb.2510" — prefix=4, code=12, _=2, name预算=31-4-12-2=13
+    name_budget = _MAX_TAG_LEN - len(prefix) - 1 - len(code) - 1
+    if name_budget < 3:
+        # 极端情况: code太长, 只保留prefix+code
+        tag = f"{prefix}_{code}"
+        if len(tag) > _MAX_TAG_LEN:
+            tag = tag[:_MAX_TAG_LEN]
+        logger.warning(f"tag truncated to '{tag}' (code too long)")
+        return tag
+    truncated_name = sub_name[:name_budget]
+    tag = f"{prefix}_{truncated_name}_{code}"
+    if len(tag) > _MAX_TAG_LEN:
+        tag = tag[:_MAX_TAG_LEN]
+    return tag
+
 
 class ArbExecHelper:
     """
@@ -55,6 +80,8 @@ class ArbExecHelper:
         self._is_backtest = is_backtest
         self._leg_timeout = leg_timeout
         self._max_retry = max_retry
+        # P0-4: 开仓超时保护 — 记录opening/closing进入时间
+        self._state_since = None  # 实盘: time.time(); 回测: bar计数
 
     @classmethod
     def from_config(cls, legs: list, exec_cfg, is_backtest: bool = False):
@@ -100,6 +127,7 @@ class ArbExecHelper:
         """执行开仓"""
         self._state = self.STATE_OPENING
         self._direction = direction
+        self._state_since = _time.time()  # P0-4: 记录进入opening时间
         targets = self._calc_target_positions(direction)
         for t in targets:
             code = t['code']
@@ -107,7 +135,7 @@ class ArbExecHelper:
             cur_pos = context.stra_get_position(code)
             if target != cur_pos:
                 context.stra_set_position(
-                    code, target, f"Opn_{sub_config.name}_{code}")
+                    code, target, _make_tag("Opn", sub_config.name, code))
                 self._pending[code] = {
                     'target': target,
                     'retry_count': 0,
@@ -118,12 +146,13 @@ class ArbExecHelper:
         """执行平仓"""
         self._state = self.STATE_CLOSING
         self._reverse_after = reverse_after
+        self._state_since = _time.time()  # P0-4: 记录进入closing时间
         for leg in self._legs:
             code = leg.code
             cur_pos = context.stra_get_position(code)
             if cur_pos != 0:
                 context.stra_set_position(
-                    code, 0, f"Cls_{sub_config.name}_{code}")
+                    code, 0, _make_tag("Cls", sub_config.name, code))
                 self._pending[code] = {
                     'target': 0,
                     'retry_count': 0,
@@ -142,7 +171,7 @@ class ArbExecHelper:
             cur_pos = context.stra_get_position(code)
             if cur_pos != 0:
                 context.stra_set_position(
-                    code, 0, f"{tag}_{sub_config.name}_{code}")
+                    code, 0, _make_tag(tag, sub_config.name, code))
                 self._pending[code] = {
                     'target': 0,
                     'retry_count': 0,
@@ -154,6 +183,7 @@ class ArbExecHelper:
             self._state = self.STATE_CLOSING
             self._reverse_after = False
             self._pending_direction = 0
+            self._state_since = _time.time()  # P0-4
         else:
             self._pending.clear()
             self._filled.clear()
@@ -161,6 +191,7 @@ class ArbExecHelper:
             self._direction = 0
             self._reverse_after = False
             self._pending_direction = 0
+            self._state_since = None  # P0-4
 
     def restore_state(self, direction: int):
         """恢复持久化状态"""
@@ -204,7 +235,7 @@ class ArbExecHelper:
                 if pending['retry_count'] < self._max_retry:
                     context.stra_set_position(
                         code, pending['target'],
-                        f"RT_{sub_config.name}_{code}_{pending['retry_count']}")
+                        _make_tag(f"RT{pending['retry_count']}", sub_config.name, code))
                     pending['retry_count'] += 1
                     pending['timestamp'] = _time.time()
                     if self._is_backtest:
@@ -219,13 +250,14 @@ class ArbExecHelper:
                     for leg in self._legs:
                         context.stra_set_position(
                             leg.code, 0,
-                            f"EMG_{sub_config.name}_{leg.code}")
+                            _make_tag("EMG", sub_config.name, leg.code))
                     self._pending.clear()
                     self._filled.clear()
                     self._state = self.STATE_IDLE
                     self._direction = 0
                     self._reverse_after = False
                     self._pending_direction = 0
+                    self._state_since = None  # P0-4
                     return
 
         if len(self._pending) == 0 and len(self._filled) > 0:
@@ -233,20 +265,23 @@ class ArbExecHelper:
 
             if self._state == self.STATE_OPENING:
                 self._state = self.STATE_OPENED
+                self._state_since = None  # P0-4: opening完成
             elif self._state == self.STATE_CLOSING:
-                if self._reverse_after:
+                if self._reverse_after and self._pending_direction != 0:
                     new_dir = self._pending_direction
                     self._reverse_after = False
                     self._pending_direction = 0
-                    if new_dir != 0:
-                        self._state = self.STATE_IDLE
-                        self._direction = 0
-                    else:
-                        self._state = self.STATE_IDLE
-                        self._direction = 0
+                    # P0-1: 即时反转 — closing完成后立即开反向仓
+                    self._open_position(context, sub_config, new_dir)
+                    logger.info(
+                        f"reverse executed: new_dir={new_dir}, "
+                        f"legs={[leg.code for leg in self._legs]}")
                 else:
+                    self._reverse_after = False
+                    self._pending_direction = 0
                     self._state = self.STATE_IDLE
                     self._direction = 0
+                    self._state_since = None  # P0-4: closing完成
 
     def get_status(self) -> dict:
         return {
@@ -295,3 +330,35 @@ class ArbExecHelper:
         elif pos_sum < 0:
             return -1
         return 0
+
+    def check_state_timeout(self, context, sub_config,
+                            timeout_seconds: float = 30.0,
+                            timeout_bars: int = 20) -> bool:
+        """P0-4: 检测opening/closing状态是否超时
+
+        实盘: 用 wall-clock 时间, 默认30秒
+        回测: 用 bar 计数, 默认20 bar (回测中on_tick_check每个tick调用,
+              但正常成交应在1-2个tick内完成)
+
+        Returns:
+            True 如果超时并已执行紧急全平+重置
+        """
+        if self._state_since is None:
+            return False
+        if self._state not in (self.STATE_OPENING, self.STATE_CLOSING):
+            return False
+
+        elapsed = _time.time() - self._state_since
+        timed_out = (elapsed > timeout_seconds)
+
+        if timed_out:
+            logger.warning(
+                f"state timeout: state={self._state}, "
+                f"elapsed={elapsed:.1f}s > {timeout_seconds}s, "
+                f"emergency reset")
+            context.stra_log_text(
+                f"state timeout: {self._state} elapsed {elapsed:.1f}s, "
+                f"emergency close_all", level=3)
+            self.close_all(context, sub_config, tag="OT")
+            return True
+        return False

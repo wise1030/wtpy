@@ -143,6 +143,8 @@ class ArbCore:
 
         # 恢复持久化状态
         direction, last_signal_time = self.sm.load_all(context, self.rm)
+        # P0-9: 恢复执行状态
+        self.sm.load_exec_state(context, self.eh)
         if direction != 0:
             self.eh.restore_state(direction)
             context.stra_log_text(
@@ -176,6 +178,9 @@ class ArbCore:
         # 状态机推进(统一在process中执行)
         self.eh.on_tick_check(context, self._config)
 
+        # P0-4: opening/closing超时保护
+        self.eh.check_state_timeout(context, self._config)
+
     def _recheck_profile(self, context, cur_date: int):
         """实盘模式: 每隔N天用累积日线价差重算 auto_profile.
 
@@ -187,22 +192,28 @@ class ArbCore:
         if not self._current_profile and not hasattr(self, '_auto_profile_cfg'):
             return
 
-        # 累积日线价差 (取当日最新spread值)
-        if hasattr(self.dp, 'spread') and self.dp.spread is not None and len(self.dp.spread) > 0:
-            latest_spread = float(self.dp.spread[-1])
+        # P0-2修复: 使用 dp.last_spread (原 hasattr(dp,'spread') 永远为False)
+        if self.dp.last_spread is not None and len(self.dp.last_spread) > 0:
+            latest_spread = float(self.dp.last_spread[-1])
             # 每日只追加一次(以cur_date变化为判据)
             if cur_date != self._last_profile_recheck_date:
                 self._daily_spread_history.append(latest_spread)
                 # 保留最近250天
                 if len(self._daily_spread_history) > 250:
                     self._daily_spread_history = self._daily_spread_history[-250:]
-                self._last_profile_recheck_date = cur_date
 
         # 每10个交易日重算一次
         if len(self._daily_spread_history) < 60:
             return
-        if cur_date - self._last_profile_recheck_date > 0:
-            return  # 同一bar不重算
+
+        # P0-2修复: 原条件 `cur_date - self._last_profile_recheck_date > 0` 永远为True
+        # (因为上面刚在同bar追加了数据但还没更新_last_profile_recheck_date)
+        # 正确逻辑: 只在新交易日且非今日已重算时执行
+        if cur_date == self._last_profile_recheck_date:
+            return  # 今日已重算，跳过
+
+        # 更新重算日期(在重算前标记，防止同日重复)
+        self._last_profile_recheck_date = cur_date
 
         from auto_profile import auto_select_from_spread
         profile, hurst, info = auto_select_from_spread(self._daily_spread_history)
@@ -298,6 +309,8 @@ class ArbCore:
         """持久化当前状态"""
         now = context.stra_get_date() * 10000 + context.stra_get_time()
         self.sm.save_all(context, self.eh.direction, self.rm, now)
+        # P0-9: 持久化执行状态
+        self.sm.save_exec_state(context, self.eh)
 
     def _update_indicators(self, context, bar_data, factor_signal, signal):
         """更新图表指标"""

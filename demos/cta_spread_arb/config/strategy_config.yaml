@@ -87,27 +87,6 @@ param_profile_auto:
 
 strategies:
 - legs:
-  - code: SHFE.rb.2510
-    lots: 1
-    multiplier: 10
-    ratio: 1
-  - code: SHFE.hc.2510
-    lots: 1
-    multiplier: 10
-    ratio: -1
-  name: rb_hc_2510_m5
-  auto_profile: true                # v8.1: 启用 auto, 由 Hurst 决定 profile
-  periods:
-    aux_periods:
-    - bar_cnt: 15
-      period: d1
-    main_bar_cnt: 200
-    main_period: m5
-  signal_mode: adaptive
-  spread_mode: coint
-  type: cross_commodity
-
-- legs:
   - code: SHFE.rb.2601
     lots: 1
     multiplier: 10
@@ -127,3 +106,26 @@ strategies:
   signal_mode: adaptive
   spread_mode: coint
   type: cross_commodity
+
+# P0-8: v10单pipeline模式要求恰好1个strategies条目。
+# 多品种请用多策略实例(WT多strate). 下为历史保留供参考:
+# - legs:
+#   - code: SHFE.rb.2510
+#     lots: 1
+#     multiplier: 10
+#     ratio: 1
+#   - code: SHFE.hc.2510
+#     lots: 1
+#     multiplier: 10
+#     ratio: -1
+#   name: rb_hc_2510_m5
+#   auto_profile: true
+#   periods:
+#     aux_periods:
+#     - bar_cnt: 15
+#       period: d1
+#     main_bar_cnt: 200
+#     main_period: m5
+#   signal_mode: adaptive
+#   spread_mode: coint
+#   type: cross_commodity

@@ -86,3 +86,39 @@ class StateManager:
         self.load_risk_state(context, risk_mgr)
         last_signal_time = self.load(context, 'last_signal_time', 0, vtype=int)
         return direction, last_signal_time
+
+    # P0-9: ArbExecHelper 执行状态持久化
+    def save_exec_state(self, context, exec_helper):
+        """保存ArbExecHelper执行状态(状态机+pending/filled)"""
+        state = {
+            'state': exec_helper.state,
+            'direction': exec_helper.direction,
+            'reverse_after': exec_helper._reverse_after,
+            'pending_direction': exec_helper._pending_direction,
+            'pending': dict(exec_helper._pending),  # {code: {target,retry_count,timestamp}}
+            'filled': dict(exec_helper._filled),    # {code: bool}
+        }
+        self.save(context, 'exec_state', state)
+
+    def load_exec_state(self, context, exec_helper):
+        """恢复ArbExecHelper执行状态"""
+        state = self.load(context, 'exec_state')
+        if state and isinstance(state, dict):
+            exec_helper._state = state.get('state', exec_helper.STATE_IDLE)
+            exec_helper._direction = state.get('direction', 0)
+            exec_helper._reverse_after = state.get('reverse_after', False)
+            exec_helper._pending_direction = state.get('pending_direction', 0)
+            # 恢复pending/filled — 重启后pending的挂单大概率已失效,
+            # 安全做法: 只恢复direction, 将state重置为IDLE让策略重新检测
+            # 但保留原始state供日志诊断
+            import logging
+            logging.getLogger(__name__).info(
+                f"exec_state restored: state={exec_helper._state}, "
+                f"direction={exec_helper._direction}")
+            # 安全策略: 重启后pending挂单已失效, 强制重置为IDLE
+            # 如果有实际仓位, sync_state会在下一个tick中修正
+            if exec_helper._state in (exec_helper.STATE_OPENING, exec_helper.STATE_CLOSING):
+                exec_helper._state = exec_helper.STATE_IDLE
+                exec_helper._pending.clear()
+                exec_helper._filled.clear()
+                exec_helper._state_since = None

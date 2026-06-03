@@ -176,6 +176,8 @@ class RiskMgr:
         self._cooldown = state_dict.get('cooldown', 0)
         self._realized_pnl = state_dict.get('realized_pnl', 0.0)
         self._closing = state_dict.get('closing', False)
+        # P0-3: 恢复peak_unrealized
+        self._peak_unrealized = state_dict.get('peak_unrealized', 0.0)
 
     def snapshot(self) -> dict:
         """导出当前状态供持久化"""
@@ -184,6 +186,8 @@ class RiskMgr:
             'cooldown': self._cooldown,
             'realized_pnl': self._realized_pnl,
             'closing': self._closing,
+            # P0-3: 持久化peak_unrealized, 防止重启后追踪止盈失效
+            'peak_unrealized': self._peak_unrealized,
         }
 
     # === 内置风控规则 ===

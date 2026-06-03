@@ -39,6 +39,8 @@ class DiagLogger:
         }
         self._flush_interval = 50  # 每50条刷新一次
         self._lock = threading.Lock()  # 线程安全保护
+        # P0-7: 按日分割 — 记录当前日志日期, 跨日时切换文件
+        self._current_log_date = datetime.now().strftime('%Y%m%d')
         if to_file:
             os.makedirs(log_dir, exist_ok=True)
 
@@ -81,14 +83,45 @@ class DiagLogger:
             self._flush_locked(category)
 
     def _flush_locked(self, category: str):
-        """刷新缓冲区到文件(调用方已持有锁)"""
+        """刷新缓冲区到文件(调用方已持有锁)
+
+        P0-7: 按日分割 — 文件名含日期 {category}_{YYYYMMDD}.jsonl
+        跨日时先刷旧日数据再切新文件。
+        """
         if not self._buffers[category]:
             return
-        path = os.path.join(self._log_dir, f"{category}.jsonl")
-        with open(path, 'a') as f:
-            for item in self._buffers[category]:
-                f.write(json.dumps(item, ensure_ascii=False) + '\n')
-        self._buffers[category] = []
+        # P0-7: 按日分割 — 检查是否跨日
+        today = datetime.now().strftime('%Y%m%d')
+        if today != self._current_log_date:
+            # 跨日: 先用旧日期刷完旧buffer
+            old_path = os.path.join(
+                self._log_dir, f"{category}_{self._current_log_date}.jsonl")
+            try:
+                with open(old_path, 'a') as f:
+                    for item in self._buffers[category]:
+                        f.write(json.dumps(item, ensure_ascii=False) + '\n')
+                self._buffers[category] = []
+            except (IOError, OSError) as e:
+                import logging as _logging
+                _logging.getLogger(__name__).error(
+                    f"DiagLogger write failed (date rollover): {old_path}, "
+                    f"err={e}, buffer_size={len(self._buffers[category])}")
+            self._current_log_date = today
+            return
+
+        path = os.path.join(
+            self._log_dir, f"{category}_{self._current_log_date}.jsonl")
+        try:
+            with open(path, 'a') as f:
+                for item in self._buffers[category]:
+                    f.write(json.dumps(item, ensure_ascii=False) + '\n')
+            self._buffers[category] = []
+        except (IOError, OSError) as e:
+            # P0-6: 磁盘满/权限不足时不清空buffer, 保留数据待下次重试
+            import logging as _logging
+            _logging.getLogger(__name__).error(
+                f"DiagLogger write failed: {path}, err={e}, "
+                f"buffer_size={len(self._buffers[category])}")
 
     def flush_all(self):
         """刷新所有缓冲区"""

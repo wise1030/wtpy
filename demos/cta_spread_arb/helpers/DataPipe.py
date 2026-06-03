@@ -50,6 +50,9 @@ class DataPipe:
         self._bar_cache = {}
         self._bar_cache_bar_key = None
 
+        # P0-2: 缓存最近一次fetch的spread，供_recheck_profile等外部使用
+        self.last_spread = None
+
     def _bar_cache_key(self, context, cur_date):
         """生成当前bar缓存签名；优先使用交易日+HHMM时间，避免日内复用旧K线。"""
         get_time = getattr(context, 'stra_get_time', None)
@@ -150,6 +153,9 @@ class DataPipe:
         # 6. 计算日线趋势过滤
         spread_trend_filter = self._calc_trend_filter(
             spread, aux_bars, spread_calc, beta)
+
+        # P0-2: 缓存最近一次spread供_recheck_profile使用
+        self.last_spread = spread
 
         return BarData(
             prices=prices,
