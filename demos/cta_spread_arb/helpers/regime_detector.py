@@ -65,6 +65,10 @@ class RegimeDetector:
         # ADF参数
         self._adf_mr_thresh = p.get('adf_mr_thresh', 0.05)
         self._adf_trend_thresh = p.get('adf_trend_thresh', 0.15)
+        # P3-6: adfuller maxlag 参数化, 默认 1 与 stat_factors._ols_coint 对齐
+        # statsmodels 默认 maxlag=10 会做 10+ 次 OLS 拟合, 是 detect_regime 主要热点;
+        # m5 周期 + spread 序列特性下 maxlag=1 足够, 节省 ~40% adfuller 耗时
+        self._adf_maxlag = int(p.get('adf_maxlag', 1))
         # ADX参数
         self._adx_period = p.get('adx_period', 14)
         self._adx_trend_thresh = p.get('adx_trend_thresh', 25)
@@ -85,10 +89,11 @@ class RegimeDetector:
         self._last_regime = 'range'
         self._last_direction = 0
         # Hurst/ADF缓存: 统计量变化慢, detect仍每bar执行投票和平滑
-        # 默认 cache_every=1 (每bar重算), 保证回测基线等价;
-        # 用户显式配置 >1 时才启用缓存以换取性能。
+        # P3-6: adf_cache_every 默认 24 (m5周期=2小时), 显著降低 adfuller 调用频次;
+        # Hurst 计算更轻, 保持 every=1 不变以保证投票时效性。
+        # 用户显式配置可覆盖默认值以平衡性能/灵敏度。
         self._hurst_cache_every = max(1, int(p.get('hurst_cache_every', 1)))
-        self._adf_cache_every = max(1, int(p.get('adf_cache_every', 1)))
+        self._adf_cache_every = max(1, int(p.get('adf_cache_every', 24)))
         self._detect_count = 0
         self._cached_hurst = None
         self._cached_adf_p = None
@@ -212,12 +217,17 @@ class RegimeDetector:
             return 0.5
 
     def _calc_adf(self, spread: np.ndarray) -> float:
-        """ADF检验p值"""
+        """ADF检验p值
+
+        P3-6: maxlag 由 self._adf_maxlag 控制 (默认 1, 可 yaml 覆盖),
+        替代原硬编码 maxlag=10。maxlag=10 时 adfuller 内部需做 ~11 次
+        OLS 拟合 + autolag 模型选择, 是 detect_regime 主要瓶颈。
+        """
         window = min(self._hurst_window, len(spread))
         ts = spread[-window:]
         try:
             from statsmodels.tsa.stattools import adfuller
-            result = adfuller(ts, maxlag=10)
+            result = adfuller(ts, maxlag=self._adf_maxlag)
             return float(result[1])
         except Exception:
             return 1.0

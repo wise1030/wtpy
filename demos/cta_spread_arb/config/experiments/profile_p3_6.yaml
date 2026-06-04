@@ -1,0 +1,35 @@
+# ============================================================
+# experiments/profile_p3_6.yaml — P3-6 性能 profile 专用实验
+# 目的: cProfile 短回测覆盖 init/on_bar/风控/平仓全路径,2 周数据
+# 复用 default 的 instance 装配(rb_hc 2510 m5),只缩窗口
+# ============================================================
+
+name: profile_p3_6
+description: "P3-6: 2 周短回测用于 cProfile 热点定位"
+
+backtest:
+  start: 202504010900   # 2025-04-01 09:00
+  end: 202504151500     # 2025-04-15 15:00 (~2 周)
+  capital: 1000000
+  slippage: 0
+
+auto_profile:
+  enable: true
+  trend_hurst: 0.55
+  mr_hurst: 0.45
+  trend_r2: 0.55
+  lookback_days: 120
+  storage_csv_dir: ./storage/csv
+
+instances:
+  - name: rb_hc_2510_m5
+    contract: rb_hc
+    contract_month: "2510"
+    periods:
+      main_period: m5
+      main_bar_cnt: 200
+      aux_periods:
+        - period: d1
+          bar_cnt: 15
+    signal_mode: adaptive
+    auto_profile: true
