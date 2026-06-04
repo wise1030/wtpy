@@ -20,6 +20,7 @@ from RiskMgr import RiskMgr
 from SignalGen import SignalGen
 from StateManager import StateManager
 from DiagLogger import DiagLogger
+from ArbCoreLifecycle import ArbCoreLifecycle
 from schemas import ArbCoreConfig, LegConfig, RiskConfig, SignalConfig, RegimeConfig, ExecConfig
 from dataclasses import dataclass
 
@@ -83,6 +84,11 @@ class ArbCore:
         self.sm = StateManager(self.name)
         self._diag = DiagLogger(log_dir=f'./logs/{self.name}', to_console=False)
 
+        # P4M-1: WT 生命周期回调适配器 (组合关系, 不改变对外 API)
+        self._lifecycle = ArbCoreLifecycle(self)
+        # R2-A: 启动期 EMERGENCY 状态占位 (由 lifecycle.on_init 填充)
+        self._startup_emergency = None
+
     @property
     def legs(self) -> list:
         """返回LegConfig列表"""
@@ -101,72 +107,12 @@ class ArbCore:
         return self._config.aux_periods
 
     def on_init(self, context, is_main_holder: bool = True):
-        """注册K线/指标/恢复状态
+        """WT 回调入口 (facade) — 见 ArbCoreLifecycle.on_init。
 
         - is_main_holder=True: 首腿用 isMain=True (CtaMocker 单 _main_key 限制)
         - is_main_holder=False: 所有 K 线都 isMain=False
         """
-        main_code = self.legs[0].code
-        context.stra_prepare_bars(
-            main_code, self.main_period, self.main_bar_cnt, isMain=is_main_holder)
-
-        for leg in self.legs[1:]:
-            context.stra_prepare_bars(
-                leg.code, self.main_period, self.main_bar_cnt, isMain=False)
-
-        for aux in self.aux_periods:
-            for leg in self.legs:
-                context.stra_prepare_bars(
-                    leg.code, aux['period'], aux['bar_cnt'], isMain=False)
-
-        for leg in self.legs:
-            context.stra_sub_ticks(leg.code)
-
-        # 注册指标
-        idx_name = f"Spread_{self.name}"
-        context.register_index(idx_name, idxType=1)
-        context.register_index_line(idx_name, "spread", lineType=0)
-        context.register_index_line(idx_name, "upper", lineType=0)
-        context.register_index_line(idx_name, "lower", lineType=0)
-        context.register_index_line(idx_name, "signal", lineType=1)
-        context.add_index_baseline(idx_name, "signal", 0.0)
-        context.register_index_line(idx_name, "regime_val", lineType=1)
-        context.register_index_line(idx_name, "regime_dir", lineType=1)
-        context.register_index_line(idx_name, "regime_conf", lineType=0)
-
-        fidx_name = f"Factors_{self.name}"
-        context.register_index(fidx_name, idxType=1)
-        for fname in self.fe.get_enabled_factor_names():
-            context.register_index_line(fidx_name, fname, lineType=0)
-
-        context.set_chart_kline(main_code, self.main_period)
-
-        # 恢复持久化状态
-        direction, last_signal_time = self.sm.load_all(context, self.rm)
-        # P0-9: 恢复执行状态
-        # R2-A: 收集 EMERGENCY 重置告警, 末尾醒目输出
-        emergency_payload = self.sm.load_exec_state(context, self.eh, diag=self._diag)
-        if direction != 0:
-            self.eh.restore_state(direction)
-            context.stra_log_text(
-                f"{self.name} restored direction={direction}, state=opened")
-
-        # R2-A: 启动期 EMERGENCY 醒目告警 — 用 ★★★ 前缀让 WT 监控前端易抓取
-        if emergency_payload is not None:
-            banner = (
-                "★★★ EMERGENCY: exec_state interrupted on previous run ★★★ "
-                f"sub={emergency_payload['sub_name']} "
-                f"prev_state={emergency_payload['interrupted_state']} "
-                f"direction={emergency_payload['direction']} "
-                f"abandoned_pending={emergency_payload['abandoned_pending']} "
-                "→ state reset to IDLE; MANUAL position reconciliation required."
-            )
-            # level=3 是 WT 的 error 级别
-            context.stra_log_text(banner, level=3)
-            # 同步保存供 SpreadArbStrategy.on_init 二次输出与单测断言
-            self._startup_emergency = emergency_payload
-        else:
-            self._startup_emergency = None
+        self._lifecycle.on_init(context, is_main_holder=is_main_holder)
 
     def process(self, context, cur_date: int):
         """主入口: sync → compute → execute → persist"""
@@ -432,14 +378,9 @@ class ArbCore:
                     pnl=self.rm.realized_pnl)
 
     def on_session_begin(self, context):
-        """交易日开始: 重置因子refit"""
-        self.fe.reset_refit()
+        """WT 回调入口 (facade) — 见 ArbCoreLifecycle.on_session_begin。"""
+        self._lifecycle.on_session_begin(context)
 
     def on_session_end(self, context):
-        """交易日结束: 输出绩效 + flush诊断日志"""
-        unrealized = sum(context.stra_get_position_profit(leg.code) for leg in self.legs)
-        total_pnl = self.rm.realized_pnl + unrealized
-        context.stra_log_text(
-            f"{self.name} session end, realized={self.rm.realized_pnl:.2f}, "
-            f"unrealized={unrealized:.2f}, total={total_pnl:.2f}")
-        self._diag.flush_all()
+        """WT 回调入口 (facade) — 见 ArbCoreLifecycle.on_session_end。"""
+        self._lifecycle.on_session_end(context)

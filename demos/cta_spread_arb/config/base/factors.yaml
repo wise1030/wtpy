@@ -45,84 +45,89 @@ factors:
     slow_period: 60
   weight: 0.3
 
-# === 关停因子(保留配置, 便于回滚) ===
-- class: ZScoreFactor
-  enabled: false  # 与 coint_residual 共线 > 0.8, 重复计票
-  name: zscore
-  params:
-    lookback: 60
-  weight: 0.0
-- class: MACDSpreadFactor
-  enabled: false  # 趋势族信号干扰套利反转判断
-  name: macd_spread
-  params:
-    fast_period: 12
-    slow_period: 26
-    signal_period: 9
-  weight: 0.0
-- class: ADXSpreadFactor
-  enabled: false  # 公式已修复(Wilder), 但套利场景不需要趋势强度信号
-  name: adx_spread
-  params:
-    period: 21
-    threshold: 25.0
-    hl_window: 2
-  weight: 0.0
-- class: ChannelBreakFactor
-  enabled: false
-  name: channel_break
-  params:
-    channel_period: 60
-    breakout_threshold: 0.5
-  weight: 0.0
-- class: TrendStrengthFactor
-  enabled: false
-  name: trend_strength
-  params:
-    short_period: 12
-    mid_period: 30
-    long_period: 60
-    threshold: 0.3
-  weight: 0.0
-
-# === 长期禁用因子 ===
-- class: VwapDeviationFactor
-  enabled: false
-  name: vwap_deviation
-  params:
-    period: 60
-    smooth: 12
-  weight: 0.0
-- class: VolumePriceDivergenceFactor
-  enabled: false
-  name: volume_price_divergence
-  params:
-    lookback: 60
-    vol_confirm_ratio: 0.7
-    vol_ma_period: 30
-  weight: 0.0
-- class: OBVSpreadFactor
-  enabled: false
-  name: obv_spread
-  params:
-    amplify: 10
-    period: 60
-  weight: 0.0
-- class: VolumeRatioFactor
-  enabled: false
-  name: volume_ratio
-  params:
-    period: 20
-    threshold: 2.0
-  weight: 0.0
-- class: RSISpreadFactor
-  enabled: false
-  name: rsi_spread
-  params:
-    overbought: 70
-    oversold: 30
-    period: 21
-  weight: 0.0
+# === 关停因子(P4M-5: 已注释, 取消注释 + enabled:true 即恢复) ===
+# 决策性关停: 趋势族(MACD/ADX/Channel/TrendStrength) + 量价族(Vwap/VPD/OBV/VolRatio) + RSI
+# 统计性关停: ZScore (与 coint_residual 共线 > 0.8)
+# 源码全保留于 factors/{stat,trend,vol_price,momentum}_factors.py + factors/__init__.py 导出
+# ----- ZScore (统计性关停, 共线) -----
+# - class: ZScoreFactor
+#   enabled: false
+#   name: zscore
+#   params:
+#     lookback: 60
+#   weight: 0.0
+# ----- 趋势族 (套利场景不适用) -----
+# - class: MACDSpreadFactor
+#   enabled: false
+#   name: macd_spread
+#   params:
+#     fast_period: 12
+#     slow_period: 26
+#     signal_period: 9
+#   weight: 0.0
+# - class: ADXSpreadFactor
+#   enabled: false
+#   name: adx_spread
+#   params:
+#     period: 21
+#     threshold: 25.0
+#     hl_window: 2
+#   weight: 0.0
+# - class: ChannelBreakFactor
+#   enabled: false
+#   name: channel_break
+#   params:
+#     channel_period: 60
+#     breakout_threshold: 0.5
+#   weight: 0.0
+# - class: TrendStrengthFactor
+#   enabled: false
+#   name: trend_strength
+#   params:
+#     short_period: 12
+#     mid_period: 30
+#     long_period: 60
+#     threshold: 0.3
+#   weight: 0.0
+# ----- 量价族 (套利场景不适用) -----
+# - class: VwapDeviationFactor
+#   enabled: false
+#   name: vwap_deviation
+#   params:
+#     period: 60
+#     smooth: 12
+#   weight: 0.0
+# - class: VolumePriceDivergenceFactor
+#   enabled: false
+#   name: volume_price_divergence
+#   params:
+#     lookback: 60
+#     vol_confirm_ratio: 0.7
+#     vol_ma_period: 30
+#   weight: 0.0
+# - class: OBVSpreadFactor
+#   enabled: false
+#   name: obv_spread
+#   params:
+#     amplify: 10
+#     period: 60
+#   weight: 0.0
+# - class: VolumeRatioFactor
+#   enabled: false
+#   name: volume_ratio
+#   params:
+#     period: 20
+#     threshold: 2.0
+#   weight: 0.0
+# ----- RSI (趋势族) -----
+# - class: RSISpreadFactor
+#   enabled: false
+#   name: rsi_spread
+#   params:
+#     overbought: 70
+#     oversold: 30
+#     period: 21
+#   weight: 0.0
 
 signal_aggregation:
   # v8.1: direction_threshold 已移除（dead 参数）
