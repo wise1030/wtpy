@@ -1,5 +1,13 @@
 # C PositionRouter + 账本化下单实施计划
 
+> **[已作废 — 2026-06-02]**
+> 本计划已被 v10 架构简化 (commit 88ba1c5) 完全反向：
+> - SubStrategy → ArbCore（单实例，非 facade）
+> - PositionRouter / PositionLedger / InstanceDecision / TargetIntent 全部删除
+> - SpreadArbStrategy 从多 sub 列表改为单 ArbCore 实例
+> - 仓位读取统一走 context.stra_get_position
+> 保留本文件仅供历史参考，不要按此文档开发。
+
 **Goal:** 在保留现有回测行为的前提下，将 `SubStrategy` 降级为轻量 facade/instance，由外层统一调度，并引入 `PositionLedger` + `PositionRouter`，支持多 sub 共享同一 stdCode 的净额化下单与 sub 级仓位视图。
 
 **Architecture:** 第一阶段保留 `SubStrategy.py` 文件名，不重命名，降低 diff。将 `SubStrategy.process()` 拆成“状态同步/计算决策/持久化”等阶段；`SpreadArbStrategy` 负责全局 reconcile → compute all → route/flush → persist。`ArbExecHelper` 逐步从“直接下单者”降级为执行状态机，所有 WT `stra_set_position` 由 `PositionRouter` 统一发出。

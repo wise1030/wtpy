@@ -1,4 +1,10 @@
 # ============================================================
+# factor_config.yaml — [DEPRECATED: 仍为 runBT/runLive 默认入口]
+#
+# v9 分层配置重构后, 因子配置已迁至 config/base/factors.yaml
+# 本文件保留仅因 runBT.py / runLive.py 以此为默认路径。
+# 新增/修改因子请同时更新 config/base/factors.yaml, 避免两份漂移。
+# ============================================================
 # factor_config.yaml — v6 因子瘦身 + ADX 修复版
 # 改动:
 #   1. 因子从 8 个瘦身到 3 个核心: coint_residual(0.5) + half_life(0.2) + spread_momentum(0.3)

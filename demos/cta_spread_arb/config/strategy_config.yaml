@@ -1,3 +1,18 @@
+# ============================================================
+# strategy_config.yaml — [DEPRECATED: 仍为 runBT/runLive 默认入口]
+#
+# v9 分层配置重构后，各段已拆分至:
+#   config/base/execution.yaml   ← execution 段
+#   config/base/regime.yaml      ← regime 段
+#   config/base/signal.yaml      ← signal 段
+#   config/base/risk.yaml        ← risk_control 段
+#   config/contracts/rb_hc.yaml  ← strategies + legs
+#   config/profiles/*.yaml       ← param_profiles
+#
+# 本文件保留仅因 runBT.py / runLive.py 以此为默认路径。
+# 实验配置 (experiments/*.yaml) 会叠加 base/ 覆盖，本文件仅作 fallback。
+# 新增参数请同时更新 config/base/ 对应 yaml, 避免两份漂移。
+# ============================================================
 execution:
   bollinger_lookback: 60
   bollinger_threshold: 2.0
