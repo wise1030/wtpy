@@ -169,6 +169,17 @@ class RiskConfig:
     coint_block_entry_p: float = 0.05  # coint_p>=此值时禁止新开仓
     # P2-4修复: 反转豁免冷却期选项(反转本质是"平旧+开新"，是否跳过cooldown)
     reverse_cooldown_exempt: bool = False  # True=反转后不触发冷却期
+    # P2-6: quick_stop 三阶段阈值(原硬编码 6/300, 12/500, 300)
+    quick_stop_early_bars: int = 6         # 阶段1: 极早期止损 bar 数门槛
+    quick_stop_early_loss: float = 300     # 阶段1: 浮亏门槛(>=触发)
+    quick_stop_confirm_bars: int = 12      # 阶段2: 早期确认止损 bar 数门槛
+    quick_stop_confirm_loss: float = 500   # 阶段2: 浮亏门槛
+    quick_stop_pure_loss: float = 300      # 阶段3: 纯亏损(peak_unrealized<=0)止损门槛
+    # P2-6: profit_take 分级追踪止盈档位边界与回撤增量(原硬编码 1000/2000, +0.1/+0.2)
+    profit_tier1_peak: float = 1000        # 档位1上界(peak<此值用base_ratio)
+    profit_tier2_peak: float = 2000        # 档位2上界(peak<此值用base_ratio+tier2_inc)
+    profit_tier2_inc: float = 0.1          # 档位2回撤增量
+    profit_tier3_inc: float = 0.2          # 档位3回撤增量(peak>=tier2_peak)
 
     @classmethod
     def from_yaml(cls, risk_cfg: dict) -> 'RiskConfig':
@@ -184,6 +195,17 @@ class RiskConfig:
             coint_force_exit_p=risk_cfg.get('coint_force_exit_p', 0.15),
             coint_block_entry_p=risk_cfg.get('coint_block_entry_p', 0.05),
             reverse_cooldown_exempt=risk_cfg.get('reverse_cooldown_exempt', False),
+            # P2-6: quick_stop 配置化
+            quick_stop_early_bars=risk_cfg.get('quick_stop_early_bars', 6),
+            quick_stop_early_loss=risk_cfg.get('quick_stop_early_loss', 300),
+            quick_stop_confirm_bars=risk_cfg.get('quick_stop_confirm_bars', 12),
+            quick_stop_confirm_loss=risk_cfg.get('quick_stop_confirm_loss', 500),
+            quick_stop_pure_loss=risk_cfg.get('quick_stop_pure_loss', 300),
+            # P2-6: profit_take 分级配置化
+            profit_tier1_peak=risk_cfg.get('profit_tier1_peak', 1000),
+            profit_tier2_peak=risk_cfg.get('profit_tier2_peak', 2000),
+            profit_tier2_inc=risk_cfg.get('profit_tier2_inc', 0.1),
+            profit_tier3_inc=risk_cfg.get('profit_tier3_inc', 0.2),
         )
 
 

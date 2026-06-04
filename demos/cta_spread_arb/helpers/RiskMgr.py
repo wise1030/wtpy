@@ -205,28 +205,31 @@ class RiskMgr:
 
     def _builtin_quick_stop_rule(self, ctx):
         """v7.2: 快速止损 — 早期亏损加速退出
-        
+
         核心逻辑:
-        - 持仓<=6bars(30min)且浮亏>=300: 立即止损(行情与预期严重不符)
-        - 持仓<=12bars(1h)且浮亏>=500: 立即止损(信号已证实错误)
-        - 浮亏从未>0(纯亏损): 降低max_loss阈值加速退出
+        - 持仓<=quick_stop_early_bars且浮亏>=quick_stop_early_loss: 立即止损
+        - 持仓<=quick_stop_confirm_bars且浮亏>=quick_stop_confirm_loss: 立即止损
+        - 浮亏从未>0(纯亏损)且浮亏>=quick_stop_pure_loss: 加速退出
+
+        P2-6: 阈值从 RiskConfig 读取, 不再硬编码 6/300/12/500/300
         """
         total_pnl = sum(ctx.pnl.values())
         hold_bars = ctx.hold_bars
-        
+        cfg = ctx.risk_cfg
+
         # 阶段1: 极早期快速止损
-        if hold_bars <= 6 and total_pnl <= -300:
+        if hold_bars <= cfg.quick_stop_early_bars and total_pnl <= -cfg.quick_stop_early_loss:
             return f"quick_stop_early: pnl={total_pnl:.0f} at {hold_bars} bars"
-        
+
         # 阶段2: 早期确认止损
-        if hold_bars <= 12 and total_pnl <= -500:
+        if hold_bars <= cfg.quick_stop_confirm_bars and total_pnl <= -cfg.quick_stop_confirm_loss:
             return f"quick_stop_confirm: pnl={total_pnl:.0f} at {hold_bars} bars"
-        
+
         # 阶段3: 纯亏损(从未盈利)加速止损
         # peak_unrealized为0说明从未有过正向浮盈
-        if self._peak_unrealized <= 0 and total_pnl <= -300:
+        if self._peak_unrealized <= 0 and total_pnl <= -cfg.quick_stop_pure_loss:
             return f"quick_stop_pure_loss: pnl={total_pnl:.0f}, never profitable"
-        
+
         return None
 
     def _builtin_max_loss_rule(self, ctx):
@@ -240,37 +243,40 @@ class RiskMgr:
     def _builtin_profit_take_rule(self, ctx):
         """
         分级追踪止盈(v7): 根据浮盈大小动态调整回撤容忍度
-        
+
         核心思路: 小盈紧追踪(保住小利润), 大盈宽追踪(让利润跑)
-        - 浮盈 < 1000: 回撤20%即锁利
-        - 浮盈 1000-2000: 回撤30%锁利
-        - 浮盈 > 2000: 回撤40%锁利
-        
+        - 浮盈 < profit_tier1_peak:        回撤 base_ratio
+        - 浮盈 [tier1, tier2_peak):        回撤 base_ratio + profit_tier2_inc
+        - 浮盈 >= profit_tier2_peak:       回撤 base_ratio + profit_tier3_inc
+
         profit_take_threshold: 最低触发追踪止盈的浮盈门槛
         profit_drawdown_ratio: 基础回撤比例(小盈档位)
+
+        P2-6: 档位边界(1000/2000)与增量(+0.1/+0.2)从 RiskConfig 读取, 不再硬编码
         """
-        profit_take_threshold = ctx.risk_cfg.profit_take_threshold
-        base_drawdown_ratio = ctx.risk_cfg.profit_drawdown_ratio
+        cfg = ctx.risk_cfg
+        profit_take_threshold = cfg.profit_take_threshold
+        base_drawdown_ratio = cfg.profit_drawdown_ratio
         total_pnl = sum(ctx.pnl.values())
-        
+
         # 每次check都更新peak
         if total_pnl > self._peak_unrealized:
             self._peak_unrealized = total_pnl
-        
+
         peak = self._peak_unrealized
-        
+
         # 盈利未达门槛，不触发
         if peak < profit_take_threshold:
             return None
-        
+
         # 分级回撤比例: 小盈紧追踪, 大盈宽追踪
-        if peak < 1000:
-            drawdown_ratio = base_drawdown_ratio  # 0.2 (20%)
-        elif peak < 2000:
-            drawdown_ratio = base_drawdown_ratio + 0.1  # 0.3 (30%)
+        if peak < cfg.profit_tier1_peak:
+            drawdown_ratio = base_drawdown_ratio
+        elif peak < cfg.profit_tier2_peak:
+            drawdown_ratio = base_drawdown_ratio + cfg.profit_tier2_inc
         else:
-            drawdown_ratio = base_drawdown_ratio + 0.2  # 0.4 (40%)
-        
+            drawdown_ratio = base_drawdown_ratio + cfg.profit_tier3_inc
+
         # 当前回撤超过分级比例时触发
         if total_pnl < peak * (1 - drawdown_ratio):
             return f"profit_take: peak={peak:.0f}, current={total_pnl:.0f}, drawdown={(peak-total_pnl)/peak:.0%}, tier_ratio={drawdown_ratio:.0%}"
