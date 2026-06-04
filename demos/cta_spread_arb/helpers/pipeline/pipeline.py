@@ -90,11 +90,11 @@ class SignalPipeline:
 
     @staticmethod
     def from_config(signal_mode, entry_threshold, exit_threshold,
-                    adaptive_cfg, signal_cfg,
-                    regime_detector=None, factor_engine=None):
+                    adaptive_cfg, signal_cfg):
         """从配置创建Pipeline
 
         REG-1修复: signal_cfg可能是SignalConfig dataclass或dict，统一处理
+        A1: 移除未使用的 regime_detector/factor_engine 死参数。
         """
         # REG-1修复: 统一dataclass和dict访问
         def _cfg_get(cfg, key, default):

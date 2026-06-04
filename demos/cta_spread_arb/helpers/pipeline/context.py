@@ -37,6 +37,11 @@ class SignalContext:
             self.factor_scores = factor_signal.get('factor_scores', {})
             self.factor_direction = factor_signal.get('direction', 0)
             self.factor_direction_types = factor_signal.get('factor_direction_types', {})
+            # BUG修复(P1-6): dict 输入路径同样要从 factor_signal 覆盖 coint_p,
+            # 与 FactorOutput 分支保持一致, 否则 ctx.coint_p 永远是默认 1.0,
+            # 导致 EntryJudgeStep 把所有 dict-输入信号判为 coint_blocked。
+            if 'coint_p' in factor_signal:
+                self.coint_p = factor_signal['coint_p']
         self.entry_signal = 0.0
         self.final_signal = 0.0
         self.regime = 'range'

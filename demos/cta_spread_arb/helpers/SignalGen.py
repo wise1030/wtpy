@@ -5,18 +5,24 @@ v4: regime检测从Pipeline中解耦，由ArbCore前置调用。
 Pipeline只负责信号处理(权重调整+持续性+出场)，不再检测regime。
 SignalGen新增detect_regime()和generate_with_regime()方法。
 
+A1(2026-06): 移除 utils.simple_regime fallback —— regime_detector 改为必传。
+调用方必须先通过 helpers.regime_detector.create_regime_detector() 构造。
+
 注意: 入口文件已统一设置sys.path，子模块无需再自行sys.path.insert。
 """
-import numpy as np
 from schemas import SignalResult
 from SignalPipeline import SignalPipeline
-from utils import simple_regime
 
 
 class SignalGen:
     """信号生成器: 封装RegimeDetector + SignalPipeline"""
 
-    def __init__(self, pipeline: SignalPipeline, regime_detector=None):
+    def __init__(self, pipeline: SignalPipeline, regime_detector):
+        if regime_detector is None:
+            raise ValueError(
+                "SignalGen requires a regime_detector instance. "
+                "Use helpers.regime_detector.create_regime_detector(regime_cfg) to build one."
+            )
         self._pipeline = pipeline
         self._regime_detector = regime_detector
         self._last_regime = 'range'
@@ -26,9 +32,10 @@ class SignalGen:
     @classmethod
     def from_config(cls, signal_mode, entry_threshold, exit_threshold,
                     adaptive_cfg, signal_cfg,
-                    regime_detector=None, factor_engine=None):
+                    regime_detector, factor_engine=None):
         """从配置创建SignalGen(内部创建Pipeline)
 
+        regime_detector: 必传, 由调用方通过 create_regime_detector(adaptive_cfg) 构造。
         factor_engine参数保留但不再传给Pipeline(P0-2/ARCH-5: Pipeline不再需要)。
         """
         pipeline = SignalPipeline.from_config(
@@ -52,14 +59,20 @@ class SignalGen:
                       coint_p: float = 1.0) -> dict:
         """前置regime检测 — 在FactorEngine.calculate()之前调用
 
+        A1: regime_detector 已在 __init__ 强校验非 None。
+        spread 为 None 时返回上次缓存的 regime, 不再 fallback 到 simple_regime。
+
         Returns:
             dict with keys: regime, confidence, direction
         """
-        if self._regime_detector is not None and spread is not None:
-            result = self._regime_detector.detect(spread)
-            regime_dict = result.to_dict()
-        else:
-            regime_dict = simple_regime(spread, coint_p)
+        if spread is None:
+            return {
+                'regime': self._last_regime,
+                'confidence': self._last_regime_confidence,
+                'direction': self._last_regime_direction,
+            }
+        result = self._regime_detector.detect(spread)
+        regime_dict = result.to_dict()
 
         self._last_regime = regime_dict.get('regime', 'range')
         self._last_regime_direction = regime_dict.get('direction', 0)

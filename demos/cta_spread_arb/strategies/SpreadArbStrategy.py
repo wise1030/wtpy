@@ -6,15 +6,21 @@ v10架构: 去除多sub/PositionRouter概念。
 - 多品种组合用多策略实例(WT框架天然支持)
 - 去除PositionRouter/PositionLedger/InstanceDecision等中间层
 - 去除leg_uniqueness校验(单core不存在code冲突)
+
+P4M-2 (2026-06): __init__ 与 from_experiment 共用 _build_core() 私有构造器,
+消除 80% 重复代码。两入口仅负责"准备 resolved_cfg",后续 sub_cfg 解析
+和 ArbCore 构建走同一路径。
 """
+import os as _os
+from dataclasses import replace as _dc_replace
+
+import yaml as _yaml
 from wtpy import BaseCtaStrategy
 from wtpy import CtaContext
 
 from ConfigManager import ConfigManager
 from ArbCore import ArbCore
-from schemas import ArbCoreConfig, SignalConfig, RiskConfig, RegimeConfig, ExecConfig
-from dataclasses import replace as _dc_replace
-import yaml as _yaml
+from schemas import ArbCoreConfig
 
 
 class SpreadArbStrategy(BaseCtaStrategy):
@@ -23,25 +29,69 @@ class SpreadArbStrategy(BaseCtaStrategy):
                  factor_config_path: str, is_backtest: bool = False):
         BaseCtaStrategy.__init__(self, name)
 
+        cfg_mgr = ConfigManager(strategy_config_path)
+
+        # v7.4: param_profile 仅在 legacy 入口需要从原 yaml 重新读取
+        # (ConfigManager 未暴露 param_profiles/auto_profile_cfg)
+        with open(strategy_config_path, encoding='utf-8') as f:
+            _raw_cfg = _yaml.safe_load(f)
+        param_profiles = _raw_cfg.get('param_profiles', {}) or {}
+        auto_profile_cfg = _raw_cfg.get('param_profile_auto', {}) or {}
+
+        self._build_core(
+            resolved_cfg=cfg_mgr,
+            factor_config_path=factor_config_path,
+            param_profiles=param_profiles,
+            auto_profile_cfg=auto_profile_cfg,
+            is_backtest=is_backtest,
+        )
+
+    @classmethod
+    def from_experiment(cls, name: str, experiment: str = 'default',
+                        config_root: str = './config',
+                        is_backtest: bool = False):
+        """v9 工厂方法: 从分层配置创建策略实例"""
+        from ConfigResolver import ConfigResolver
+        rc = ConfigResolver(config_root).resolve(experiment)
+
+        obj = cls.__new__(cls)
+        BaseCtaStrategy.__init__(obj, name)
+
+        factor_path = _os.path.join(
+            _os.path.abspath(config_root), 'base', 'factors.yaml')
+
+        obj._build_core(
+            resolved_cfg=rc,
+            factor_config_path=factor_path,
+            param_profiles=rc.param_profiles,
+            auto_profile_cfg=rc.auto_profile_cfg,
+            is_backtest=is_backtest,
+        )
+        return obj
+
+    # ───────────────────── private builder ─────────────────────
+
+    def _build_core(self, resolved_cfg, factor_config_path: str,
+                    param_profiles: dict, auto_profile_cfg: dict,
+                    is_backtest: bool):
+        """统一构造路径: 接收 ConfigManager 或 ResolvedConfig (鸭子类型),
+        完成 attr 注入 + sub_cfg 解析 + ArbCore 实例化。
+        """
         self._is_backtest = is_backtest
-        self._cfg_mgr = ConfigManager(strategy_config_path)
+        self._cfg_mgr = resolved_cfg
         self._factor_config_path = factor_config_path
         self._cur_date = 0
 
-        # 结构化配置
-        self._signal_cfg = self._cfg_mgr.signal_cfg
-        self._risk_cfg = self._cfg_mgr.risk_cfg
-        self._regime_cfg = self._cfg_mgr.regime_cfg
-        self._exec_cfg = self._cfg_mgr.exec_cfg
+        # 结构化配置 (两入口都暴露 .signal_cfg/.risk_cfg/.regime_cfg/.exec_cfg)
+        self._signal_cfg = resolved_cfg.signal_cfg
+        self._risk_cfg = resolved_cfg.risk_cfg
+        self._regime_cfg = resolved_cfg.regime_cfg
+        self._exec_cfg = resolved_cfg.exec_cfg
 
-        # v7.4: param_profile支持
-        with open(strategy_config_path, encoding='utf-8') as f:
-            _raw_cfg = _yaml.safe_load(f)
-        self._param_profiles = _raw_cfg.get('param_profiles', {}) or {}
-        self._auto_profile_cfg = _raw_cfg.get('param_profile_auto', {}) or {}
+        self._param_profiles = param_profiles
+        self._auto_profile_cfg = auto_profile_cfg
 
-        # 取第一个(也是唯一的)策略配置
-        sub_cfgs = self._cfg_mgr.strategies
+        sub_cfgs = resolved_cfg.strategies
         if len(sub_cfgs) != 1:
             raise ValueError(
                 f"v10单pipeline模式要求恰好1个策略配置, 当前{len(sub_cfgs)}个。"
@@ -60,53 +110,6 @@ class SpreadArbStrategy(BaseCtaStrategy):
             exec_cfg=self._exec_cfg,
             is_backtest=is_backtest,
         )
-
-    @classmethod
-    def from_experiment(cls, name: str, experiment: str = 'default',
-                        config_root: str = './config',
-                        is_backtest: bool = False):
-        """v9 工厂方法: 从分层配置创建策略实例"""
-        from ConfigResolver import ConfigResolver
-        rc = ConfigResolver(config_root).resolve(experiment)
-
-        obj = cls.__new__(cls)
-        BaseCtaStrategy.__init__(obj, name)
-
-        obj._is_backtest = is_backtest
-        obj._cfg_mgr = rc  # ResolvedConfig 鸭子兼容 ConfigManager
-        import os as _os
-        obj._factor_config_path = _os.path.join(
-            _os.path.abspath(config_root), 'base', 'factors.yaml')
-        obj._cur_date = 0
-
-        obj._signal_cfg = rc.signal_cfg
-        obj._risk_cfg = rc.risk_cfg
-        obj._regime_cfg = rc.regime_cfg
-        obj._exec_cfg = rc.exec_cfg
-
-        obj._param_profiles = rc.param_profiles
-        obj._auto_profile_cfg = rc.auto_profile_cfg
-
-        sub_cfgs = rc.strategies
-        if len(sub_cfgs) != 1:
-            raise ValueError(
-                f"v10单pipeline模式要求恰好1个策略配置, 当前{len(sub_cfgs)}个。"
-                f"多品种组合请用多策略实例。")
-        sub_cfg = sub_cfgs[0]
-        obj._maybe_apply_auto_profile(sub_cfg)
-        core_config = ArbCoreConfig.from_yaml(sub_cfg)
-        core_signal_cfg, core_risk_cfg = obj._resolve_sub_cfg(sub_cfg)
-
-        obj._core = ArbCore(
-            core_config=core_config,
-            risk_cfg=core_risk_cfg,
-            signal_cfg=core_signal_cfg,
-            adaptive_cfg=obj._regime_cfg,
-            factor_config_path=obj._factor_config_path,
-            exec_cfg=obj._exec_cfg,
-            is_backtest=is_backtest,
-        )
-        return obj
 
     @property
     def core(self) -> ArbCore:

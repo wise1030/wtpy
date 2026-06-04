@@ -144,11 +144,29 @@ class ArbCore:
         # 恢复持久化状态
         direction, last_signal_time = self.sm.load_all(context, self.rm)
         # P0-9: 恢复执行状态
-        self.sm.load_exec_state(context, self.eh)
+        # R2-A: 收集 EMERGENCY 重置告警, 末尾醒目输出
+        emergency_payload = self.sm.load_exec_state(context, self.eh, diag=self._diag)
         if direction != 0:
             self.eh.restore_state(direction)
             context.stra_log_text(
                 f"{self.name} restored direction={direction}, state=opened")
+
+        # R2-A: 启动期 EMERGENCY 醒目告警 — 用 ★★★ 前缀让 WT 监控前端易抓取
+        if emergency_payload is not None:
+            banner = (
+                "★★★ EMERGENCY: exec_state interrupted on previous run ★★★ "
+                f"sub={emergency_payload['sub_name']} "
+                f"prev_state={emergency_payload['interrupted_state']} "
+                f"direction={emergency_payload['direction']} "
+                f"abandoned_pending={emergency_payload['abandoned_pending']} "
+                "→ state reset to IDLE; MANUAL position reconciliation required."
+            )
+            # level=3 是 WT 的 error 级别
+            context.stra_log_text(banner, level=3)
+            # 同步保存供 SpreadArbStrategy.on_init 二次输出与单测断言
+            self._startup_emergency = emergency_payload
+        else:
+            self._startup_emergency = None
 
     def process(self, context, cur_date: int):
         """主入口: sync → compute → execute → persist"""

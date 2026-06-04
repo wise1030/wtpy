@@ -1,27 +1,19 @@
 from wtpy import WtEngine, EngineType
 from wtpy.monitor import WtMonSvr
-import yaml
 import sys
 import os
 import argparse
 
 # 统一设置项目根目录到sys.path，子模块不再需要自行sys.path.insert
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-for _sub in ('strategies', 'helpers', 'factors', 'reporter'):
+for _sub in ('strategies', 'helpers', 'factors'):
     _sub_path = os.path.join(_PROJECT_ROOT, _sub)
     if _sub_path not in sys.path:
         sys.path.insert(0, _sub_path)
 
 from SpreadArbStrategy import SpreadArbStrategy
 from ArbIndexWriter import ArbIndexWriter
-from ArbDataReporter import ArbDataReporter
-
-
-def load_sub_names(strategy_config_path: str) -> list:
-    """从strategy_config.yaml动态读取策略名称"""
-    with open(strategy_config_path, 'r') as f:
-        cfg = yaml.full_load(f)
-    return [s['name'] for s in cfg.get('strategies', [])]
+from preflight import run_or_exit as preflight_run_or_exit
 
 
 def parse_args():
@@ -34,6 +26,8 @@ def parse_args():
     parser.add_argument('--config-root', type=str, default=None,
                         help='config目录路径')
     parser.add_argument('--port', type=int, default=8080, help='监控端口')
+    parser.add_argument('--skip-preflight', action='store_true',
+                        help='跳过启动期 preflight 静态自检 (不推荐, 仅用于排障)')
     return parser.parse_args()
 
 
@@ -46,7 +40,15 @@ if __name__ == "__main__":
     if use_legacy:
         strategy_config_path = args.config or os.path.join(config_dir, 'strategy_config.yaml')
         factor_config_path = args.factor_config or os.path.join(config_dir, 'factor_config.yaml')
-        sub_names = load_sub_names(strategy_config_path)
+
+        # R2-B: 启动期静态自检 (失败即 exit 2, 避免带病启动)
+        if not args.skip_preflight:
+            preflight_run_or_exit(
+                _PROJECT_ROOT,
+                use_legacy=True,
+                strategy_config_path=strategy_config_path,
+                factor_config_path=factor_config_path,
+            )
 
         straInfo = SpreadArbStrategy(
             name='spread_arb',
@@ -55,21 +57,27 @@ if __name__ == "__main__":
         )
     else:
         config_root = os.path.abspath(args.config_root) if args.config_root else config_dir
+
+        # R2-B: 启动期静态自检 (失败即 exit 2, 避免带病启动)
+        if not args.skip_preflight:
+            preflight_run_or_exit(
+                _PROJECT_ROOT,
+                use_legacy=False,
+                experiment=args.experiment,
+                config_root=config_root,
+            )
+
         straInfo = SpreadArbStrategy.from_experiment(
             name='spread_arb',
             experiment=args.experiment,
             config_root=config_root,
         )
-        sub_names = [straInfo.core.name]
 
     engine = WtEngine(EngineType.ET_CTA)
     engine.init('../common/', "config.yaml")
 
     writer = ArbIndexWriter()
     engine.set_writer(writer)
-
-    reporter = ArbDataReporter("spread_arb", sub_names)
-    engine.set_data_reporter(reporter)
 
     engine.add_cta_strategy(straInfo)
 

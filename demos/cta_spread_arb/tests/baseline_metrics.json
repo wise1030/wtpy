@@ -1,0 +1,50 @@
+{
+  "rb_hc_2510": {
+    "init_capital": 500000,
+    "final_dynbalance": -1885.04,
+    "total_return_pct": -0.377008,
+    "total_fee": 1775.04,
+    "sharpe": -1.725223,
+    "max_dd_pct": -0.426373,
+    "funds_rows": 181,
+    "first_date": 20250120,
+    "last_date": 20251015,
+    "trades_rows": 852,
+    "open_count": 426,
+    "close_count": 426,
+    "trade_fee_sum": 1775.04,
+    "leg_counts": {
+      "SHFE.hc.2510": 426,
+      "SHFE.rb.2510": 426
+    },
+    "first_trade_time": 202501200925,
+    "last_trade_time": 202510151120,
+    "sha256_funds": "6009f8346ac6a6be15dad55b147086a4ed3961ec8b9172a9fa515ef600448690",
+    "sha256_trades": "24d77b3238b463b21030780bea5121fd52f9640ddb35f6ae74aaefe934134605",
+    "baseline_dir": "baseline_v10_2510_20260602"
+  },
+  "rb_hc_2601": {
+    "init_capital": 500000,
+    "final_dynbalance": 2887.29,
+    "total_return_pct": 0.577458,
+    "total_fee": 2862.71,
+    "sharpe": 2.161506,
+    "max_dd_pct": -0.439766,
+    "funds_rows": 181,
+    "first_date": 20250120,
+    "last_date": 20251015,
+    "trades_rows": 1358,
+    "open_count": 680,
+    "close_count": 678,
+    "trade_fee_sum": 2862.71,
+    "leg_counts": {
+      "SHFE.hc.2601": 679,
+      "SHFE.rb.2601": 679
+    },
+    "first_trade_time": 202501202105,
+    "last_trade_time": 202510151110,
+    "sha256_funds": "83d75dc15a531471d960818dc27348ab5312dab3abc00585bf119b5aaf5f93a9",
+    "sha256_trades": "24cc1d0f0b1257f9e6bd6aa2b24d7d9f3313c19d7712923c4acce6e1a3546219",
+    "baseline_dir": "baseline_v10_2601_20260602"
+  }
+}

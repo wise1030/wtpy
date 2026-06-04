@@ -88,16 +88,14 @@ cta_spread_arb/
 │   ├── trend_factors.py          # 趋势因子(MACD/ADX/ChannelBreak/TrendStrength)
 │   └── vol_price_factors.py      # 量价因子(VWAP/量价背离/OBV/量比, 当前禁用)
 │
-├── scripts/                      # 工具脚本
-│   ├── optimize_v6.py            # 参数优化(最新版)
-│   ├── grid_search.py            # 网格搜索
-│   ├── diagnose_backtest.py      # 回测诊断
-│   ├── diagnose_signals.py       # 信号诊断
-│   ├── analyze_signal_direction.py
-│   ├── check_coint_by_year.py
-│   ├── compare_spreads.py
-│   ├── verify_spread_mr.py
-│   └── show_results.py
+├── scripts/                      # 工具脚本 (P2-clean 后保留项)
+│   ├── analyze_signal_direction.py  # 信号方向分析
+│   ├── check_coint_by_year.py       # 协整年度核查
+│   ├── compare_spreads.py           # spread 对比
+│   ├── verify_spread_mr.py          # 均值回归验证
+│   └── show_results.py              # 回测结果展示
+│   # 退役脚本(grid_search/optimize_v6/diagnose_*/c3/c6/migrate_v8_to_v9)
+│   # 已于 2026-06-04 移至 _trash/p2_clean_20260604/
 │
 └── docs/                         # 架构文档
 ```

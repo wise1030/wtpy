@@ -36,8 +36,14 @@ cta_spread_arb/
 ├── reporter/                        # 实盘数据报告模块
 ├── scripts/                         # 诊断/优化脚本
 ├── docs/                            # 文档
+│   ├── PROJECT_GUIDE.md             #   项目说明 + 数据流 + 各模块职责
+│   ├── CONFIG_GUIDE.md              #   策略配置 (yaml schema + profile + 实验)
+│   ├── WT_INFRA_GUIDE.md            #   WT 基础设施 yaml 字段标注 + 凭据安全 (R3)
+│   ├── STRATEGY_DESIGN_BASELINE.md  #   策略设计基线
+│   ├── archive/                     #   历史版本文档
+│   └── plans/                       #   阶段计划
 ├── runBT.py                         # 回测启动脚本
-└── runLive.py                       # 实盘启动脚本
+└── runLive.py                       # 实盘启动脚本 (preflight 启动期自检)
 ```
 
 ## 策略架构
@@ -328,9 +334,8 @@ python runLive.py
 
 ### 参数优化
 
-```bash
-python scripts/optimize_v6.py
-```
+> 注: 旧版 `scripts/optimize_v6.py` / `scripts/grid_search.py` 已于 2026-06-04
+> P2-clean 退役。新版参数优化路径待 P3 阶段重建（基于 ConfigResolver + experiments）。
 
 ## 回测结果
 

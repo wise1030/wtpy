@@ -100,8 +100,21 @@ class StateManager:
         }
         self.save(context, 'exec_state', state)
 
-    def load_exec_state(self, context, exec_helper):
-        """恢复ArbExecHelper执行状态"""
+    def load_exec_state(self, context, exec_helper, diag=None):
+        """恢复ArbExecHelper执行状态
+
+        Args:
+            context: CtaContext
+            exec_helper: ArbExecHelper 实例
+            diag: 可选 DiagLogger; 提供时, OPENING/CLOSING 被安全重置时会发 risk 事件,
+                  让实盘报警钩子能捕获"潜在丢单"信号 (A4 修复)。
+
+        Returns:
+            dict | None: 重置告警 payload（仅在发生 OPENING/CLOSING→IDLE 强制重置时返回，
+                         供 ArbCore.on_init 汇总后通过 stra_log_text 醒目输出）。
+                         结构: {'sub_name', 'interrupted_state', 'direction',
+                                'abandoned_pending'}。无异常返回 None。
+        """
         state = self.load(context, 'exec_state')
         if state and isinstance(state, dict):
             exec_helper._state = state.get('state', exec_helper.STATE_IDLE)
@@ -118,7 +131,29 @@ class StateManager:
             # 安全策略: 重启后pending挂单已失效, 强制重置为IDLE
             # 如果有实际仓位, sync_state会在下一个tick中修正
             if exec_helper._state in (exec_helper.STATE_OPENING, exec_helper.STATE_CLOSING):
+                interrupted_state = exec_helper._state
+                # A4 修复: 从持久化 state 直接读 pending(load 路径未恢复 _pending),
+                #         保证告警里能列出被废弃的挂单 code, 实盘可对账。
+                pending_codes = list((state.get('pending') or {}).keys())
                 exec_helper._state = exec_helper.STATE_IDLE
                 exec_helper._pending.clear()
                 exec_helper._filled.clear()
                 exec_helper._state_since = None
+                # A4: 发 risk 事件, 让实盘监控能感知"潜在丢单/孤腿"风险
+                if diag is not None:
+                    diag.risk(
+                        self._sub_name,
+                        rule='exec_state_reset',
+                        detail=(f"interrupted state={interrupted_state}, "
+                                f"abandoned_pending={pending_codes}, "
+                                f"direction={exec_helper._direction}; "
+                                f"manual position reconciliation recommended"),
+                    )
+                # R2-A: 返回 EMERGENCY payload, 由 ArbCore.on_init 汇总输出
+                return {
+                    'sub_name': self._sub_name,
+                    'interrupted_state': interrupted_state,
+                    'direction': exec_helper._direction,
+                    'abandoned_pending': pending_codes,
+                }
+        return None

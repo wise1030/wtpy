@@ -40,6 +40,9 @@ storage/
 # ── Baseline indice.csv 太大不入 git ────────────────────────
 backtest_results/**/indice.csv
 
+# ── Grid 批跑产物（每次几十 MB，临时复现用，不入 git）─────────
+backtest_results/batch_*/
+
 # ── 编辑器 / 系统 ───────────────────────────────────────
 .DS_Store
 .vscode/
