@@ -4,12 +4,30 @@
 # 用途: 应用于均值回归特征显著的合约月 (rb/hc 价差有显著回归)
 # 关键: 与 trending_contract 对偶 — 降低 entry_threshold 多捕捉机会,
 #       保持 SHORT 中性
+# S1: 新增 factor_overrides — 在 MR 行情中启用 RSI 反转信号
+# 验证: 2601 realized_pnl 720→800 (+11.1%), 最优4因子配置
 # ============================================================
 
 name: mr_contract
-description: "均值回归市场: 降低入场门槛, 多捕捉回归机会"
+description: "均值回归市场: 降低入场门槛, 增加 RSI 反转因子"
 
 overrides:
   signal:
     entry_threshold: 0.40        # 0.45 → 0.40, 多捕捉回归机会
     short_entry_multiplier: 1.0  # 保持中性
+  factors:
+    # === 核心3因子: 保持 coint_residual 主导 ===
+    - name: coint_residual
+      weight: 0.45           # 0.50 → 0.45, 微降为 RSI 腾空间
+    - name: half_life
+      weight: 0.20           # 保持不变
+    - name: spread_momentum
+      weight: 0.20           # 0.30 → 0.20, 微降
+    # === 新增: RSI 反转因子 (IC=-0.33, MR 行情最强补充信号) ===
+    - name: rsi_spread
+      enabled: true
+      weight: 0.15
+      params:
+        overbought: 70
+        oversold: 30
+        period: 21

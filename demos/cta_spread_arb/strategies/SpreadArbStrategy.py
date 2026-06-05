@@ -10,8 +10,13 @@ v10架构: 去除多sub/PositionRouter概念。
 P4M-2 (2026-06): __init__ 与 from_experiment 共用 _build_core() 私有构造器,
 消除 80% 重复代码。两入口仅负责"准备 resolved_cfg",后续 sub_cfg 解析
 和 ArbCore 构建走同一路径。
+
+S1 (2026-06): factor_overrides 支持 — profile 可覆盖因子启停/权重/参数,
+生成临时 yaml 供 FactorEngine 加载, 向后兼容(无 factor_overrides 时原路径)。
 """
 import os as _os
+import tempfile as _tempfile
+from copy import deepcopy as _deepcopy
 from dataclasses import replace as _dc_replace
 
 import yaml as _yaml
@@ -99,14 +104,15 @@ class SpreadArbStrategy(BaseCtaStrategy):
         sub_cfg = sub_cfgs[0]
         self._maybe_apply_auto_profile(sub_cfg)
         core_config = ArbCoreConfig.from_yaml(sub_cfg)
-        core_signal_cfg, core_risk_cfg = self._resolve_sub_cfg(sub_cfg)
+        core_signal_cfg, core_risk_cfg, effective_factor_path = self._resolve_sub_cfg(
+            sub_cfg, factor_config_path)
 
         self._core = ArbCore(
             core_config=core_config,
             risk_cfg=core_risk_cfg,
             signal_cfg=core_signal_cfg,
             adaptive_cfg=self._regime_cfg,
-            factor_config_path=factor_config_path,
+            factor_config_path=effective_factor_path,
             exec_cfg=self._exec_cfg,
             is_backtest=is_backtest,
         )
@@ -153,19 +159,22 @@ class SpreadArbStrategy(BaseCtaStrategy):
             print(f"[auto_profile] {sub_name}: {info} → '{profile}'")
             sub_cfg['param_profile'] = profile
 
-    def _resolve_sub_cfg(self, sub_cfg: dict):
+    def _resolve_sub_cfg(self, sub_cfg: dict, base_factor_path: str):
         """解析参数覆盖
 
         优先级(从低到高):
         1. 全局 signal/risk_control 配置（基线）
         2. param_profile 引用（顶层 param_profiles 字典中查找）
         3. strategy 内联 signal_overrides / risk_overrides（最高优先级）
+
+        S1 新增: factor_overrides 合并 — profile 或 inline 可覆盖因子权重/启停/参数。
         """
         signal_cfg = self._signal_cfg
         risk_cfg = self._risk_cfg
 
         sig_over = {}
         risk_over = {}
+        factor_over = []
 
         profile_name = sub_cfg.get('param_profile')
         if profile_name:
@@ -176,9 +185,14 @@ class SpreadArbStrategy(BaseCtaStrategy):
                     f"可用 profile: {list(self._param_profiles.keys())}")
             sig_over.update(profile.get('signal', {}) or {})
             risk_over.update(profile.get('risk_control', {}) or {})
+            # S1: 采集 profile 中的 factor_overrides
+            pf_factors = profile.get('factors', []) or []
+            factor_over.extend(pf_factors)
 
         sig_over.update(sub_cfg.get('signal_overrides', {}) or {})
         risk_over.update(sub_cfg.get('risk_overrides', {}) or {})
+        # S1: 采集 inline factor_overrides (最高优先级, 后到覆盖)
+        factor_over.extend(sub_cfg.get('factor_overrides', []) or [])
 
         if sig_over:
             valid_fields = set(signal_cfg.__dataclass_fields__.keys())
@@ -196,12 +210,86 @@ class SpreadArbStrategy(BaseCtaStrategy):
                     f"strategy '{sub_cfg.get('name')}' risk_overrides 包含未知字段: {unknown}")
             risk_cfg = _dc_replace(risk_cfg, **risk_over)
 
-        if sig_over or risk_over:
+        # S1: 应用 factor_overrides → 生成临时 factor yaml
+        effective_factor_path = base_factor_path
+        if factor_over:
+            effective_factor_path = self._apply_factor_overrides(
+                base_factor_path, factor_over, sub_cfg.get('name', '?'))
+
+        if sig_over or risk_over or factor_over:
             print(f"[param_profile] {sub_cfg.get('name')}: "
                   f"profile={profile_name or '-'}, "
-                  f"signal_overrides={sig_over}, risk_overrides={risk_over}")
+                  f"signal_overrides={sig_over}, risk_overrides={risk_over}, "
+                  f"factor_overrides={len(factor_over)} items")
 
-        return signal_cfg, risk_cfg
+        return signal_cfg, risk_cfg, effective_factor_path
+
+    def _apply_factor_overrides(self, base_path: str, overrides: list,
+                                sub_name: str) -> str:
+        """将 factor_overrides 合并到 base factors.yaml, 输出临时文件
+
+        合并逻辑: 以 override 的 name 匹配 base 中的因子:
+        - 已存在: 更新 weight / enabled / params (按 key 合并)
+        - 不存在: 追加到 factors 列表 (来自关停因子池)
+
+        Returns: 临时 factor yaml 路径 (由 FactorEngine 加载)
+        """
+        with open(base_path, 'r', encoding='utf-8') as f:
+            base_cfg = _yaml.safe_load(f)
+
+        factors = base_cfg.get('factors', [])
+        # 建立 name → index 映射 (包括注释/关停因子 — 它们不在 factors 列表中)
+        name_idx = {}
+        for i, f in enumerate(factors):
+            fname = f.get('name')
+            if fname:
+                name_idx[fname] = i
+
+        # 也扫描关停因子: 从原始 yaml 中已注释的因子无法被 yaml parser 解析,
+        # 所以只处理 factors 列表中 enabled=false 的项
+        # (新启用的因子需在 factors 列表中存在, 只是 enabled=false)
+
+        for ov in overrides:
+            ov_name = ov.get('name')
+            if not ov_name:
+                continue
+
+            if ov_name in name_idx:
+                # 合并到已有因子
+                idx = name_idx[ov_name]
+                existing = factors[idx]
+                if 'weight' in ov:
+                    existing['weight'] = ov['weight']
+                if 'enabled' in ov:
+                    existing['enabled'] = ov['enabled']
+                if 'params' in ov:
+                    # 按 key 合并 params, 不删除未覆盖的参数
+                    if 'params' not in existing or existing['params'] is None:
+                        existing['params'] = {}
+                    existing['params'].update(ov['params'])
+            else:
+                # 不在 factors 列表中 → 追加 (从关停池启用)
+                # 需要完整定义: class / name / enabled / weight / params
+                new_factor = {
+                    'class': ov.get('class', f'{ov_name.replace("_", " ").title().replace(" ", "")}Factor'),
+                    'enabled': ov.get('enabled', True),
+                    'name': ov_name,
+                    'params': ov.get('params', {}),
+                    'weight': ov.get('weight', 0),
+                }
+                factors.append(new_factor)
+                name_idx[ov_name] = len(factors) - 1
+
+        base_cfg['factors'] = factors
+
+        # 写临时文件 (不自动删除 — debug 需要; 回测结束进程退出时自动清理)
+        fd, tmp_path = _tempfile.mkstemp(
+            suffix='.yaml', prefix=f'factors_{sub_name}_')
+        with _os.fdopen(fd, 'w', encoding='utf-8') as f:
+            _yaml.dump(base_cfg, f, allow_unicode=True, default_flow_style=False)
+
+        print(f"[factor_overrides] {sub_name}: wrote merged factor config → {tmp_path}")
+        return tmp_path
 
     def on_init(self, context: CtaContext):
         self._core.on_init(context, is_main_holder=True)
