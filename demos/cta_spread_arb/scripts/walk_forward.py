@@ -179,14 +179,21 @@ if __name__ == "__main__":
     print("-" * 50)
     print(f"{'SUM':>4} | {sum(train_pnls):>12.2f} | {sum(test_pnls):>12.2f} |")
 
-    # 过拟合信号
-    all_positive_train = all(p > 0 for p in train_pnls)
-    any_negative_test = any(p < 0 for p in test_pnls)
-    if all_positive_train and any_negative_test:
-        print("\n  ⚠️  过拟合信号: Train 全正但 Test 出现负 PnL")
+    # 过拟合分析
+    flip_count = sum(1 for ep, tp in zip(test_pnls, train_pnls)
+                     if (ep > 0) != (tp > 0))
+    train_pos = sum(p > 0 for p in train_pnls)
+    test_pos = sum(p > 0 for p in test_pnls)
+    print()
+    if flip_count >= len(fold_results) / 2:
+        print(f"  ⚠️  严重过拟合: {flip_count}/{len(fold_results)} 折 Train/Test 方向相反")
+        print(f"     Train 正折: {train_pos}/{len(fold_results)}, Test 正折: {test_pos}/{len(fold_results)}")
+        print(f"     策略在时间切片上不稳定, 当前参数组无样本外泛化能力")
+    elif any(p < 0 for p in train_pnls) and sum(test_pnls) > 0:
+        print(f"  ⚠️  Train 出现负折但 Test 合计为正, 需更大 fold 数验证")
     elif sum(test_pnls) > 0 and sum(train_pnls) > 0:
-        print(f"\n  ✅ Train/Test 同向盈利, 过拟合风险低")
+        print(f"  ✅ Train/Test 同向盈利, 过拟合风险低")
     else:
-        print(f"\n  ⚠️  Train 或 Test 整体亏损, 需审视策略参数")
+        print(f"  ⚠️  Train/Test 合计 PnL 为负或 0, 策略无正期望")
 
-    print("\n[walk_forward] Done.")
+    print(f"\n[walk_forward] Done.")
