@@ -94,6 +94,90 @@ def _check_dir_writable(path: str, label: str) -> Tuple[bool, str]:
         return False, f"[NOT_WRITABLE] {label}: {path} :: {exc}"
 
 
+def _check_pair_economics(config_root: str, experiment: str) -> Tuple[bool, str]:
+    """验证品种对 fee/notional 比率, 防止 rb/hc 类结构性亏损。
+
+    从 experiment yaml 解析合约配置, 计算:
+    - 单边 fee 估算 (按费率 × 名义价值 或 定额)
+    - 单轮 fee / 最小 tick 价值 比率
+    - 如果比率 > 1.5% → WARNING (类似 rb/hc 的 fee 侵蚀问题)
+
+    Returns:
+        (ok, msg): ok=False 表示有严重警告但不阻塞启动
+    """
+    import yaml as _yaml
+
+    exp_path = os.path.join(config_root, 'experiments', f'{experiment}.yaml')
+    try:
+        with open(exp_path, 'r', encoding='utf-8') as f:
+            exp_cfg = _yaml.safe_load(f) or {}
+    except Exception as exc:
+        return False, f"[PAIR_ECON_ERR] 无法读取实验配置: {exc}"
+
+    instances = exp_cfg.get('instances', [])
+    if not instances:
+        return True, "[PAIR_ECON] 无 instances, 跳过"
+
+    warnings = []
+    for inst in instances:
+        contract_name = inst.get('contract')
+        if not contract_name:
+            continue
+
+        contract_path = os.path.join(config_root, 'contracts', f'{contract_name}.yaml')
+        try:
+            with open(contract_path, 'r', encoding='utf-8') as f:
+                contract_cfg = _yaml.safe_load(f) or {}
+        except Exception:
+            warnings.append(f"{contract_name}: 合约配置不可读")
+            continue
+
+        legs = contract_cfg.get('legs_template', [])
+        if len(legs) < 2:
+            continue
+
+        # 估算各腿 fee 和名义价值
+        total_fee_est = 0.0
+        total_notional = 0.0
+        for leg in legs:
+            mult = leg.get('multiplier', 10)
+            lots = leg.get('lots', 1)
+            fee_rate = leg.get('fee_rate', 0)  # 万分之 (0=定额)
+            fee_fixed = leg.get('fee_fixed', 0)  # 定额 (元/手)
+            ref_price = leg.get('ref_price', 3000)  # 参考价格
+
+            notional = ref_price * mult * lots
+            total_notional += notional
+
+            if fee_rate > 0:
+                total_fee_est += notional * fee_rate / 10000 * lots
+            else:
+                total_fee_est += fee_fixed * lots
+
+        # 单轮 fee (开+平)
+        round_fee = total_fee_est * 2
+
+        # 最小 tick 价值
+        min_tick_value = 0.0
+        for leg in legs:
+            mult = leg.get('multiplier', 10)
+            lots = leg.get('lots', 1)
+            tick_size = leg.get('tick_size', 1)
+            min_tick_value += tick_size * mult * lots
+
+        if min_tick_value > 0:
+            fee_ratio = round_fee / min_tick_value
+            if fee_ratio > 2.0:
+                warnings.append(
+                    f"{contract_name}: 单轮fee/最小tick={fee_ratio:.1f}x "
+                    f"(fee≈{round_fee:.0f}, tick={min_tick_value:.0f}) — "
+                    f"高fee侵蚀风险 (参考: rb/hc=2.5x, l/pp=1.0x)")
+
+    if warnings:
+        return True, f"[PAIR_ECON] 警告: {'; '.join(warnings)}"
+    return True, "[PAIR_ECON] fee/notional 比率正常"
+
+
 def run_preflight(project_root: str,
                   use_legacy: bool,
                   strategy_config_path: 'str | None' = None,
@@ -181,6 +265,14 @@ def run_preflight(project_root: str,
             results.append(msg)
             if not ok:
                 failures.append(msg)
+
+        # 6. Pair economics check: 验证品种对 fee/notional 比率 (PairScreener 轻量集成)
+        if experiment:
+            pair_ok, pair_msg = _check_pair_economics(
+                config_root, experiment)
+            results.append(pair_msg)
+            if not pair_ok:
+                failures.append(pair_msg)
 
     if verbose:
         print("=" * 60)

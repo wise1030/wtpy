@@ -17,6 +17,9 @@ legs_template:
     ratio: 1
     lots: 1
     multiplier: 5
+    fee_fixed: 1.25   # 定额 (元/手)
+    ref_price: 8000   # 参考价格 (元/吨)
+    tick_size: 1      # 最小变动价位 (元/吨)
   # 反腿(pp): ratio=-1, 与 l 形成跨品种对冲
   - symbol: pp
     exchange: DCE
@@ -24,3 +27,6 @@ legs_template:
     ratio: -1
     lots: 1
     multiplier: 5
+    fee_fixed: 1.47   # 定额 (元/手)
+    ref_price: 7500
+    tick_size: 1

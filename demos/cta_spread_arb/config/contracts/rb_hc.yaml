@@ -22,6 +22,9 @@ legs_template:
     ratio: 1
     lots: 1
     multiplier: 10
+    fee_rate: 1.0     # 万分之一 (按金额)
+    ref_price: 3200   # 参考价格 (元/吨)
+    tick_size: 1      # 最小变动价位 (元/吨)
   # 反腿(hc): ratio=-1, 与 rb 形成跨品种对冲
   - symbol: hc
     exchange: SHFE
@@ -29,3 +32,6 @@ legs_template:
     ratio: -1
     lots: 1
     multiplier: 10
+    fee_fixed: 1.0    # 定额 (元/手)
+    ref_price: 3200
+    tick_size: 1
