@@ -11,7 +11,7 @@ A1(2026-06): 移除 utils.simple_regime fallback —— regime_detector 改为�
 注意: 入口文件已统一设置sys.path，子模块无需再自行sys.path.insert。
 """
 from schemas import SignalResult
-from SignalPipeline import SignalPipeline
+from pipeline import SignalPipeline
 
 
 class SignalGen:
