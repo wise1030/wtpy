@@ -15,12 +15,17 @@ class FactorBase:
          例: ZScore — |z|大→偏离远→MR信号强
        - "neutral": 无明确方向属性(如半衰期强度)
     
-    2. rank标准化: 用滚动排名百分位替代clip归一化
-       - 维护最近N个raw_value的历史窗口
-       - 当前raw_value在窗口中的排名百分位 → 映射到[-1, 1]
-       - 优点: 自适应分布变化，不受极端值影响，输出严格[-1,1]
-       - 保留原clip归一化作为fallback(窗口不足时)
-    
+    2. 归一化路径 (v2 双轨, 2026-06-09):
+       生产路径 (默认 use_rank_v2=False):
+         - clip 归一化 (raw_value clip 到 ±clip_val 再除以 clip_val)
+         - 行为与历史 backtest 完全一致 — 所有现存 profile 调参基于此
+         - use_rank=True 但 _normalize 不自动维护 rank_window
+           → 实际所有因子都走 clip 路径 (历史遗留行为, 保留语义稳定)
+       实验路径 (use_rank_v2=True, 显式开启):
+         - rank 滚动百分位归一化 (raw 在 N 窗口中的 rank → [-1,1])
+         - _normalize 自动调 _append_rank_value, 前 20 个 bar fallback clip
+         - 用于新策略 A/B 试验; 启用后必须重跑 WF 校准 profile
+
     3. 因子输出语义(纯统计，不含策略方向):
        - 正值: spread偏高/上升动量/偏离均值上方
        - 负值: spread偏低/下降动量/偏离均值下方
@@ -38,7 +43,11 @@ class FactorBase:
         rank_window = params.get('rank_window', 200)
         self._rank_window = deque(maxlen=rank_window)
         self._rank_sorted = []
+        # use_rank: 历史字段, 仅用于 v1 路径判断 (是否允许走 rank 分支)
         self._use_rank = params.get('use_rank', True)
+        # use_rank_v2: 显式开关, 默认 False 保持生产行为
+        # 启用后 _normalize 才会自动维护 rank_window 真正走 rank 路径
+        self._use_rank_v2 = params.get('use_rank_v2', False)
 
     @property
     def name(self) -> str:
@@ -61,14 +70,29 @@ class FactorBase:
     def _normalize(self, raw_value: float, clip_val: float = 3.0) -> float:
         """
         标准化输出到[-1, 1]
-        
-        优先使用rank标准化(排名百分位)，窗口不足时fallback到clip归一化
+
+        路径选择 (2026-06-09 双轨化):
+          - use_rank_v2=True: 实验路径, 自动维护 rank_window 并走 rank 归一化
+            (前 20 bar 窗口不足时 fallback clip)
+          - 否则: 生产路径 (历史行为), 始终走 clip 归一化
+            use_rank=True 也不再自动预热, 与历史 backtest 完全一致
         """
+        # v2 实验路径: 真激活 rank 归一化
+        if self._use_rank_v2:
+            self._append_rank_value(raw_value)
+            if len(self._rank_window) >= 20:
+                return self._rank_normalize(raw_value)
+            # 窗口不足: fallback clip
+            clipped = np.clip(raw_value, -clip_val, clip_val)
+            return float(clipped / clip_val)
+
+        # 生产路径 (v1, 默认): clip 归一化
+        # use_rank=True 但 _rank_window 永不预热 → 旧 _rank_normalize 永不触发
+        # 这一行为被 test_rank_window_preserves_legacy_no_auto_warmup_behavior 显式锁定
         if self._use_rank and len(self._rank_window) >= 20:
             return self._rank_normalize(raw_value)
 
-        # fallback: clip归一化。保持旧语义: fallback阶段不预热rank窗口，
-        # 避免性能优化改变策略信号分布。
+        # fallback: clip归一化
         clipped = np.clip(raw_value, -clip_val, clip_val)
         return float(clipped / clip_val)
 
