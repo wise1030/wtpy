@@ -6,7 +6,15 @@ types.py — 统一数据结构定义
 """
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+import re
 import numpy as np
+
+
+# stdCode 三段式正则: EXCHG.product.contract
+# - EXCHG: 大写交易所代码 (SHFE/DCE/CZCE/CFFEX/INE/GFEX)
+# - product: 品种字母 (rb/hc/l/pp/IF/IO etc, 大小写都允许)
+# - contract: 月份 (2509/2601) 或主连 (HOT/main/MAIN)
+_STDCODE_REGEX = re.compile(r'^[A-Z]+\.[A-Za-z]+\.[A-Za-z0-9_\-]+$')
 
 
 # ============================================================
@@ -282,11 +290,24 @@ class ExecConfig:
 
 @dataclass
 class LegConfig:
-    """单腿配置"""
+    """单腿配置
+
+    code 必须是严格三段式 stdCode: EXCHG.product.contract
+    例: DCE.l.2609 / SHFE.rb.HOT / CZCE.SR.501
+    错误格式 (l2609 / DCE.l2609 / l.2609) 会被 __post_init__ 抛出 ValueError。
+    """
     code: str
     lots: int
     multiplier: int
     ratio: int = 1
+
+    def __post_init__(self):
+        if not isinstance(self.code, str) or not _STDCODE_REGEX.match(self.code):
+            raise ValueError(
+                f"LegConfig.code 必须是三段式 stdCode 'EXCHG.product.contract', "
+                f"实际收到 {self.code!r}. "
+                f"正确示例: 'DCE.l.2609', 'SHFE.rb.HOT', 'CZCE.SR.501'."
+            )
 
 
 @dataclass

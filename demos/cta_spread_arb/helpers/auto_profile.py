@@ -168,6 +168,15 @@ def auto_select_for_legs(legs: list, storage_csv_dir: str,
     if len(legs) < 2:
         return None, 0.5, 'legs不足2条, 跳过auto_profile'
     leg_a, leg_b = legs[0], legs[1]
+    # A1 fix: 双保险 — LegConfig.__post_init__ 已校验, 这里二次断言防御
+    # 避免 storage_csv_dir 下找不到 f'{l2609}_d.csv' 这种命名bug静默失败
+    for leg in (leg_a, leg_b):
+        if leg.code.count('.') != 2:
+            return None, 0.5, (
+                f"leg.code {leg.code!r} 不是三段式 EXCHG.product.contract, "
+                f"无法定位 storage/csv/{leg.code}_d.csv. "
+                f"请检查 ConfigManager 渲染逻辑或 contracts/*.yaml 模板."
+            )
     csv_a = os.path.join(storage_csv_dir, f'{leg_a.code}_d.csv')
     csv_b = os.path.join(storage_csv_dir, f'{leg_b.code}_d.csv')
 

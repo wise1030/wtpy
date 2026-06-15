@@ -9,7 +9,10 @@ class VwapDeviationFactor(FactorBase):
     修复: 平滑逻辑切片错误
     原逻辑: spread[-(period+i):len(spread)-i] 导致不同i值下窗口终点不一致
     修复: 统一使用以当前bar为终点的滚动窗口
+
+    A4: DIRECTION_TYPE = 'reversal' (价差偏离 VWAP 越远, 预期回归)
     """
+    DIRECTION_TYPE = "reversal"
 
     def calculate(self, spread: np.ndarray, **kwargs) -> float:
         period = self._params.get('period', 20)
@@ -59,7 +62,10 @@ class VolumePriceDivergenceFactor(FactorBase):
     量价背离因子
 
     修复: threshold参数语义明确化
+
+    A4: DIRECTION_TYPE = 'reversal' (新高量不足→看跌, 新低量不足→看涨, 典型背离反转)
     """
+    DIRECTION_TYPE = "reversal"
 
     def calculate(self, spread: np.ndarray, **kwargs) -> float:
         lookback = self._params.get('lookback', 30)
@@ -112,7 +118,10 @@ class OBVSpreadFactor(FactorBase):
     OBV价差因子
 
     修复: 放大系数可配置化
+
+    A4: DIRECTION_TYPE = 'momentum' (OBV 累积上升随价格趋势, 量能确认方向)
     """
+    DIRECTION_TYPE = "momentum"
 
     def calculate(self, spread: np.ndarray, **kwargs) -> float:
         period = self._params.get('period', 20)
@@ -145,7 +154,10 @@ class VolumeRatioFactor(FactorBase):
     量比因子
 
     优化: 即使量比未超过阈值也输出弱信号，提高信息利用率
+
+    A4: DIRECTION_TYPE = 'momentum' (量比放大且 spread 同向 → 趋势确认)
     """
+    DIRECTION_TYPE = "momentum"
 
     def calculate(self, spread: np.ndarray, **kwargs) -> float:
         period = self._params.get('period', 10)

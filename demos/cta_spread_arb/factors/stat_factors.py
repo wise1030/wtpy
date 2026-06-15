@@ -107,9 +107,20 @@ class CointResidualFactor(FactorBase):
             self._c = None
             return
         cur_date = kwargs.get('cur_date', 0)
-        effective_interval = max(1, refit_interval // (2 ** self._refit_fail_count))
+        # A3 fix: backoff 方向反转
+        # 原代码: effective = refit_interval // (2**fail_count)  → 失败越多重试越快 (反 backoff)
+        #         失败=协整破裂, 在垃圾数据上反复 fit, beta 剧烈跳变, 下游 z-score 失稳
+        # 正确: 指数 backoff 失败时延长间隔, 让 beta=None 持续更久,
+        #       期间 calculate() 用 price-spread z-score fallback, 等市场恢复再 refit.
+        #       cap 在 2^5=32 倍, 防止 cur_date 永远追不上.
+        backoff_mult = 2 ** min(self._refit_fail_count, 5)
+        effective_interval = refit_interval * backoff_mult
         if self._beta is not None and (cur_date - self._last_refit_day) < effective_interval:
-            return  # 不需要refit
+            return  # 不需要refit (含 backoff 期内的失败延展)
+        # 即使 beta=None, 也不能每个 bar 都 refit, 否则浪费算力. 同样走 backoff.
+        if self._beta is None and self._refit_fail_count > 0 and \
+           (cur_date - self._last_refit_day) < effective_interval:
+            return
         try:
             new_beta, new_c, coint_valid = self._ols_coint(
                 p1, p2, min_len, coint_p_threshold)
