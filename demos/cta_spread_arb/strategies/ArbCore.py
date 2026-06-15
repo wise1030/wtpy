@@ -45,7 +45,8 @@ class ArbCore:
                  risk_cfg: RiskConfig, signal_cfg: SignalConfig,
                  adaptive_cfg: RegimeConfig, factor_config_path: str,
                  exec_cfg: ExecConfig = None,
-                 is_backtest: bool = False):
+                 is_backtest: bool = False,
+                 param_profile: str = None):
         self.name = core_config.name
         self._config = core_config
         self._risk_cfg = risk_cfg
@@ -54,7 +55,10 @@ class ArbCore:
         self._exec_cfg = exec_cfg or ExecConfig()
         self._is_backtest = is_backtest
         self._last_coint_p = 1.0  # 缓存上一bar的coint_p
-        self._current_profile = None  # 当前生效的param_profile名
+        # P0-γ: profile 名透传到 ArbCore (回测/实盘统一)
+        # 回测路径: SpreadArbStrategy 在 _resolve_sub_cfg 前传入
+        # 实盘路径: _recheck_profile 动态更新
+        self._current_profile = param_profile
         self._daily_spread_history = []  # 实盘增量: 日线价差序列
         self._last_profile_recheck_date = 0  # 上次重算profile的日期
 
@@ -345,6 +349,31 @@ class ArbCore:
             context.add_chart_mark(float(bar_data.spread[-1]), "risk_exit", self.name)
             self._diag.risk(self.name, rule='risk_close', detail=risk_result)
         elif signal.should_trade:
+            # P0-γ: trending_contract profile 下方向冲突硬阻断
+            # 原 EntryJudgeStep 只做软衰减(×0.5)，trend regime 中逆势仍可下单
+            # trending profile 表示日线已确认强趋势，逆势开仓胜率显著低于均值
+            # ENV 开关: P0_GAMMA_HARD_BLOCK=0 关闭 (用于 A/B 对照实验)
+            #
+            # 【NOTE 2026-06: 当前 threshold 下 unreachable】
+            # 经 indice.csv 统计 (l/pp 2609 + rb/hc 2510, P0γ ON/OFF 4 实验)：
+            # - trend regime 真实存在 (11%/6% bar)
+            # - 但 trend_block_hard 触发 = 0
+            # 根因: entry_judge.py:74 计算 should_trade 时, trend_blocked=True 已经
+            # 通过软衰减 (×0.5 final_signal) 让 abs(signal) < threshold → should_trade=False
+            # 此分支因此 unreachable。保留代码 + 单测作为：
+            # (1) 未来 threshold 下调时的兜底硬阻断
+            # (2) 软衰减系数被调整 (如 ×0.8) 时的安全网
+            # 删除请先确认 entry_judge 软衰减策略稳定。
+            import os as _os
+            _p0g_enabled = _os.environ.get('P0_GAMMA_HARD_BLOCK', '1') != '0'
+            if (_p0g_enabled
+                    and self._current_profile == 'trending_contract'
+                    and getattr(signal, 'trend_blocked', False)):
+                self._diag.risk(
+                    self.name, rule='trend_block_hard',
+                    detail=f'profile=trending, regime_dir={signal.regime_direction}, '
+                           f'signal_dir={signal.direction}')
+                return
             if self.rm.is_in_cooldown():
                 pass  # 冷却期中，不开仓
             else:

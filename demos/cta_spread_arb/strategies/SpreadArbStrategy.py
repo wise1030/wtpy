@@ -115,6 +115,7 @@ class SpreadArbStrategy(BaseCtaStrategy):
             factor_config_path=effective_factor_path,
             exec_cfg=self._exec_cfg,
             is_backtest=is_backtest,
+            param_profile=sub_cfg.get('param_profile'),
         )
 
     @property
