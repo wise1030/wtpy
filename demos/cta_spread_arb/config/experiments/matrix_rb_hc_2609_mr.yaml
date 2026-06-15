@@ -1,0 +1,19 @@
+name: matrix_rb_hc_2609_mr
+description: 'Matrix: rb_hc 2609 profile=mr'
+backtest:
+  start: 202509150900
+  end: 202606051500
+  capital: 1000000
+  slippage: 0
+instances:
+- name: rb_hc_2609_m5
+  contract: rb_hc
+  contract_month: '2609'
+  periods:
+    main_period: m5
+    main_bar_cnt: 200
+    aux_periods:
+    - period: d1
+      bar_cnt: 15
+  signal_mode: adaptive
+  param_profile: mr_contract

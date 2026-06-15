@@ -1,0 +1,26 @@
+name: matrix_rb_hc_2601_auto
+description: 'Matrix: rb_hc 2601 profile=auto'
+backtest:
+  start: 202501200900
+  end: 202510151500
+  capital: 1000000
+  slippage: 0
+auto_profile:
+  enable: true
+  trend_hurst: 0.55
+  mr_hurst: 0.45
+  trend_r2: 0.55
+  lookback_days: 120
+  storage_csv_dir: ./storage/csv
+instances:
+- name: rb_hc_2601_m5
+  contract: rb_hc
+  contract_month: '2601'
+  periods:
+    main_period: m5
+    main_bar_cnt: 200
+    aux_periods:
+    - period: d1
+      bar_cnt: 15
+  signal_mode: adaptive
+  auto_profile: true

@@ -1,0 +1,19 @@
+name: matrix_l_pp_2601_mr
+description: 'Matrix: l_pp 2601 profile=mr'
+backtest:
+  start: 202501200900
+  end: 202510151500
+  capital: 1000000
+  slippage: 0
+instances:
+- name: l_pp_2601_m5
+  contract: l_pp
+  contract_month: '2601'
+  periods:
+    main_period: m5
+    main_bar_cnt: 200
+    aux_periods:
+    - period: d1
+      bar_cnt: 15
+  signal_mode: adaptive
+  param_profile: mr_contract

@@ -1,0 +1,26 @@
+# ============================================================
+# contracts/l_pp.yaml — l/pp 跨品种套利合约对定义
+# 品种: DCE.l(塑料) / DCE.pp(聚丙烯)
+# 特征: 同属聚烯烃产业链, 高度相关, 均值回归显著
+# 合约规格: pricetick=1, volscale=5 (5吨/手)
+# ============================================================
+
+product_pair: l_pp
+type: cross_commodity
+spread_mode: coint
+
+legs_template:
+  # 正腿(l): 多 l / 空 l 由价差方向决定, ratio=+1
+  - symbol: l
+    exchange: DCE
+    stdCode_template: "DCE.l.{month}"
+    ratio: 1
+    lots: 1
+    multiplier: 5
+  # 反腿(pp): ratio=-1, 与 l 形成跨品种对冲
+  - symbol: pp
+    exchange: DCE
+    stdCode_template: "DCE.pp.{month}"
+    ratio: -1
+    lots: 1
+    multiplier: 5

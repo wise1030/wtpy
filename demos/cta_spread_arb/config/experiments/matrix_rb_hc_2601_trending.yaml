@@ -1,0 +1,19 @@
+name: matrix_rb_hc_2601_trending
+description: 'Matrix: rb_hc 2601 profile=trending'
+backtest:
+  start: 202501200900
+  end: 202510151500
+  capital: 1000000
+  slippage: 0
+instances:
+- name: rb_hc_2601_m5
+  contract: rb_hc
+  contract_month: '2601'
+  periods:
+    main_period: m5
+    main_bar_cnt: 200
+    aux_periods:
+    - period: d1
+      bar_cnt: 15
+  signal_mode: adaptive
+  param_profile: trending_contract
