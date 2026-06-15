@@ -389,7 +389,7 @@ class ArbCore:
                     factors=factor_signal.factor_scores)
         elif signal.should_exit or signal.should_reverse:
             min_hold = self._risk_cfg.min_hold_bars
-            if self.rm.hold_bars < min_hold and not signal.pnl_trailing_exit:
+            if self.rm.hold_bars < min_hold:
                 pass  # 持仓时间不足，忽略信号平仓
             else:
                 action = 'reverse' if signal.should_reverse else 'exit'

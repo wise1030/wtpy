@@ -89,7 +89,6 @@ class SignalResult:
     raw_signal: float = 0.0              # 原始因子信号
     strength: float = 0.0                # 信号绝对强度
     trend_blocked: bool = False          # 是否被趋势过滤衰减
-    pnl_trailing_exit: bool = False     # v7: 是否由浮盈追踪止盈触发
 
 
 
@@ -123,11 +122,6 @@ class SignalConfig:
     range_exit_threshold: float = 0.3
     # trend regime逆势信号衰减系数(替代硬阻挡)
     trend_counter_decay_factor: float = 0.5
-    # v7: 浮盈追踪止盈参数
-    pnl_trailing_threshold: float = 500.0
-    pnl_trailing_tight: float = 0.2
-    pnl_trailing_medium: float = 0.3
-    pnl_trailing_wide: float = 0.4
     # v7.2: 时段过滤
     blocked_hours: str = '14'
 
@@ -152,11 +146,6 @@ class SignalConfig:
             trend_trailing_bars=signal_cfg.get('trend_trailing_bars', 3),
             range_exit_threshold=signal_cfg.get('range_exit_threshold', 0.3),
             trend_counter_decay_factor=signal_cfg.get('trend_counter_decay_factor', 0.5),
-            # v7: 浮盈追踪止盈
-            pnl_trailing_threshold=signal_cfg.get('pnl_trailing_threshold', 500.0),
-            pnl_trailing_tight=signal_cfg.get('pnl_trailing_tight', 0.2),
-            pnl_trailing_medium=signal_cfg.get('pnl_trailing_medium', 0.3),
-            pnl_trailing_wide=signal_cfg.get('pnl_trailing_wide', 0.4),
             # v7.2: 时段过滤
             blocked_hours=signal_cfg.get('blocked_hours', '14'),
         )
@@ -188,6 +177,12 @@ class RiskConfig:
     profit_tier2_peak: float = 2000        # 档位2上界(peak<此值用base_ratio+tier2_inc)
     profit_tier2_inc: float = 0.1          # 档位2回撤增量
     profit_tier3_inc: float = 0.2          # 档位3回撤增量(peak>=tier2_peak)
+    # v7: 浮盈追踪止盈安全网参数 (原在 SignalConfig, 移至 RiskConfig)
+    # 与 profit_take 互补: profit_take 门槛高(3000)管大盈, pnl_trailing 门槛低(500)管小盈
+    pnl_trailing_threshold: float = 500.0   # 最低触发浮盈门槛
+    pnl_trailing_tight: float = 0.2         # 紧追踪回撤比例 (peak<1000)
+    pnl_trailing_medium: float = 0.3        # 中等追踪回撤比例 (1000<=peak<2000)
+    pnl_trailing_wide: float = 0.4          # 宽追踪回撤比例 (peak>=2000)
 
     @classmethod
     def from_yaml(cls, risk_cfg: dict) -> 'RiskConfig':
@@ -214,6 +209,11 @@ class RiskConfig:
             profit_tier2_peak=risk_cfg.get('profit_tier2_peak', 2000),
             profit_tier2_inc=risk_cfg.get('profit_tier2_inc', 0.1),
             profit_tier3_inc=risk_cfg.get('profit_tier3_inc', 0.2),
+            # v7: 浮盈追踪止盈安全网
+            pnl_trailing_threshold=risk_cfg.get('pnl_trailing_threshold', 500.0),
+            pnl_trailing_tight=risk_cfg.get('pnl_trailing_tight', 0.2),
+            pnl_trailing_medium=risk_cfg.get('pnl_trailing_medium', 0.3),
+            pnl_trailing_wide=risk_cfg.get('pnl_trailing_wide', 0.4),
         )
 
 

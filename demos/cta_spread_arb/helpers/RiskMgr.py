@@ -39,6 +39,7 @@ class RiskMgr:
             'time_stop': self._builtin_time_stop_rule,
             'min_hold': self._builtin_min_hold_rule,
             'coint_quality': self._builtin_coint_quality_rule,
+            'pnl_trailing': self._builtin_pnl_trailing_rule,  # v7: 浮盈追踪止盈安全网
         }
         # 状态跟踪
         self._hold_bars = 0       # 持仓bar数
@@ -309,4 +310,47 @@ class RiskMgr:
             return f"coint_quality: coint_p={coint_p:.4f}>={force_exit_p}, force exit"
         if coint_p >= block_entry_p and current_direction == 0:
             return f"coint_quality: coint_p={coint_p:.4f}>={block_entry_p}, block new entry"
+        return None
+
+    def _builtin_pnl_trailing_rule(self, ctx):
+        """v7: 浮盈追踪止盈安全网 — 基于实际浮盈金额的分级追踪止盈
+
+        与 profit_take 互补:
+        - profit_take: 门槛高(3000), 管大盈 → 让利润跑
+        - pnl_trailing: 门槛低(500),  管小盈 → 保护性兜底
+
+        分级回撤:
+        - peak < 1000:  紧追踪(回撤20%即平仓)
+        - 1000-2000:    中等追踪(回撤30%)
+        - >= 2000:      宽追踪(回撤40%)
+
+        注意: 此规则在规则链中排在 profit_take 之后,
+        profit_take 已触发则不会到达此规则。
+        """
+        cfg = ctx.risk_cfg
+        total_pnl = sum(ctx.pnl.values())
+
+        # 更新浮盈峰值
+        if total_pnl > self._peak_unrealized:
+            self._peak_unrealized = total_pnl
+
+        peak = self._peak_unrealized
+
+        # 未达门槛不触发
+        if peak < cfg.pnl_trailing_threshold:
+            return None
+
+        # 分级回撤比例
+        if peak < 1000:
+            drawdown_ratio = cfg.pnl_trailing_tight
+        elif peak < 2000:
+            drawdown_ratio = cfg.pnl_trailing_medium
+        else:
+            drawdown_ratio = cfg.pnl_trailing_wide
+
+        trigger_line = peak * (1 - drawdown_ratio)
+        if total_pnl < trigger_line:
+            return (f"pnl_trailing: peak={peak:.0f}, current={total_pnl:.0f}, "
+                    f"drawdown={(peak - total_pnl) / peak:.0%}, "
+                    f"tier_ratio={drawdown_ratio:.0%}")
         return None
