@@ -1,0 +1,36 @@
+# ============================================================
+# experiments/l_pp_2609.yaml — l/pp 2609合约套利实验
+# 数据范围: 2025/09/15 09:00 - 2026/06/05 22:55 (KS 真实 m5 + 日线)
+# 数据源: KS S3 (kline_1m/kline_1d 真实)
+# 替代背景: 2509 已下市 KS 不再提供日线; 2609 为当前可获取最早完整对
+# ============================================================
+
+name: l_pp_2609
+description: "l/pp 跨品种套利 - 2609合约 真实日线 KS数据"
+
+backtest:
+  start: 202509150900
+  end: 202606051500
+  capital: 1000000
+  slippage: 0
+
+auto_profile:
+  enable: true
+  trend_hurst: 0.55
+  mr_hurst: 0.45
+  trend_r2: 0.55
+  lookback_days: 120
+  storage_csv_dir: ./storage/csv
+
+instances:
+  - name: l_pp_2609_m5
+    contract: l_pp
+    contract_month: "2609"
+    periods:
+      main_period: m5
+      main_bar_cnt: 200
+      aux_periods:
+        - period: d1
+          bar_cnt: 15
+    signal_mode: adaptive
+    auto_profile: true

@@ -1,0 +1,35 @@
+# ============================================================
+# experiments/l_pp_2509.yaml — l/pp 2509合约套利实验
+# 数据范围: 2024/09/18 - 2025/09/12 (l2509/pp2509 全生命周期)
+# v10: 单pipeline模式
+# ============================================================
+
+name: l_pp_2509
+description: "l/pp 跨品种套利 - 2509合约 auto profile"
+
+backtest:
+  start: 202409180900
+  end: 202509121500
+  capital: 1000000
+  slippage: 0
+
+auto_profile:
+  enable: true
+  trend_hurst: 0.55
+  mr_hurst: 0.45
+  trend_r2: 0.55
+  lookback_days: 120
+  storage_csv_dir: ./storage/csv
+
+instances:
+  - name: l_pp_2509_m5
+    contract: l_pp
+    contract_month: "2509"
+    periods:
+      main_period: m5
+      main_bar_cnt: 200
+      aux_periods:
+        - period: d1
+          bar_cnt: 15
+    signal_mode: adaptive
+    auto_profile: true
