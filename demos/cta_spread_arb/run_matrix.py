@@ -1,36 +1,45 @@
 #!/usr/bin/env python3
 """
-run_matrix.py — 实验矩阵化工具
-P1-A: 自动生成 (pair × profile × month) 笛卡尔积实验配置 + 并行跑 + 汇总
+run_matrix.py — 统一实验矩阵化工具 (v2)
+
+合并 run_multi.py + run_batch.py + 原 run_matrix.py 三个入口。
+
+两种运行模式:
+  --mode serial:   每个实验独立 WtBtEngine (进程隔离, 结果可靠, 慢)
+  --mode session:  所有实验共用 1 个 WtBtEngine session (快, 验证独立性)
+  --mode subprocess: 子进程隔离 (原 run_matrix 行为, 最可靠但最慢)
 
 用法:
+    # 矩阵模式: pair × profile × month 笛卡尔积
     python run_matrix.py -p l_pp --profiles auto mr --months 2609
     python run_matrix.py -p l_pp rb_hc --profiles auto mr trending --months 2509 2609
-    python run_matrix.py -p l_pp --months 2609 --no-run   # 只显示将生成的组合
-    python run_matrix.py -p l_pp rb_hc --months 2609 --parallel 4
+    python run_matrix.py -p l_pp --months 2609 --no-run   # 只显示组合
+
+    # 直接指定实验列表 (兼容原 run_multi / run_batch)
+    python run_matrix.py -e default rb_hc_2601 --mode session
+    python run_matrix.py -e l_pp_2609 --mode serial
 
 输出:
-    outputs_bt/matrix_{timestamp}/
-      <pair>_<month>_<profile>/  ← 每个实验的输出目录 (由 run_multi 决定)
-      matrix_summary.csv         ← 所有实验汇总 (net/fee/gross/winrate/dd 等)
-      matrix_summary.json
+    matrix_results/matrix_summary_{tag}.csv  ← 汇总表
+    outputs_bt/<exp_name>/                   ← 各实验 WT 输出
 """
 
 import os, sys, json, csv, itertools, subprocess, argparse, yaml, time
 from pathlib import Path
 from datetime import datetime
-from collections import defaultdict
 
 _PROJECT_ROOT = Path(__file__).resolve().parent
+for _sub in ('strategies', 'helpers', 'factors'):
+    _sub_path = str(_PROJECT_ROOT / _sub)
+    if _sub_path not in sys.path:
+        sys.path.insert(0, _sub_path)
+
 CONFIG_DIR = _PROJECT_ROOT / 'config'
 EXPERIMENTS_DIR = CONFIG_DIR / 'experiments'
 CONTRACTS_DIR = CONFIG_DIR / 'contracts'
-PROFILES_DIR = CONFIG_DIR / 'profiles'
+MATRIX_DIR = _PROJECT_ROOT / 'matrix_results'
 
-# 标准时间窗: 合约月份 → (start, end)
-# 2509 → 2024/09/15~2025/09/14 左右 (2509合约生命周期)
-# 2609 → 2025/09/15~2026/09/14
-# 2601 → 2025/01~2025/12
+# 标准时间窗
 DEFAULT_WINDOWS = {
     '2509': (202409150900, 202509141500),
     '2609': (202509150900, 202606051500),
@@ -38,117 +47,295 @@ DEFAULT_WINDOWS = {
     '2510': (202410160900, 202510151500),
 }
 
-
-# Profile 名映射: CLI 短名 → yaml profile 名
 PROFILE_MAP = {
     'mr': 'mr_contract',
     'trending': 'trending_contract',
-    'baseline': None,   # 不设 param_profile
-    'auto': None,       # auto_profile 自动选择
+    'baseline': None,
+    'auto': None,
 }
 
 
+# ═══════════════════════════════════════════════════════════
+# CLI
+# ═══════════════════════════════════════════════════════════
+
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description='CTA Spread Arb - Experiment Matrix')
-    parser.add_argument('-p', '--pairs', nargs='+', required=True,
-                        help='Pair names (e.g., l_pp rb_hc)')
-    parser.add_argument('--profiles', nargs='+', default=['auto'],
-                        choices=['auto', 'mr', 'trending', 'baseline'],
-                        help='profiles 列表 (默认: auto)')
-    parser.add_argument('--months', nargs='+', required=True,
-                        help='合约月份 (e.g., 2609 2509)')
-    parser.add_argument('--parallel', type=int, default=2,
-                        help='parallel backtests (default 2, rec 2-3)')
-    parser.add_argument('--config-root', type=str, default=None)
-    parser.add_argument('--capital', type=float, default=1000000)
-    parser.add_argument('--slippage', type=int, default=0)
-    parser.add_argument('--no-run', action='store_true',
-                        help='Dry-run: 只显示组合不执行')
-    parser.add_argument('--matrix-tag', type=str, default=None,
-                        help='矩阵输出目录标签 (默认: auto timestamp)')
-    return parser.parse_args()
+    p = argparse.ArgumentParser(description='CTA Spread Arb - Unified Matrix Runner')
+    # 矩阵模式
+    p.add_argument('-p', '--pairs', nargs='+',
+                   help='Pair names (e.g., l_pp rb_hc) — 矩阵模式')
+    p.add_argument('--profiles', nargs='+', default=['auto'],
+                   choices=['auto', 'mr', 'trending', 'baseline'])
+    p.add_argument('--months', nargs='+',
+                   help='合约月份 (e.g., 2609 2509) — 矩阵模式')
+    # 直接实验列表模式
+    p.add_argument('-e', '--experiments', nargs='*', default=None,
+                   help='直接指定实验名列表 (空=扫描全部)')
+    # 通用
+    p.add_argument('--mode', choices=['serial', 'session', 'subprocess'],
+                   default='serial',
+                   help='serial=独立引擎 | session=共用引擎 | subprocess=子进程')
+    p.add_argument('--config-root', type=str, default=None)
+    p.add_argument('--capital', type=float, default=1000000)
+    p.add_argument('--slippage', type=int, default=0)
+    p.add_argument('--parallel', type=int, default=2,
+                   help='subprocess 模式并行数')
+    p.add_argument('--no-run', action='store_true',
+                   help='Dry-run: 只显示组合不执行')
+    p.add_argument('--no-merge', action='store_true',
+                   help='不合并资金曲线')
+    p.add_argument('--matrix-tag', type=str, default=None)
+    return p.parse_args()
 
 
-def generate_experiment_yaml(pair, month, profile, template_cfg):
-    """为 (pair, month, profile) 生成 experiment yaml"""
-    # 从 pair 合约配置获取价格信息
-    pair_cfg_path = CONTRACTS_DIR / f'{pair}.yaml'
-    with open(pair_cfg_path) as f:
-        pair_cfg = yaml.safe_load(f) or {}
+# ═══════════════════════════════════════════════════════════
+# 实验发现
+# ═══════════════════════════════════════════════════════════
 
-    # 时间窗
+def discover_experiments(config_root):
+    """扫描 config/experiments/ 下所有 yaml"""
+    exp_dir = Path(config_root) / 'experiments'
+    if not exp_dir.is_dir():
+        return []
+    exps = []
+    for f in sorted(exp_dir.iterdir()):
+        if f.suffix in ('.yaml', '.yml'):
+            exps.append(f.stem)
+    return exps
+
+
+def generate_matrix_experiments(args):
+    """从 (pair × month × profile) 生成实验名列表"""
+    combos = list(itertools.product(args.pairs, args.months, args.profiles))
+    print(f'[matrix] 组合数: {len(combos)} ({len(args.pairs)} pairs × '
+          f'{len(args.months)} months × {len(args.profiles)} profiles)')
+    for pair, month, profile in combos:
+        print(f'  {pair:8} {month:6} {profile:10}')
+
+    if args.no_run:
+        print('[matrix] --no-run, 结束')
+        sys.exit(0)
+
+    exp_names = []
+    for pair, month, profile in combos:
+        exp_name = f'matrix_{pair}_{month}_{profile}'
+        _write_matrix_experiment_yaml(pair, month, profile, exp_name, args)
+        exp_names.append(exp_name)
+    return exp_names
+
+
+def _write_matrix_experiment_yaml(pair, month, profile, exp_name, args):
+    """生成单个矩阵实验 yaml"""
     win = DEFAULT_WINDOWS.get(month, (202501200900, 202510151500))
-
-    # 实例名
     inst_name = f'{pair}_{month}_m5'
-    exp_name = f'matrix_{pair}_{month}_{profile}'
 
-    # 构建 yaml
     exp = {
         'name': exp_name,
         'description': f'Matrix: {pair} {month} profile={profile}',
         'backtest': {
-            'start': win[0],
-            'end': win[1],
-            'capital': args.capital if 'args' in dir() else 1000000,
-            'slippage': 0,
+            'start': win[0], 'end': win[1],
+            'capital': args.capital, 'slippage': args.slippage,
         },
     }
 
-    # auto_profile 配置
     if profile == 'auto':
         exp['auto_profile'] = {
-            'enable': True,
-            'trend_hurst': 0.55,
-            'mr_hurst': 0.45,
-            'trend_r2': 0.55,
-            'lookback_days': 120,
+            'enable': True, 'trend_hurst': 0.55, 'mr_hurst': 0.45,
+            'trend_r2': 0.55, 'lookback_days': 120,
             'storage_csv_dir': './storage/csv',
         }
 
-    exp['instances'] = [{
-        'name': inst_name,
-        'contract': pair,
-        'contract_month': month,
+    inst = {
+        'name': inst_name, 'contract': pair, 'contract_month': month,
         'periods': {
-            'main_period': 'm5',
-            'main_bar_cnt': 200,
+            'main_period': 'm5', 'main_bar_cnt': 200,
             'aux_periods': [{'period': 'd1', 'bar_cnt': 15}],
         },
         'signal_mode': 'adaptive',
-    }]
+    }
 
-    # profile 控制
     if profile == 'auto':
-        exp['instances'][0]['auto_profile'] = True
+        inst['auto_profile'] = True
     else:
         yaml_profile = PROFILE_MAP.get(profile, profile)
         if yaml_profile:
-            exp['instances'][0]['param_profile'] = yaml_profile
+            inst['param_profile'] = yaml_profile
 
-    return exp, exp_name
+    exp['instances'] = [inst]
 
+    exp_path = EXPERIMENTS_DIR / f'{exp_name}.yaml'
+    with open(exp_path, 'w') as f:
+        yaml.dump(exp, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    print(f'  ✓ {exp_path.name}')
+
+
+# ═══════════════════════════════════════════════════════════
+# 运行模式
+# ═══════════════════════════════════════════════════════════
+
+def _load_experiment_meta(config_root, experiment):
+    exp_path = Path(config_root) / 'experiments' / f'{experiment}.yaml'
+    with open(exp_path, 'r', encoding='utf-8') as f:
+        return yaml.safe_load(f) or {}
+
+
+def _resolve_backtest_window(experiments, config_root, args):
+    """取所有实验窗口的交集 (最早start, 最晚end)"""
+    starts, ends = [], []
+    for exp_name in experiments:
+        meta = _load_experiment_meta(config_root, exp_name)
+        bt = meta.get('backtest', {})
+        starts.append(bt.get('start', 202501200900))
+        ends.append(bt.get('end', 202512311500))
+    return min(starts), max(ends)
+
+
+def run_serial(experiments, config_root, args):
+    """serial 模式: 每个实验独立 WtBtEngine"""
+    from wtpy import WtBtEngine, EngineType
+    from SpreadArbStrategy import SpreadArbStrategy
+
+    results = {}
+    for i, exp_name in enumerate(experiments, 1):
+        print(f'\n[{i}/{len(experiments)}] {exp_name}')
+        try:
+            meta = _load_experiment_meta(config_root, exp_name)
+            bt = meta.get('backtest', {})
+            start = bt.get('start', 202501200900)
+            end = bt.get('end', 202512311500)
+
+            engine = WtBtEngine(EngineType.ET_CTA)
+            engine.init('./common/', "configbt.yaml")
+            engine.configBacktest(start, end)
+            engine.configBTStorage(mode="csv", path="./storage/")
+            engine.commitBTConfig()
+
+            stra_name = f'spread_arb_{exp_name}'
+            stra = SpreadArbStrategy.from_experiment(
+                name=stra_name, experiment=exp_name,
+                config_root=config_root, is_backtest=True)
+            engine.set_cta_strategy(stra, slippage=args.slippage)
+            engine.run_backtest(bAsync=False)
+
+            output_dir = _PROJECT_ROOT / 'outputs_bt' / stra_name
+            metrics = collect_metrics(str(output_dir) if output_dir.exists() else None)
+            if metrics:
+                results[exp_name] = metrics
+                print(f'  -> OK (net={metrics.get("net_pnl", "?")})')
+            else:
+                print(f'  -> OK (no metrics)')
+
+            engine.release_backtest()
+        except Exception as e:
+            print(f'  -> FAILED: {e}')
+    return results
+
+
+def run_session(experiments, config_root, args):
+    """session 模式: 所有实验共用 1 个 WtBtEngine"""
+    from wtpy import WtBtEngine, EngineType
+    from SpreadArbStrategy import SpreadArbStrategy
+
+    start, end = _resolve_backtest_window(experiments, config_root, args)
+    print(f'[session] backtest window: {start} → {end}')
+
+    engine = WtBtEngine(EngineType.ET_CTA)
+    engine.init('./common/', "configbt.yaml")
+    engine.configBacktest(start, end)
+    engine.configBTStorage(mode="csv", path="./storage/")
+    engine.commitBTConfig()
+
+    strategies = []
+    for exp_name in experiments:
+        stra_name = f'spread_arb_{exp_name}'
+        print(f'[session] registering: {stra_name}')
+        stra = SpreadArbStrategy.from_experiment(
+            name=stra_name, experiment=exp_name,
+            config_root=config_root, is_backtest=True)
+        engine.set_cta_strategy(stra, slippage=args.slippage)
+        strategies.append((stra_name, stra))
+
+    print(f'[session] {len(strategies)} strategies, running...')
+    engine.run_backtest(bAsync=False)
+
+    # 收集结果
+    results = {}
+    for stra_name, stra in strategies:
+        output_dir = _PROJECT_ROOT / 'outputs_bt' / stra_name
+        metrics = collect_metrics(str(output_dir) if output_dir.exists() else None)
+        if metrics:
+            results[stra_name.replace('spread_arb_', '')] = metrics
+
+    engine.release_backtest()
+
+    # 独立性验证
+    names = [stra.core.name for _, stra in strategies]
+    if len(names) != len(set(names)):
+        print('\n  *** WARNING: ArbCore.name 冲突! ***')
+    else:
+        print(f'\n  ✅ {len(names)} 实例 name 唯一')
+    return results
+
+
+def run_subprocess(experiments, config_root, args):
+    """subprocess 模式: 每个实验独立子进程 (原 run_matrix 行为)"""
+    results = {}
+    for i in range(0, len(experiments), args.parallel):
+        batch = experiments[i:i + args.parallel]
+        procs = []
+        print(f'  批次 {i // args.parallel + 1}: {batch}')
+
+        for exp_name in batch:
+            # 直接用 runBT.py 逻辑: 子进程跑单个实验
+            script = str(_PROJECT_ROOT / 'runBT.py')
+            cmd = [sys.executable, script, '-e', exp_name,
+                   '--config-root', str(config_root)]
+            proc = subprocess.Popen(
+                cmd, cwd=str(_PROJECT_ROOT),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            procs.append((exp_name, proc))
+
+        for exp_name, proc in procs:
+            stdout, stderr = proc.communicate()
+            status = 'OK' if proc.returncode == 0 else 'FAIL'
+            print(f'    {exp_name}: {status} (exit={proc.returncode})')
+            if proc.returncode != 0 and stderr:
+                print(f'    stderr: {stderr[-200:]}')
+
+        for exp_name, proc in procs:
+            if proc.returncode != 0:
+                continue
+            output_dir = _PROJECT_ROOT / 'outputs_bt' / f'spread_arb_{exp_name}'
+            if not output_dir.exists():
+                output_dir = _PROJECT_ROOT / 'outputs_bt' / exp_name
+            metrics = collect_metrics(str(output_dir) if output_dir.exists() else None)
+            if metrics:
+                results[exp_name] = metrics
+    return results
+
+
+# ═══════════════════════════════════════════════════════════
+# 指标收集
+# ═══════════════════════════════════════════════════════════
 
 def collect_metrics(output_dir):
-    """从 runs 输出目录提取关键指标"""
+    """从 WT 输出目录提取关键指标"""
+    if not output_dir or not os.path.isdir(output_dir):
+        return None
     metrics = {}
 
-    # summary.json (如果有)
+    # summary.json
     sp = os.path.join(output_dir, 'summary.json')
     if os.path.exists(sp):
         with open(sp) as f:
             s = json.load(f)
-        metrics.update({
-            k: s.get(k) for k in [
-                'total_money', 'total_fee', 'total_net_pnl',
-                'total_return', 'annual_return', 'max_drawdown',
-                'win_ratio', 'profit_loss_ratio',
-                'total_round', 'total_trade',
-            ]
-        })
+        for k in ['total_money', 'total_fee', 'total_net_pnl',
+                  'total_return', 'annual_return', 'max_drawdown',
+                  'win_ratio', 'profit_loss_ratio', 'total_round', 'total_trade']:
+            if k in s:
+                metrics[k] = s[k]
 
-    # closes.csv 详算
+    # closes.csv
     cp = os.path.join(output_dir, 'closes.csv')
     if os.path.exists(cp):
         with open(cp) as f:
@@ -162,21 +349,14 @@ def collect_metrics(output_dir):
         metrics['losses'] = losses
         metrics['gross_pnl'] = round(sum(profits), 2)
         metrics['win_rate'] = round(wins / nc * 100, 1) if nc else 0
-        metrics['avg_win'] = round(
-            sum(p for p in profits if p > 0) / wins, 2) if wins else 0
-        metrics['avg_loss'] = round(
-            sum(p for p in profits if p < 0) / losses, 2) if losses else 0
-
-        # 持仓时长
-        durations = [
-            int(c['closebarno']) - int(c['openbarno'])
-            for c in closes
-        ]
+        metrics['avg_win'] = round(sum(p for p in profits if p > 0) / wins, 2) if wins else 0
+        metrics['avg_loss'] = round(sum(p for p in profits if p < 0) / losses, 2) if losses else 0
+        durations = [int(c['closebarno']) - int(c['openbarno']) for c in closes]
         if durations:
             durations.sort()
-            metrics['median_hold_bars'] = durations[len(durations)//2]
+            metrics['median_hold_bars'] = durations[len(durations) // 2]
 
-    # trades.csv fee
+    # trades.csv
     tp = os.path.join(output_dir, 'trades.csv')
     if os.path.exists(tp):
         with open(tp) as f:
@@ -188,200 +368,133 @@ def collect_metrics(output_dir):
 
     # net
     if 'gross_pnl' in metrics and 'total_fee' in metrics:
-        metrics['net_pnl'] = round(
-            metrics['gross_pnl'] - metrics['total_fee'], 2)
+        metrics['net_pnl'] = round(metrics['gross_pnl'] - metrics['total_fee'], 2)
     elif 'total_fee' in metrics and 'total_net_pnl' in metrics:
         metrics['net_pnl'] = metrics['total_net_pnl']
 
     return metrics
 
 
-def print_matrix_summary(results):
+# ═══════════════════════════════════════════════════════════
+# 汇总输出
+# ═══════════════════════════════════════════════════════════
+
+def print_summary(results, experiments):
     """打印矩阵汇总表"""
     rows = []
-    for (pair, month, profile), metrics in sorted(results.items()):
+    for exp_name in sorted(results):
+        m = results[exp_name]
         rows.append({
-            'pair': pair,
-            'month': month,
-            'profile': profile,
-            'closes': metrics.get('closes', '?'),
-            'gross': metrics.get('gross_pnl', '?'),
-            'fee': metrics.get('total_fee', '?'),
-            'net': metrics.get('net_pnl', '?'),
-            'winpct': metrics.get('win_rate', '?'),
-            'avg_win': metrics.get('avg_win', '?'),
-            'avg_loss': metrics.get('avg_loss', '?'),
-            'hold': metrics.get('median_hold_bars', '?'),
+            'experiment': exp_name,
+            'closes': m.get('closes', '?'),
+            'gross': m.get('gross_pnl', '?'),
+            'fee': m.get('total_fee', '?'),
+            'net': m.get('net_pnl', '?'),
+            'winpct': m.get('win_rate', '?'),
+            'avg_win': m.get('avg_win', '?'),
+            'avg_loss': m.get('avg_loss', '?'),
+            'hold': m.get('median_hold_bars', '?'),
         })
 
     if not rows:
         print("  (no results)")
         return rows
 
-    hdr = (f"{'pair':<8} {'month':<6} {'profile':<10} "
-           f"{'closes':>7} {'gross':>8} {'fee':>8} {'net':>8} "
-           f"{'win%':>6} {'avg_win':>9} {'avg_loss':>9} {'hold':>5}")
+    hdr = (f"{'experiment':<35} {'closes':>7} {'gross':>8} {'fee':>8} "
+           f"{'net':>8} {'win%':>6} {'avg_win':>9} {'avg_loss':>9} {'hold':>5}")
     print(hdr)
     print('-' * len(hdr))
     for r in rows:
-        print(f"{r['pair']:<8} {r['month']:<6} {r['profile']:<10} "
-              f"{r['closes']:>7} {r['gross']:>8} {r['fee']:>8} {r['net']:>8} "
-              f"{r['winpct']:>6} {r['avg_win']:>9} {r['avg_loss']:>9} "
-              f"{r['hold']:>5}")
-
+        print(f"{r['experiment']:<35} {r['closes']:>7} {r['gross']:>8} "
+              f"{r['fee']:>8} {r['net']:>8} {r['winpct']:>6} "
+              f"{r['avg_win']:>9} {r['avg_loss']:>9} {r['hold']:>5}")
     return rows
 
 
+def write_csv(rows, tag):
+    csv_headers = ['experiment', 'closes', 'gross', 'fee', 'net',
+                   'winpct', 'avg_win', 'avg_loss', 'hold']
+    MATRIX_DIR.mkdir(exist_ok=True)
+    csv_path = MATRIX_DIR / f'matrix_summary_{tag}.csv'
+    with open(csv_path, 'w', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=csv_headers)
+        w.writeheader()
+        w.writerows(rows)
+    print(f'\n[matrix] CSV: {csv_path}')
+    return csv_path
+
+
+def print_verdict(results):
+    pos = [(k, v) for k, v in results.items() if v.get('net_pnl', -9999) > 0]
+    neg = [(k, v) for k, v in results.items() if v.get('net_pnl', 9999) <= 0]
+    print(f'\n[matrix] 正回报: {len(pos)} / {len(results)}')
+    for k, v in sorted(pos):
+        print(f'  ✅ {k}: net={v["net_pnl"]}')
+    if neg:
+        print(f'  负/0 回报: {len(neg)}')
+        for k, v in sorted(neg):
+            print(f'  ❌ {k}: net={v["net_pnl"]}')
+
+
+# ═══════════════════════════════════════════════════════════
+# main
+# ═══════════════════════════════════════════════════════════
+
 if __name__ == '__main__':
     args = parse_args()
+    config_root = str(Path(args.config_root).resolve()) if args.config_root else str(CONFIG_DIR)
 
-    config_root = Path(args.config_root) if args.config_root else CONFIG_DIR
-    matrix_exp_dir = config_root / 'experiments'
+    # 确定实验列表
+    if args.pairs and args.months:
+        # 矩阵模式
+        experiments = generate_matrix_experiments(args)
+    elif args.experiments is not None:
+        # 直接指定
+        experiments = args.experiments if args.experiments else discover_experiments(config_root)
+    else:
+        print('[ERROR] 需要 -p/--pairs + --months (矩阵模式) 或 -e/--experiments (直接模式)')
+        sys.exit(1)
 
-    # 1. 生成矩阵组合
-    combos = list(itertools.product(args.pairs, args.months, args.profiles))
-    print(f'[matrix] 组合数: {len(combos)} ({len(args.pairs)} pairs × '
-          f'{len(args.months)} months × {len(args.profiles)} profiles)')
-    for pair, month, profile in combos:
-        print(f'  {pair:8} {month:6} {profile:10}')
+    if not experiments:
+        print('[ERROR] No experiments found')
+        sys.exit(1)
+
+    print(f'\n[matrix] {len(experiments)} experiments, mode={args.mode}')
+    for e in experiments:
+        print(f'  - {e}')
 
     if args.no_run:
-        print('[matrix] --no-run, 结束')
         sys.exit(0)
 
-    # 2. 生成 experiment yamls
-    print(f'\n[matrix] 生成实验配置...')
-    exp_names = []
-    for pair, month, profile in combos:
-        exp_cfg, exp_name = generate_experiment_yaml(
-            pair, month, profile, {})
-        exp_cfg['backtest']['capital'] = args.capital
-        exp_cfg['backtest']['slippage'] = args.slippage
-
-        exp_path = matrix_exp_dir / f'{exp_name}.yaml'
-        with open(exp_path, 'w') as f:
-            yaml.dump(exp_cfg, f, default_flow_style=False,
-                      sort_keys=False, allow_unicode=True)
-        exp_names.append(exp_name)
-        print(f'  ✓ {exp_path.name}')
-
-    # 3. 并行执行 (子进程)
-    print(f'\n[matrix] 执行 {len(exp_names)} 实验 (并行 {args.parallel})...')
+    # 运行
     start_time = time.time()
 
-    # 分批并行 (每组 N 个)
-    all_metrics = {}
-    batch_results = {}
-    for i in range(0, len(exp_names), args.parallel):
-        batch = exp_names[i:i + args.parallel]
-        procs = []
-        print(f'  批次 {i//args.parallel + 1}: {batch}')
-
-        for exp_name in batch:
-            cmd = [
-                sys.executable, str(_PROJECT_ROOT / 'run_multi.py'),
-                '-e', exp_name,
-                '--config-root', str(matrix_exp_dir.parent),
-            ]
-            if args.capital != 1000000:
-                cmd.extend(['--capital', str(args.capital)])
-            if args.slippage != 0:
-                cmd.extend(['--slippage', str(args.slippage)])
-
-            proc = subprocess.Popen(
-                cmd, cwd=str(_PROJECT_ROOT),
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True)
-            procs.append((exp_name, proc))
-
-        # 等待当前批次完成
-        for exp_name, proc in procs:
-            stdout, stderr = proc.communicate()
-            status = 'OK' if proc.returncode == 0 else 'FAIL'
-            print(f'    {exp_name}: {status} (exit={proc.returncode}) '
-                  f'stdout={len(stdout)}B stderr={len(stderr)}B')
-            if proc.returncode != 0:
-                print(f'    stderr: {stderr[-200:]}')
-
-        # 收集结果
-        for exp_name, proc in procs:
-            if proc.returncode != 0:
-                continue
-            # run_multi 输出到 outputs_bt/{exp_name}/
-            output_dir = _PROJECT_ROOT / 'outputs_bt' / f'spread_arb_{exp_name}'
-            metrics = collect_metrics(str(output_dir) if output_dir.exists()
-                                      else str(_PROJECT_ROOT / 'outputs_bt' / exp_name))
-            if metrics:
-                batch_results[exp_name] = metrics
+    if args.mode == 'serial':
+        results = run_serial(experiments, config_root, args)
+    elif args.mode == 'session':
+        results = run_session(experiments, config_root, args)
+    else:  # subprocess
+        results = run_subprocess(experiments, config_root, args)
 
     elapsed = time.time() - start_time
     print(f'\n[matrix] 运行完成, 耗时 {elapsed:.0f}s')
 
-    # 4. 汇总输出
-    # 把 exp_name 拆回 (pair, month, profile)
-    results = {}
-    for exp_name in batch_results:
-        # 从已知 pairs 和 months 中匹配
-        matched_pair = None
-        matched_month = None
-        for p in args.pairs:
-            if p in exp_name:
-                matched_pair = p
-                break
-        for m in args.months:
-            if m in exp_name:
-                matched_month = m
-                break
-        # profile 是剩余后缀
-        # exp_name: matrix_{pair}_{month}_{profile}
-        if matched_pair and matched_month:
-            suffix = exp_name.replace('matrix_', '')
-            profile = suffix.replace(f'{matched_pair}_', '').replace(f'{matched_month}_', '')
-        else:
-            matched_pair, matched_month, profile = exp_name, '?', '?'
-        results[(matched_pair, matched_month, profile)] = batch_results[exp_name]
-
+    # 汇总
     if results:
         print(f'\n{"=" * 90}')
         print('矩阵汇总')
         print(f'{"=" * 90}')
-        rows = print_matrix_summary(results)
-    else:
-        rows = []
+        rows = print_summary(results, experiments)
 
-    # 报告失败实验
-    failed = [e for e in exp_names if e not in batch_results]
+        tag = args.matrix_tag or datetime.now().strftime('%Y%m%d_%H%M%S')
+        write_csv(rows, tag)
+        print_verdict(results)
+
+    # 失败报告
+    failed = [e for e in experiments if e not in results]
     if failed:
-        print(f'\n[matrix] {len(failed)} 实验失败 (通常是数据缺失):')
+        print(f'\n[matrix] {len(failed)} 实验失败:')
         for f in failed:
             print(f'  ⚠ {f}')
 
-    # 写 CSV
-    csv_headers = ['pair', 'month', 'profile',
-                   'closes', 'gross', 'fee', 'net',
-                   'winpct', 'avg_win', 'avg_loss', 'hold']
-    matrix_tag = args.matrix_tag or datetime.now().strftime('%Y%m%d_%H%M%S')
-    matrix_dir = _PROJECT_ROOT / 'matrix_results'
-    matrix_dir.mkdir(exist_ok=True)
-    csv_path = matrix_dir / f'matrix_summary_{matrix_tag}.csv'
-    if rows:
-        with open(csv_path, 'w', newline='') as f:
-            w = csv.DictWriter(f, fieldnames=csv_headers)
-            w.writeheader()
-            w.writerows(rows)
-        print(f'\n[matrix] CSV: {csv_path}')
-
-    # 铸 net 正/负 结论
-    pos = [(k, v) for k, v in results.items()
-           if v.get('net_pnl', -9999) > 0]
-    neg = [(k, v) for k, v in results.items()
-           if v.get('net_pnl', 9999) <= 0]
-    print(f'\n[matrix] 正回报: {len(pos)} / {len(results)}')
-    for pair, month, profile in sorted(k for k, _ in pos):
-        v = results[(pair, month, profile)]
-        print(f'  ✅ {pair} {month} {profile}: net={v["net_pnl"]}')
-    if neg:
-        print(f'  负/0 回报: {len(neg)}')
-        for pair, month, profile in sorted(k for k, _ in neg):
-            v = results[(pair, month, profile)]
-            print(f'  ❌ {pair} {month} {profile}: net={v["net_pnl"]}')
+    print('\n[matrix] Done.')
