@@ -1,0 +1,32 @@
+basefiles:      #基础文件配置
+    commodity: ../common/commodities.json       #品种列表
+    contract: ../common/contracts.json          #合约列表
+    holiday: ../common/holidays.json            #节假日列表
+    hot: ../common/hots.json                    #主力合约映射表
+    session: ../common/sessions.json            #交易时间模板
+data:
+    store:
+        module: WtDataStorage                   #数据存储模块
+        path: ../storage/                       #数据存储根目录
+env:
+    name: cta
+    fees: ../common/fees.json                   #佣金配置文件
+    filters: filters.yaml                       #过滤器(交易时段/涨跌停)
+    product:
+        session: TRADING                        #交易时段模板
+    riskmon:                                    #组合级风控(SimpleRiskMon, C++核心执行)
+        active: true
+        module: WtRiskMonFact
+        name: SimpleRiskMon
+        params:
+            inner_day_fd: 20%                   #日内资金回撤熔断比例
+            multi_day_fd: 60%                   #多日资金回撤熔断比例
+            risk_scale: 1.0                     #目标仓位缩放(1.0=不缩放)
+            base_amount: 5000000                #虚拟基础资金
+executers: executers.yaml                       #执行单元配置
+parsers: tdparsers.yaml                         #行情通道配置
+traders: tdtraders.yaml                         #交易通道配置
+bspolicy: actpolicy.yaml                        #开平策略(先平后开)
+notifier:                                       #监控事件推送(WtMonSvr订阅)
+    active: true
+    url: ipc:///tmp/wt_turtle.ipc               #本机ipc; 监控侧mqurl必须与此完全一致

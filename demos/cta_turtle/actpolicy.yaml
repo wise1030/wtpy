@@ -1,0 +1,18 @@
+# 开平策略配置
+default:
+    order:
+    -   action: close
+        limit: 0
+    -   action: open
+        limit: 0
+# 低日内佣金策略：平今>平昨>开仓
+lowinnerdayfee:
+    filters:
+    - DCE.i
+    order:
+    -   action: closetoday
+        limit: 0
+    -   action: closeyestoday
+        limit: 0
+    -   action: open
+        limit: 0

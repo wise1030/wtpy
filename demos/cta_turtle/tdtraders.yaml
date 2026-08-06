@@ -1,0 +1,22 @@
+# 交易通道配置 - CTP 交易 (SimNow 示例, 请替换为自己的账户)
+traders:
+-   active: true
+    id: simnow
+    module: TraderCTP
+    savedata: true
+    riskmon:
+        active: true
+        policy:
+            default:
+                cancel_stat_timespan: 10
+                cancel_times_boundary: 200
+                cancel_total_limits: 470
+                order_stat_timespan: 10
+                order_times_boundary: 20
+    front: tcp://180.168.146.187:10130
+    broker: '9999'
+    appid: simnow_client_test
+    authcode: '0000000000000000'
+    user: "YOUR_INVESTOR_ID"
+    pass: "YOUR_PASSWORD"
+    quick: true

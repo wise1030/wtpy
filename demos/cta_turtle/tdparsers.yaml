@@ -1,0 +1,11 @@
+# 行情源配置 - CTP 行情 (SimNow 示例, 请替换为自己的账户)
+parsers:
+-   active: true
+    id: parser1
+    module: ParserCTP
+    front: tcp://180.168.146.187:10131
+    broker: '9999'
+    appid: simnow_client_test
+    authcode: '0000000000000000'
+    user: "YOUR_INVESTOR_ID"
+    pass: "YOUR_PASSWORD"

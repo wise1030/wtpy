@@ -1,0 +1,30 @@
+# 海龟趋势跟踪策略配置
+# VaR 口径: 每层仓位按 1N 波动反算 — 1 手 1N 不利波动 = N × volscale CNY
+# 每层手数 lots = floor(units × unit_var / (N × volscale)), 不足 1 手则放弃入场
+
+base:
+  unit_var: 200000        # 1 个交易单位 VaR = 20万 (1N 口径)
+  atr_period: 20          # N = ATR(20)
+  stop_atr_mult: 2.0      # 2N 止损
+  pyramid_layers: 4       # 最大层数(含首仓), 1 = 不加仓
+  pyramid_step_atr: 0.5   # 每盈利 0.5N 加一层
+  bar_cnt: 120            # K线订阅数 (S2 需 > 55+20)
+  s1_entry: 20
+  s1_exit: 10
+  s2_entry: 55
+  s2_exit: 20
+
+instruments:
+  - code: SHFE.rb.HOT
+    period: d1            # d1 | h1, 每品种独立选择
+    system: S1            # S1(20/10+盈利跳过+55fail-safe) | S2(55/20)
+    units: 2              # 每层 2 × 20万 = 40万 VaR
+    direction: both       # both | long | short
+  # 注意: 启用某品种需同时满足
+  #   1) common/hots.json 含该品种键 (空列表=不换月即可, 缺键 C++ 回放器会崩溃)
+  #   2) storage 有对应 period 的 K 线数据 (h1 需小时线)
+  # - code: DCE.i.HOT
+  #   period: d1
+  #   system: S2
+  #   units: 1
+  #   direction: long       # 只做多: 空头信号禁止开仓

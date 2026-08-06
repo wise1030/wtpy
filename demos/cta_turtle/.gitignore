@@ -1,0 +1,40 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+# ── WT 运行时产物 ─────────────────────────────────────────
+BtLogs/
+logs/
+Logs/
+outputs_bt/
+CTPMDFlow/
+CTPTDFlow/
+*.db
+*.dmp
+
+# ── 部署产物 (make_deploy 生成，不入 git) ─────────────────
+deploy/
+deploy_tpl/__pycache__/
+generated/
+
+# ── 矩阵批跑结果 (per-run，不入 git) ───────────────────────
+matrix_results/
+
+# ── 历史 PnL 报表 (per-run，不入 git) ──────────────────────
+Strategy[*]_PnLAnalyzing_*.xlsx
+*.xlsx
+
+# ── 编辑器 / 系统 ───────────────────────────────────────
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*~
+
+# ── 凭据 ───────────────────────────────────────────────
+credentials.json
+.env
+.env.local
