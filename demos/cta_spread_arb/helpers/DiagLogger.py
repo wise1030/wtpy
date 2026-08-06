@@ -11,7 +11,7 @@ DiagLogger — 结构化诊断日志
     logger = DiagLogger(log_dir='./logs', level='INFO')
     logger.trade('rb-i', action='open', direction=1, signal=0.72,
                  factors={'coint_residual': 0.8}, risk_checks=[])
-    logger.risk('rb-i', rule='profit_take', detail='peak=5000, current=2500')
+    logger.risk('rb-i', rule='max_loss', detail='pnl=-8500 < -8000')
     logger.factor('coint_residual', event='refit_failed', detail='OLS error')
 """
 import json
@@ -38,6 +38,10 @@ class DiagLogger:
             'factor': [],
         }
         self._flush_interval = 50  # 每50条刷新一次
+        # P-8(2026-07): 时间维度兜底 flush — 原纯计数触发, 实盘某类长期不满
+        # 50条时进程崩溃最多丢49条/类; 现超过 _flush_time_limit 秒即兜底 flush
+        self._flush_time_limit = 60.0
+        self._last_flush_ts = time.time()
         self._lock = threading.Lock()  # 线程安全保护
         # P0-7: 按日分割 — 记录当前日志日期, 跨日时切换文件
         self._current_log_date = datetime.now().strftime('%Y%m%d')
@@ -57,6 +61,13 @@ class DiagLogger:
                 self._buffers[category].append(data)
                 if len(self._buffers[category]) >= self._flush_interval:
                     self._flush_locked(category)
+                # P-8: 时间维度兜底 flush
+                now = time.time()
+                if now - self._last_flush_ts > self._flush_time_limit:
+                    for cat in self._buffers:
+                        if self._buffers[cat]:
+                            self._flush_locked(cat)
+                    self._last_flush_ts = now
 
     def _print_one(self, data: dict):
         """控制台输出(紧凑格式)"""

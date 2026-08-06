@@ -34,4 +34,4 @@ bspolicy: actpolicy.yaml
 
 notifier:
     active: true
-    url: ipc:///wtpy/wt_cat_arb.ipc
+    url: ipc:///tmp/wt_spread_arb.ipc

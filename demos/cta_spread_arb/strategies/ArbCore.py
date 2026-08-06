@@ -21,17 +21,7 @@ from SignalGen import SignalGen
 from StateManager import StateManager
 from DiagLogger import DiagLogger
 from ArbCoreLifecycle import ArbCoreLifecycle
-from schemas import ArbCoreConfig, LegConfig, RiskConfig, SignalConfig, RegimeConfig, ExecConfig
-from dataclasses import dataclass
-
-
-@dataclass
-class ArbDecision:
-    """单个品种组合的计算决策结果"""
-    bar_data: object = None
-    signal: object = None
-    factor_signal: object = None
-    current_direction: int = 0
+from schemas import ArbCoreConfig, LegConfig, RiskConfig, SignalConfig, RegimeConfig, ExecConfig, ArbDecision
 
 
 class ArbCore:
@@ -46,7 +36,8 @@ class ArbCore:
                  adaptive_cfg: RegimeConfig, factor_config_path: str,
                  exec_cfg: ExecConfig = None,
                  is_backtest: bool = False,
-                 param_profile: str = None):
+                 param_profile: str = None,
+                 auto_profile_cfg: dict = None):
         self.name = core_config.name
         self._config = core_config
         self._risk_cfg = risk_cfg
@@ -59,6 +50,15 @@ class ArbCore:
         # 回测路径: SpreadArbStrategy 在 _resolve_sub_cfg 前传入
         # 实盘路径: _recheck_profile 动态更新
         self._current_profile = param_profile
+        # A-5(2026-07): auto_profile 配置真正传入(此前从未赋值,
+        # _recheck_profile 用 hasattr 防御一个永远不存在的属性)
+        self._auto_profile_cfg = auto_profile_cfg or {}
+        # B-6(2026-07): 理论 vs 实际 PnL 对账状态
+        # _recon_prev = (positions_key, prev_unrealized, prev_prices)
+        self._recon_prev = None
+        self._recon_theo = 0.0    # 持仓不变 bar 的理论价差 PnL 累计
+        self._recon_actual = 0.0  # 同期的实际浮盈变动累计
+        # 偏差 = 滑点 + 成交价与 bar 收盘的时间差(执行质量度量)
         self._daily_spread_history = []  # 实盘增量: 日线价差序列
         self._last_profile_recheck_date = 0  # 上次重算profile的日期
 
@@ -157,7 +157,8 @@ class ArbCore:
         """
         if self._is_backtest:
             return
-        if not self._current_profile and not hasattr(self, '_auto_profile_cfg'):
+        # A-5: 有当前 profile 或配置了 auto_profile 时才需要重算
+        if not self._current_profile and not self._auto_profile_cfg:
             return
 
         # P0-2修复: 使用 dp.last_spread (原 hasattr(dp,'spread') 永远为False)
@@ -191,12 +192,17 @@ class ArbCore:
             self._current_profile = profile
             context.stra_log_text(
                 f'[auto_profile] {self.name}: profile changed '
-                f'{old_profile} → {profile} ({info})')
-            # 动态调整信号参数(仅调整entry_threshold)
+                f'{old_profile} -> {profile} ({info})')
+            # B11修复(2026-07完整版): profile 切换时直接设为目标值，避免指数漂移。
+            # SignalGen.entry_threshold 现为 property+setter, 穿透到
+            # EntryJudgeStep/ExitJudgeStep/PersistFilterStep, 调整真实生效。
+            # (此前 SignalGen 无该属性, 读取即 AttributeError, 赋值也不传播)
             if profile == 'trending_contract':
-                self.sg.entry_threshold = min(self.sg.entry_threshold * 1.2, 0.8)
+                # 趋势合约: 阈值上调(参考 trending_contract.yaml 的 0.65)
+                self.sg.entry_threshold = max(self.sg.entry_threshold, 0.65)
             elif profile == 'mr_contract':
-                self.sg.entry_threshold = max(self.sg.entry_threshold * 0.8, 0.3)
+                # 均值回归合约: 阈值下调(参考 mr_contract.yaml 的 0.4)
+                self.sg.entry_threshold = min(self.sg.entry_threshold, 0.4)
 
     def compute_decision(self, context, cur_date: int):
         """计算本bar的决策对象"""
@@ -205,7 +211,12 @@ class ArbCore:
         if bar_data is None:
             return None
 
-        # === RegimeDetect ===
+        # === RegimeDetect === (B7回退2026-07: 恢复原顺序)
+        # 注意: detect_regime 的 coint_p 参数当前未被 RegimeDetector 消费
+        # (detect(spread) 只用价差序列), 传入 _last_coint_p 仅为签名兼容。
+        # 必须先 detect + apply_regime_weights 再 fe.calculate:
+        # calculate() 内部用 _effective_weights 加权 total_score,
+        # 若先 calculate 再用本 bar regime 调权, 权重会滞后一 bar。
         regime_dict = self.sg.detect_regime(
             bar_data.spread, bar_data.aux_bars,
             coint_p=self._last_coint_p)
@@ -242,36 +253,70 @@ class ArbCore:
 
         self.rm.update_hold_bars(current_direction)
 
-        # 计算当前未实现盈亏(供ExitJudgeStep使用)
+        # 计算当前未实现盈亏(供ExitJudgeStep + RiskMgr共用，D2修复: 只算一次)
+        # C-3(2026-07): positions/pnl dict 同bar只取一次, 供RiskMgr.check复用
         unrealized_pnl = 0.0
+        positions = None
+        pnl = None
         if current_direction != 0:
+            positions = {}
+            pnl = {}
             for leg in self._config.legs:
-                unrealized_pnl += context.stra_get_position_profit(leg.code)
+                positions[leg.code] = context.stra_get_position(leg.code)
+                pnl[leg.code] = context.stra_get_position_profit(leg.code)
+            unrealized_pnl = sum(pnl.values())
 
-        signal = self.sg.generate_with_regime(
-            factor_signal, bar_data.aux_bars, current_direction,
-            spread_trend_filter=bar_data.spread_trend_filter,
-            spread=bar_data.spread,
-            coint_p=factor_signal.coint_p,
-            regime_dict=regime_dict,
-            unrealized_pnl=unrealized_pnl,
-            current_hour=context.stra_get_time() // 100)
+        # B-6: 理论 vs 实际 PnL 对账(每bar更新, session_end 输出)
+        self._update_pnl_recon(bar_data, positions, unrealized_pnl)
+
+        # B-2(2026-07): 协整 entry gating 前移 — 空仓且协整恶化时跳过信号生成。
+        # 原问题: RiskMgr.coint_quality 的 block-entry 分支是死代码(空仓时check提前return),
+        #         只有 EntryJudgeStep 的软门控(且不覆盖 trend regime)。
+        #         协整破裂=交易前提不成立, 应全 regime 硬阻断新开仓。
+        coint_block_p = self._risk_cfg.coint_block_entry_p
+        if (current_direction == 0
+                and factor_signal.coint_p >= coint_block_p):
+            from schemas import SignalResult
+            signal = SignalResult(
+                regime=regime,
+                regime_confidence=regime_dict.get('confidence', 0.0),
+                regime_direction=regime_dict.get('direction', 0),
+            )
+            self._diag.factor(
+                factor_name='coint_residual', event='entry_gated',
+                detail=f'{self.name}: coint_p={factor_signal.coint_p:.4f} >= block_entry_p={coint_block_p}, skip signal gen')
+        else:
+            signal = self.sg.generate_with_regime(
+                factor_signal, bar_data.aux_bars, current_direction,
+                spread_trend_filter=bar_data.spread_trend_filter,
+                spread=bar_data.spread,
+                coint_p=factor_signal.coint_p,
+                regime_dict=regime_dict,
+                unrealized_pnl=unrealized_pnl,
+                current_hour=context.stra_get_time() // 100)
 
         # 更新指标
-        self._update_indicators(context, bar_data, factor_signal, signal)
+        self._update_indicators(context, bar_data, factor_signal, signal,
+                                positions=positions, pnl=pnl)
 
         return ArbDecision(
             bar_data=bar_data,
             signal=signal,
             factor_signal=factor_signal,
             current_direction=current_direction,
+            unrealized_pnl=unrealized_pnl,  # D2修复: 传入缓存值避免重复计算
+            positions=positions,  # C-3: 传入缓存dict
+            pnl=pnl,
         )
 
     def execute_decision(self, context, decision: ArbDecision):
         """执行下单决策"""
         self._execute_decision(
             context, decision.bar_data, decision.signal,
-            decision.factor_signal, decision.current_direction)
+            decision.factor_signal, decision.current_direction,
+            cached_unrealized=decision.unrealized_pnl,
+            cached_positions=decision.positions,
+            cached_pnl=decision.pnl)
 
     def persist_state(self, context):
         """持久化当前状态"""
@@ -280,7 +325,8 @@ class ArbCore:
         # P0-9: 持久化执行状态
         self.sm.save_exec_state(context, self.eh)
 
-    def _update_indicators(self, context, bar_data, factor_signal, signal):
+    def _update_indicators(self, context, bar_data, factor_signal, signal,
+                           positions=None, pnl=None):
         """更新图表指标"""
         idx_name = f"Spread_{self.name}"
         context.set_index_value(idx_name, "spread", float(bar_data.spread[-1]))
@@ -299,9 +345,18 @@ class ArbCore:
         for fname, fval in factor_signal.factor_scores.items():
             context.set_index_value(fidx_name, fname, float(fval))
 
+        # P-3(2026-07): write_indicator 仅实盘执行 — runBT 未注册 IndexWriter,
+        # WtBtEngine 侧是 no-op(WtBtEngine.py:98-99), 回测中每bar的持仓查询+
+        # dict构造全部白做。set_index_value 保留(回测图表可用)。
+        if self._is_backtest:
+            return
+
         now = context.stra_get_date() * 10000 + context.stra_get_time()
-        positions = {leg.code: context.stra_get_position(leg.code) for leg in self.legs}
-        pnl = {leg.code: context.stra_get_position_profit(leg.code) for leg in self.legs}
+        # C-3: 优先复用 compute_decision 已取的持仓/盈亏, 空仓时补取
+        if positions is None:
+            positions = {leg.code: context.stra_get_position(leg.code) for leg in self.legs}
+        if pnl is None:
+            pnl = {leg.code: context.stra_get_position_profit(leg.code) for leg in self.legs}
 
         context.write_indicator(tag=self.name, time=now, data={
             "spread": float(bar_data.spread[-1]),
@@ -315,7 +370,10 @@ class ArbCore:
             "leg_status": self.eh.get_status(),
         })
 
-    def _execute_decision(self, context, bar_data, signal, factor_signal, current_direction):
+    def _execute_decision(self, context, bar_data, signal, factor_signal, current_direction,
+                          cached_unrealized: float = 0.0,
+                          cached_positions: dict = None,
+                          cached_pnl: dict = None):
         """风控检查 + 交易决策 + DiagLogger记录
 
         冷却期策略:
@@ -326,19 +384,19 @@ class ArbCore:
         # cooldown递减统一放开头
         self.rm.tick_cooldown()
 
-        # 缓存未实现盈亏
+        # D2修复: 使用 compute_decision 缓存的未实现盈亏，避免重复计算
         if current_direction != 0:
-            cur_unrealized = sum(
-                context.stra_get_position_profit(leg.code) for leg in self.legs)
-            self.rm.cache_unrealized(cur_unrealized)
+            self.rm.cache_unrealized(cached_unrealized)
 
         # 风控检查
         risk_result = None
         if current_direction != 0 and not self.rm.closing:
+            # C-3: 传入 compute_decision 已取的 positions/pnl, 消除第3处重复取数
             risk_result = self.rm.check(
                 context, self._config, bar_data.spread, self.sc,
                 coint_p=factor_signal.coint_p,
-                current_direction=current_direction)
+                current_direction=current_direction,
+                positions=cached_positions, pnl=cached_pnl)
 
         if risk_result is not None:
             self.rm.on_risk_close()
@@ -389,7 +447,7 @@ class ArbCore:
                     factors=factor_signal.factor_scores)
         elif signal.should_exit or signal.should_reverse:
             min_hold = self._risk_cfg.min_hold_bars
-            if self.rm.hold_bars < min_hold:
+            if self.rm.hold_bars < min_hold and not signal.pnl_trailing_exit:
                 pass  # 持仓时间不足，忽略信号平仓
             else:
                 action = 'reverse' if signal.should_reverse else 'exit'
@@ -405,6 +463,57 @@ class ArbCore:
                     self.name, action=action, direction=signal.direction,
                     signal=signal.entry_signal,
                     pnl=self.rm.realized_pnl)
+
+    def _update_pnl_recon(self, bar_data, positions, unrealized_pnl):
+        """B-6(2026-07): 理论 vs 实际 PnL 对账。
+
+        持仓不变的相邻 bar 之间:
+        - 理论 PnL = Σ 腿(持仓量 × 合约乘数 × Δ收盘价) - 按价差理论应得
+        - 实际 PnL = 本bar浮盈 - 上bar浮盈 - WT 账户实际所得
+          (浮盈来自 stra_get_position_profit, 标记价=最新成交价, 非bar收盘价)
+        偏差累计值 = 滑点 + 成交价偏离 bar 收盘的执行损耗 + 标记价差。
+        持仓变动的 bar(开/平/反转/部分成交)跳过, 重建基线。
+        """
+        if positions is None:
+            self._recon_prev = None
+            return
+        key = tuple(sorted(positions.items()))
+        last_prices = {}
+        for leg in self._config.legs:
+            series = bar_data.prices.get(leg.code)
+            if series is None or len(series) == 0:
+                return
+            last_prices[leg.code] = float(series[-1])
+        if self._recon_prev is not None:
+            prev_key, prev_unrealized, prev_prices = self._recon_prev
+            if prev_key == key:
+                theo = 0.0
+                for leg in self._config.legs:
+                    qty = positions.get(leg.code, 0)
+                    if qty:
+                        theo += qty * leg.multiplier * (
+                            last_prices[leg.code] - prev_prices[leg.code])
+                self._recon_theo += theo
+                self._recon_actual += unrealized_pnl - prev_unrealized
+        self._recon_prev = (key, unrealized_pnl, last_prices)
+
+    def pnl_recon_report(self) -> tuple:
+        """B-6: 返回 (理论PnL累计, 实际PnL累计) 对账数据。
+        getattr 防御: 测试夹具经 __new__ 构造时属性可能不存在。"""
+        return (getattr(self, '_recon_theo', 0.0),
+                getattr(self, '_recon_actual', 0.0))
+
+    def on_tick(self, context):
+        """A-2/A-3(2026-07): 实盘 tick 级执行状态机推进。
+
+        仅推进 ArbExecHelper(成交确认/追单/超时保护), 不做仓位对账
+        (对账仍按 bar 在 sync_state 执行)。回测保持 bar 级不变。
+        修复"订阅了tick却on_tick=pass, 付tick成本得bar时效"的两头不占。
+        """
+        if self._is_backtest:
+            return
+        self.eh.on_tick_check(context, self._config)
+        self.eh.check_state_timeout(context, self._config)
 
     def on_session_begin(self, context):
         """WT 回调入口 (facade) — 见 ArbCoreLifecycle.on_session_begin。"""

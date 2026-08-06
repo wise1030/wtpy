@@ -115,12 +115,17 @@ class DataPipe:
         # 3. 提取价格和成交量
         prices = {}
         volumes = {}
+        timestamps = {}  # B2修复: 收集 bartimes 用于精确时间对齐
         min_len = None
         for code, bars in bars_data.items():
             closes = bars.closes
             vols = bars.volumes
             prices[code] = closes
             volumes[code] = vols
+            try:
+                timestamps[code] = bars.bartimes
+            except AttributeError:
+                pass  # mock 对象无 bartimes, 回退到尾端截断
             if min_len is None or len(closes) < min_len:
                 min_len = len(closes)
 
@@ -139,9 +144,11 @@ class DataPipe:
 
         if spread_mode == 'coint':
             spread, beta = self._calc_coint_spread(
-                prices, volumes, aux_bars, cur_date, spread_calc)
+                prices, volumes, aux_bars, cur_date, spread_calc,
+                timestamps=timestamps)
         else:
-            spread = spread_calc.calc_price_spread(prices, volumes)
+            spread = spread_calc.calc_price_spread(prices, volumes,
+                                                    timestamps=timestamps or None)
 
         if spread is None or len(spread) < 2:
             return None
@@ -168,17 +175,29 @@ class DataPipe:
         )
 
     def _calc_coint_spread(self, prices, volumes,
-                           aux_bars, cur_date, spread_calc):
+                           aux_bars, cur_date, spread_calc,
+                           timestamps=None):
         """
-        coint模式价差计算 — 已修复双重计算+冗余update_bands
+        coint模式价差计算 - 已修复双重计算+冗余update_bands
 
-        流程: refit_coint(仅触发OLS+ADF) → 获取beta/c → 计算coint_spread
+        流程: refit_coint(仅触发OLS+ADF) -> 获取beta/c -> 计算coint_spread
         不再调用fe.calculate()两次，避免_rank_window污染
         不再在中间路径调用update_bands(统一由fetch()末尾调用)
         """
         fe = self._factor_engine
 
-        price_spread = spread_calc.calc_price_spread(prices, volumes)
+        # P-1(2026-07): 时间戳对齐只做一次 — 原 calc_price_spread 和
+        # calc_coint_spread 各做一遍完全相同的 timestamps join(输入相同仅beta不同)。
+        # 对齐后传入 timestamps=None 走等长快路径。
+        if timestamps:
+            aligned_prices = spread_calc.align_series(prices, timestamps)
+            if aligned_prices is None:
+                return None, None
+            prices = aligned_prices
+            timestamps = None
+
+        price_spread = spread_calc.calc_price_spread(
+            prices, volumes, timestamps=timestamps)
         if price_spread is None or len(price_spread) < 2:
             return None, None
 
@@ -196,7 +215,8 @@ class DataPipe:
             return price_spread, None
 
         # 计算协整价差
-        coint_spread = spread_calc.calc_coint_spread(prices, beta=beta, c=c)
+        coint_spread = spread_calc.calc_coint_spread(
+            prices, beta=beta, c=c, timestamps=timestamps)
 
         if coint_spread is not None and len(coint_spread) >= 2:
             # 不再调用update_bands — 由fetch()末尾统一调用

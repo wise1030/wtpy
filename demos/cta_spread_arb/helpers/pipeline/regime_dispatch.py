@@ -14,9 +14,9 @@ class RegimeDispatchStep:
 
     def __init__(self, signal_mode: str = 'adaptive'):
         self._signal_mode = signal_mode
-        # 固定模式不需要regime检测
-        self._last_regime = 'range'
-        self._last_regime_direction = 0
+        # C-4(2026-07): 删除 _last_regime/_last_regime_direction 镜像状态 —
+        # regime 单一来源归 SignalGen._last_regime(detect_regime 更新),
+        # 原三处缓存(Detector/SignalGen/DispatchStep)易漂移
 
     def process(self, ctx: SignalContext) -> SignalContext:
         total_score = ctx.total_score
@@ -30,9 +30,6 @@ class RegimeDispatchStep:
         elif self._signal_mode not in ('adaptive',):
             ctx.regime = 'range'
 
-        self._last_regime = ctx.regime
-        self._last_regime_direction = ctx.regime_direction
-
         # P0-2修复: 直接传递total_score，不再做boost/decay
         # 原问题: FactorEngine.apply_regime_weights()已调整因子权重(1.5x/0.5x/0.3x)，
         #   RegimeDispatchStep又做trend_aligned_boost(1.3x)，导致trend regime
@@ -41,11 +38,3 @@ class RegimeDispatchStep:
         ctx.entry_signal = total_score
 
         return ctx
-
-    @property
-    def regime(self) -> str:
-        return self._last_regime
-
-    @property
-    def regime_direction(self) -> int:
-        return self._last_regime_direction

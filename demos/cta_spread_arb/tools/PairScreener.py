@@ -25,12 +25,41 @@ import json
 class PairScreener:
     """品种组合筛选器"""
 
+    # B-5(2026-07): 品种经济性准入门槛 — fee/avg_win 上限。
+    # C2诊断(PROJECT_ASSESSMENT_20260609 §2): rb/hc fee/avg_win=1.27%~1.47%
+    # 结构性不可盈利(盈亏平衡胜率>实际胜率), l/pp=0.49% 健康。
+    # 0.8% 为两者之间的人性化截断, 可按需调整。
+    FEE_RATIO_MAX = 0.008
+
     def __init__(self, data_dir: str = None):
         """
         Args:
             data_dir: 历史数据目录(可选，用于从文件加载数据)
         """
         self._data_dir = data_dir
+
+    @staticmethod
+    def check_fee_economics(fee_per_round: float, avg_win: float,
+                            max_ratio: float = None) -> tuple:
+        """B-5: 品种经济性检查 — 手续费占平均盈利比是否可接受。
+
+        Args:
+            fee_per_round: 单轮(开+平, 双腿合计)手续费(元)
+            avg_win: 历史/预估平均每笔盈利(元)
+            max_ratio: fee/avg_win 上限(默认 FEE_RATIO_MAX=0.008)
+
+        Returns:
+            (ok, ratio, msg): ok=True 表示经济性达标
+        """
+        max_ratio = max_ratio if max_ratio is not None else PairScreener.FEE_RATIO_MAX
+        if avg_win <= 0:
+            return False, float('inf'), f"avg_win={avg_win}<=0, 无法评估"
+        ratio = fee_per_round / avg_win
+        if ratio >= max_ratio:
+            return False, ratio, (
+                f"fee/avg_win={ratio:.2%} >= {max_ratio:.2%}, "
+                f"品种经济性不达标(参考: rb/hc=1.27%亏损, l/pp=0.49%健康)")
+        return True, ratio, f"fee/avg_win={ratio:.2%} < {max_ratio:.2%}, OK"
 
     def evaluate(self, prices_a: np.ndarray, prices_b: np.ndarray,
                  name: str = "pair") -> dict:
@@ -114,7 +143,10 @@ class PairScreener:
 
     def screen(self, candidates: list, min_coint_p: float = 0.05,
                min_half_life: float = 1.0, max_half_life: float = 30.0,
-               min_corr: float = 0.3) -> list:
+               min_corr: float = 0.3,
+               fee_estimates: dict = None,
+               fee_ratio_max: float = None,
+               exclude_fee_fail: bool = False) -> list:
         """
         批量筛选品种组合
 
@@ -124,6 +156,10 @@ class PairScreener:
             min_half_life: 最小半衰期
             max_half_life: 最大半衰期
             min_corr: 最小相关系数
+            fee_estimates: B-5(2026-07): 可选, {pair_name: (fee_per_round, avg_win)}
+                提供时对每个组合做品种经济性检查, 结果附 fee_ratio/fee_ok/fee_msg
+            fee_ratio_max: fee/avg_win 上限(默认 FEE_RATIO_MAX)
+            exclude_fee_fail: True 时经济性不达标的组合直接剔除
 
         Returns:
             按score降序排列的评估结果列表
@@ -133,18 +169,31 @@ class PairScreener:
             if len(pair) != 2:
                 continue
             code_a, code_b = pair
+            pair_name = f"{code_a}/{code_b}"
             # 从数据文件加载(如果有data_dir)
             prices_a = self._load_prices(code_a)
             prices_b = self._load_prices(code_b)
             if prices_a is None or prices_b is None:
                 results.append({
-                    "name": f"{code_a}/{code_b}",
+                    "name": pair_name,
                     "error": "no data",
                     "score": 0
                 })
                 continue
 
-            eval_result = self.evaluate(prices_a, prices_b, name=f"{code_a}/{code_b}")
+            eval_result = self.evaluate(prices_a, prices_b, name=pair_name)
+
+            # B-5: 品种经济性准入检查
+            if fee_estimates and pair_name in fee_estimates:
+                fee_per_round, avg_win = fee_estimates[pair_name]
+                ok, ratio, msg = self.check_fee_economics(
+                    fee_per_round, avg_win, fee_ratio_max)
+                eval_result['fee_ratio'] = ratio
+                eval_result['fee_ok'] = ok
+                eval_result['fee_msg'] = msg
+                if exclude_fee_fail and not ok:
+                    continue
+
             results.append(eval_result)
 
         # 按score降序排列
@@ -171,14 +220,19 @@ class PairScreener:
     @staticmethod
     def print_report(results: list):
         """打印评估报告"""
-        print(f"\n{'='*70}")
-        print(f"{'品种组合':<25} {'评分':>6} {'ADF p':>8} {'半衰期':>8} {'相关':>6} {'协整':>4}")
-        print(f"{'-'*70}")
+        print(f"\n{'='*78}")
+        print(f"{'品种组合':<25} {'评分':>6} {'ADF p':>8} {'半衰期':>8} {'相关':>6} {'协整':>4} {'fee比':>8}")
+        print(f"{'-'*78}")
         for r in results:
             if 'error' in r:
                 print(f"{r['name']:<25} {r['error']}")
                 continue
             coint_mark = "Y" if r.get('cointegrated', False) else "N"
+            # B-5: fee_ratio 列(无数据时 '-', 不达标加 '!')
+            if 'fee_ratio' in r:
+                fee_mark = f"{r['fee_ratio']:>7.2%}" + (" " if r['fee_ok'] else "!")
+            else:
+                fee_mark = "     -  "
             print(f"{r['name']:<25} {r['score']:>6.3f} {r['adf_p']:>8.4f} "
-                  f"{r['half_life']:>8.1f} {r['corr']:>6.3f} {coint_mark:>4}")
-        print(f"{'='*70}\n")
+                  f"{r['half_life']:>8.1f} {r['corr']:>6.3f} {coint_mark:>4} {fee_mark}")
+        print(f"{'='*78}\n")

@@ -116,6 +116,8 @@ class SpreadArbStrategy(BaseCtaStrategy):
             exec_cfg=self._exec_cfg,
             is_backtest=is_backtest,
             param_profile=sub_cfg.get('param_profile'),
+            # A-5(2026-07): auto_profile 配置透传, 修复实盘重算路径死分支
+            auto_profile_cfg=auto_profile_cfg,
         )
 
     @property
@@ -293,19 +295,24 @@ class SpreadArbStrategy(BaseCtaStrategy):
         return tmp_path
 
     def on_init(self, context: CtaContext):
+        # 框架一致性校验: 自管理 is_backtest 必须与 engine.is_backtest 一致,
+        # 否则 on_tick/write_indicator/recheck_profile 的门控会走错分支
+        if context.is_backtest != self._is_backtest:
+            raise RuntimeError(
+                f"is_backtest mismatch: strategy={self._is_backtest} "
+                f"engine={context.is_backtest}. 检查 runBT/runLive 构造参数")
         self._core.on_init(context, is_main_holder=True)
         context.stra_log_text(
             f"SpreadArbStrategy inited with core={self._core.name}")
 
     def on_calculate(self, context: CtaContext):
+        # P-6(2026-07): 删除每bar的 stra_log_text(上万bar=上万行噪声日志)
         self._cur_date = context.stra_get_date()
-        cur_time = context.stra_get_time()
-        context.stra_log_text(
-            f"on_calculate triggered: date={self._cur_date}, time={cur_time}")
         self._core.process(context, self._cur_date)
 
     def on_tick(self, context: CtaContext, stdCode: str, newTick: dict):
-        pass
+        # A-2/A-3(2026-07): 实盘恢复 tick 级状态机推进(回测内部自动跳过)
+        self._core.on_tick(context)
 
     def on_bar(self, context: CtaContext, stdCode: str, period: str, newBar: dict):
         pass

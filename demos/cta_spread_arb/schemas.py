@@ -5,6 +5,7 @@ types.py — 统一数据结构定义
 新增字段只需修改此处，下游自动适配。
 """
 from dataclasses import dataclass, field
+import dataclasses
 from typing import Any, Dict, List, Optional
 import re
 import numpy as np
@@ -89,6 +90,7 @@ class SignalResult:
     raw_signal: float = 0.0              # 原始因子信号
     strength: float = 0.0                # 信号绝对强度
     trend_blocked: bool = False          # 是否被趋势过滤衰减
+    pnl_trailing_exit: bool = False     # v7: 是否由浮盈追踪止盈触发
 
 
 
@@ -97,16 +99,31 @@ class SignalResult:
 # 配置层: 结构化配置
 # ============================================================
 
+def _build_from_yaml(cls, cfg: dict):
+    """C-2(2026-07): from_yaml 默认值单源化。
+
+    默认值只存在于 dataclass 字段定义, from_yaml 不再逐字段双写
+    (原模式改默认值要改两处, 是配置漂移温床)。
+    未知 key 静默忽略(与历史行为一致), 覆盖校验由调用方负责
+    (SpreadArbStrategy._resolve_sub_cfg 已做未知字段报错)。
+    """
+    cfg = cfg or {}
+    return cls(**{f.name: cfg[f.name]
+                  for f in dataclasses.fields(cls) if f.name in cfg})
+
+
 @dataclass
 class SignalConfig:
     """信号相关配置 — 从strategy_config.yaml的signal节解析"""
+    # C-2(2026-07): signal_mode 补入(此前YAML signal节写了但被静默丢弃,
+    # FactorEngine 永远走默认 adaptive)
+    signal_mode: str = 'adaptive'
     entry_threshold: float = 0.525
     exit_threshold: float = 0.08
     coint_decay: float = 0.8
     momentum_decay: float = 0.8
-    trend_aligned_boost: float = 1.3
-    trend_counter_decay: float = 0.3
-    range_signal_decay: float = 0.5
+    # C-2(2026-07): trend_aligned_boost/trend_counter_decay/range_signal_decay
+    # 已删除 — P0-2 后 RegimeDispatchStep 不再消费, 属死配置字段
     signal_persist_bars: int = 1         # 连续N bar同向才开仓, 1=不过滤
     short_entry_multiplier: float = 1.0
     trailing_exit_bars: int = 6
@@ -124,31 +141,25 @@ class SignalConfig:
     trend_counter_decay_factor: float = 0.5
     # v7.2: 时段过滤
     blocked_hours: str = '14'
+    # v7: 浮盈追踪止盈参数 (策略参数, 非风控参数 — 不触发冷却期)
+    pnl_trailing_threshold: float = 500.0
+    pnl_trailing_tight: float = 0.2
+    pnl_trailing_medium: float = 0.3
+    pnl_trailing_wide: float = 0.4
+    # B12修复: 反转额外缓冲倍数(反转风险高于普通出场)
+    reverse_buffer_multiplier: float = 1.2
+    # C1修复: _mr_exit PnL 分级阈值参数化(原硬编码 300/100/4000)
+    mr_profit_tier1: float = 300.0
+    mr_profit_tier2: float = 100.0
+    mr_loss_scale: float = 4000.0
+    # C1修复: _pnl_trailing_check 分级边界参数化(原硬编码 1000/2000)
+    pnl_trailing_tier1: float = 1000.0
+    pnl_trailing_tier2: float = 2000.0
 
     @classmethod
     def from_yaml(cls, signal_cfg: dict) -> 'SignalConfig':
-        """从YAML配置dict创建"""
-        return cls(
-            entry_threshold=signal_cfg.get('entry_threshold', 0.525),
-            exit_threshold=signal_cfg.get('exit_threshold', 0.08),
-            coint_decay=signal_cfg.get('coint_decay', 0.8),
-            momentum_decay=signal_cfg.get('momentum_decay', 0.8),
-            trend_aligned_boost=signal_cfg.get('trend_aligned_boost', 1.3),
-            trend_counter_decay=signal_cfg.get('trend_counter_decay', 0.3),
-            range_signal_decay=signal_cfg.get('range_signal_decay', 0.5),
-            signal_persist_bars=signal_cfg.get('signal_persist_bars', 1),
-            short_entry_multiplier=signal_cfg.get('short_entry_multiplier', 1.0),
-            trailing_exit_bars=signal_cfg.get('trailing_exit_bars', 6),
-            trailing_decay_ratio=signal_cfg.get('trailing_decay_ratio', 0.3),
-            profit_protect_peak=signal_cfg.get('profit_protect_peak', 0.65),
-            profit_protect_floor=signal_cfg.get('profit_protect_floor', 0.3),
-            trend_trailing_ratio=signal_cfg.get('trend_trailing_ratio', 0.5),
-            trend_trailing_bars=signal_cfg.get('trend_trailing_bars', 3),
-            range_exit_threshold=signal_cfg.get('range_exit_threshold', 0.3),
-            trend_counter_decay_factor=signal_cfg.get('trend_counter_decay_factor', 0.5),
-            # v7.2: 时段过滤
-            blocked_hours=signal_cfg.get('blocked_hours', '14'),
-        )
+        """从YAML配置dict创建(C-2: 默认值单源化)"""
+        return _build_from_yaml(cls, signal_cfg)
 
 
 @dataclass
@@ -159,8 +170,9 @@ class RiskConfig:
     max_loss_per_pair: float = 8000
     max_spread_deviation: float = 4.0
     min_hold_bars: int = 6
-    profit_drawdown_ratio: float = 0.5
-    profit_take_threshold: float = 3000
+    # B-1(2026-07): profit_take/profit_drawdown/profit_tier_* 字段已删除 —
+    # RiskMgr profit_take 规则与 ExitJudgeStep._pnl_trailing_check 双重止盈,
+    # 统一保留信号层软止盈 (SignalConfig.pnl_trailing_*)
     # P1-1修复: 协整质量强平阈值可配置(原硬编码0.10对rb-i过严)
     coint_force_exit_p: float = 0.15   # coint_p>=此值时强平(默认0.15, 原0.10)
     coint_block_entry_p: float = 0.05  # coint_p>=此值时禁止新开仓
@@ -172,49 +184,11 @@ class RiskConfig:
     quick_stop_confirm_bars: int = 12      # 阶段2: 早期确认止损 bar 数门槛
     quick_stop_confirm_loss: float = 500   # 阶段2: 浮亏门槛
     quick_stop_pure_loss: float = 300      # 阶段3: 纯亏损(peak_unrealized<=0)止损门槛
-    # P2-6: profit_take 分级追踪止盈档位边界与回撤增量(原硬编码 1000/2000, +0.1/+0.2)
-    profit_tier1_peak: float = 1000        # 档位1上界(peak<此值用base_ratio)
-    profit_tier2_peak: float = 2000        # 档位2上界(peak<此值用base_ratio+tier2_inc)
-    profit_tier2_inc: float = 0.1          # 档位2回撤增量
-    profit_tier3_inc: float = 0.2          # 档位3回撤增量(peak>=tier2_peak)
-    # v7: 浮盈追踪止盈安全网参数 (原在 SignalConfig, 移至 RiskConfig)
-    # 与 profit_take 互补: profit_take 门槛高(3000)管大盈, pnl_trailing 门槛低(500)管小盈
-    pnl_trailing_threshold: float = 500.0   # 最低触发浮盈门槛
-    pnl_trailing_tight: float = 0.2         # 紧追踪回撤比例 (peak<1000)
-    pnl_trailing_medium: float = 0.3        # 中等追踪回撤比例 (1000<=peak<2000)
-    pnl_trailing_wide: float = 0.4          # 宽追踪回撤比例 (peak>=2000)
 
     @classmethod
     def from_yaml(cls, risk_cfg: dict) -> 'RiskConfig':
-        """从YAML配置dict创建"""
-        return cls(
-            cooldown_bars=risk_cfg.get('cooldown_bars', 12),
-            max_hold_bars=risk_cfg.get('max_hold_bars', 120),
-            max_loss_per_pair=risk_cfg.get('max_loss_per_pair', 8000),
-            max_spread_deviation=risk_cfg.get('max_spread_deviation', 4.0),
-            min_hold_bars=risk_cfg.get('min_hold_bars', 6),
-            profit_drawdown_ratio=risk_cfg.get('profit_drawdown_ratio', 0.5),
-            profit_take_threshold=risk_cfg.get('profit_take_threshold', 3000),
-            coint_force_exit_p=risk_cfg.get('coint_force_exit_p', 0.15),
-            coint_block_entry_p=risk_cfg.get('coint_block_entry_p', 0.05),
-            reverse_cooldown_exempt=risk_cfg.get('reverse_cooldown_exempt', False),
-            # P2-6: quick_stop 配置化
-            quick_stop_early_bars=risk_cfg.get('quick_stop_early_bars', 6),
-            quick_stop_early_loss=risk_cfg.get('quick_stop_early_loss', 300),
-            quick_stop_confirm_bars=risk_cfg.get('quick_stop_confirm_bars', 12),
-            quick_stop_confirm_loss=risk_cfg.get('quick_stop_confirm_loss', 500),
-            quick_stop_pure_loss=risk_cfg.get('quick_stop_pure_loss', 300),
-            # P2-6: profit_take 分级配置化
-            profit_tier1_peak=risk_cfg.get('profit_tier1_peak', 1000),
-            profit_tier2_peak=risk_cfg.get('profit_tier2_peak', 2000),
-            profit_tier2_inc=risk_cfg.get('profit_tier2_inc', 0.1),
-            profit_tier3_inc=risk_cfg.get('profit_tier3_inc', 0.2),
-            # v7: 浮盈追踪止盈安全网
-            pnl_trailing_threshold=risk_cfg.get('pnl_trailing_threshold', 500.0),
-            pnl_trailing_tight=risk_cfg.get('pnl_trailing_tight', 0.2),
-            pnl_trailing_medium=risk_cfg.get('pnl_trailing_medium', 0.3),
-            pnl_trailing_wide=risk_cfg.get('pnl_trailing_wide', 0.4),
-        )
+        """从YAML配置dict创建(C-2: 默认值单源化)"""
+        return _build_from_yaml(cls, risk_cfg)
 
 
 @dataclass
@@ -240,28 +214,20 @@ class RegimeConfig:
     range_momentum_weight: float = 0.3
     range_reversal_weight: float = 0.3
     range_neutral_weight: float = 0.5
+    # C-2(2026-07): 补充 RegimeDetector 性能/投票参数(此前 YAML 无法调节,
+    # create_regime_detector 只映射 7 个参数, 其余只能改代码默认值)
+    adf_maxlag: int = 1                  # adfuller maxlag(性能热点, 默认1足够)
+    adf_cache_every: int = 24            # ADF 缓存间隔 bar 数(m5=2小时)
+    hurst_cache_every: int = 1           # Hurst 缓存间隔 bar 数(1=每bar重算)
+    weight_hurst: float = 0.3            # 投票权重: Hurst
+    weight_adf: float = 0.25             # 投票权重: ADF
+    weight_adx: float = 0.25             # 投票权重: ADX
+    weight_ma: float = 0.2               # 投票权重: MA斜率
 
     @classmethod
     def from_yaml(cls, regime_cfg: dict) -> 'RegimeConfig':
-        """从YAML配置dict创建"""
-        return cls(
-            hurst_window=regime_cfg.get('hurst_window', 100),
-            adx_window=regime_cfg.get('adx_window', 14),
-            vol_window=regime_cfg.get('vol_window', 30),
-            trend_hurst_threshold=regime_cfg.get('trend_hurst_threshold', 0.55),
-            mr_hurst_threshold=regime_cfg.get('mr_hurst_threshold', 0.45),
-            trend_adx_threshold=regime_cfg.get('trend_adx_threshold', 25.0),
-            vol_regime_z=regime_cfg.get('vol_regime_z', 1.0),
-            regime_memory_bars=regime_cfg.get('regime_memory_bars', 5),
-            regime_switch_cost=regime_cfg.get('regime_switch_cost', 0.3),
-            trend_momentum_weight=regime_cfg.get('trend_momentum_weight', 1.5),
-            trend_reversal_weight=regime_cfg.get('trend_reversal_weight', 0.5),
-            mr_momentum_weight=regime_cfg.get('mr_momentum_weight', 0.5),
-            mr_reversal_weight=regime_cfg.get('mr_reversal_weight', 1.5),
-            range_momentum_weight=regime_cfg.get('range_momentum_weight', 0.3),
-            range_reversal_weight=regime_cfg.get('range_reversal_weight', 0.3),
-            range_neutral_weight=regime_cfg.get('range_neutral_weight', 0.5),
-        )
+        """从YAML配置dict创建(C-2: 默认值单源化)"""
+        return _build_from_yaml(cls, regime_cfg)
 
 
 @dataclass
@@ -278,14 +244,8 @@ class ExecConfig:
 
     @classmethod
     def from_yaml(cls, exec_cfg: dict) -> 'ExecConfig':
-        """从YAML配置dict创建"""
-        return cls(
-            leg_timeout=exec_cfg.get('leg_timeout', 5),
-            max_retry=exec_cfg.get('max_retry', 3),
-            bollinger_lookback=exec_cfg.get('bollinger_lookback', 60),
-            bollinger_threshold=exec_cfg.get('bollinger_threshold', 2.0),
-            min_bar_length=exec_cfg.get('min_bar_length', 20),
-        )
+        """从YAML配置dict创建(C-2: 默认值单源化)"""
+        return _build_from_yaml(cls, exec_cfg)
 
 
 @dataclass
@@ -360,3 +320,20 @@ class RiskContext:
     @property
     def sub_name(self) -> str:
         return self.sub_config.name
+
+
+# ============================================================
+# 决策层: ArbCore 内部计算决策结果 (A8修复: 从 ArbCore.py 移至 schemas.py)
+# ============================================================
+
+@dataclass
+class ArbDecision:
+    """单个品种组合的计算决策结果"""
+    bar_data: object = None
+    signal: object = None
+    factor_signal: object = None
+    current_direction: int = 0
+    unrealized_pnl: float = 0.0  # D2修复: 缓存未实现盈亏避免重复计算
+    # C-3(2026-07): 同bar持仓/盈亏dict缓存, 供RiskMgr.check/indicators复用
+    positions: dict = None
+    pnl: dict = None

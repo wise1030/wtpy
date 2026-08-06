@@ -32,14 +32,20 @@ class RiskMgr:
         """
         self._risk_cfg = risk_cfg
         self._risk_rules = {
-            'spread_deviation': self._builtin_spread_deviation_rule,
+            # B4修复: 规则优先级调整 - 交易前提不成立/硬止损优先
+            # 原顺序: spread_deviation -> quick_stop -> max_loss -> ...
+            #         coint_quality 排末位, 但协整破裂=交易前提不成立应高优先级
+            # 新顺序: coint_quality(前提) -> quick_stop(硬止损) -> max_loss
+            #         -> time_stop -> spread_deviation -> min_hold
+            # B-1(2026-07): 删除 profit_take 规则 — 与 ExitJudgeStep._pnl_trailing_check
+            #         双重追踪止盈(~90%同构), 且 ExitJudge 版(threshold更低)总先触发,
+            #         本规则实际被遮蔽。追踪止盈统一归信号层。
+            'coint_quality': self._builtin_coint_quality_rule,
             'quick_stop': self._builtin_quick_stop_rule,  # v7.2: 快速止损(优先级高)
             'max_loss': self._builtin_max_loss_rule,
-            'profit_take': self._builtin_profit_take_rule,
             'time_stop': self._builtin_time_stop_rule,
+            'spread_deviation': self._builtin_spread_deviation_rule,
             'min_hold': self._builtin_min_hold_rule,
-            'coint_quality': self._builtin_coint_quality_rule,
-            'pnl_trailing': self._builtin_pnl_trailing_rule,  # v7: 浮盈追踪止盈安全网
         }
         # 状态跟踪
         self._hold_bars = 0       # 持仓bar数
@@ -106,7 +112,8 @@ class RiskMgr:
         return self._cooldown > 0
 
     def check(self, context, sub_config, spread, spread_calc,
-              coint_p: float = 1.0, current_direction: int = None) -> str:
+              coint_p: float = 1.0, current_direction: int = None,
+              positions: dict = None, pnl: dict = None) -> str:
         """
         执行风控检查
 
@@ -117,17 +124,20 @@ class RiskMgr:
             spread_calc: SpreadCalculator实例
             coint_p: 协整p值(供coint_quality规则使用)
             current_direction: 外部传入的当前持仓方向(优先使用)
+            positions/pnl: C-3(2026-07): 外部已取持仓/盈亏dict(可选),
+                传入则不再重复 stra_get_position/_profit(同bar第3处取数消除)
 
         Returns:
             风控触发时返回描述字符串，否则返回None
         """
         # 空仓时不检查
-        positions = {}
-        pnl = {}
-        for leg in sub_config.legs:
-            code = leg.code
-            positions[code] = context.stra_get_position(code)
-            pnl[code] = context.stra_get_position_profit(code)
+        if positions is None or pnl is None:
+            positions = {}
+            pnl = {}
+            for leg in sub_config.legs:
+                code = leg.code
+                positions[code] = context.stra_get_position(code)
+                pnl[code] = context.stra_get_position_profit(code)
 
         if all(v == 0 for v in positions.values()):
             return None
@@ -241,48 +251,6 @@ class RiskMgr:
             return f"max_loss: {total_pnl:.0f} < -{max_loss}"
         return None
 
-    def _builtin_profit_take_rule(self, ctx):
-        """
-        分级追踪止盈(v7): 根据浮盈大小动态调整回撤容忍度
-
-        核心思路: 小盈紧追踪(保住小利润), 大盈宽追踪(让利润跑)
-        - 浮盈 < profit_tier1_peak:        回撤 base_ratio
-        - 浮盈 [tier1, tier2_peak):        回撤 base_ratio + profit_tier2_inc
-        - 浮盈 >= profit_tier2_peak:       回撤 base_ratio + profit_tier3_inc
-
-        profit_take_threshold: 最低触发追踪止盈的浮盈门槛
-        profit_drawdown_ratio: 基础回撤比例(小盈档位)
-
-        P2-6: 档位边界(1000/2000)与增量(+0.1/+0.2)从 RiskConfig 读取, 不再硬编码
-        """
-        cfg = ctx.risk_cfg
-        profit_take_threshold = cfg.profit_take_threshold
-        base_drawdown_ratio = cfg.profit_drawdown_ratio
-        total_pnl = sum(ctx.pnl.values())
-
-        # 每次check都更新peak
-        if total_pnl > self._peak_unrealized:
-            self._peak_unrealized = total_pnl
-
-        peak = self._peak_unrealized
-
-        # 盈利未达门槛，不触发
-        if peak < profit_take_threshold:
-            return None
-
-        # 分级回撤比例: 小盈紧追踪, 大盈宽追踪
-        if peak < cfg.profit_tier1_peak:
-            drawdown_ratio = base_drawdown_ratio
-        elif peak < cfg.profit_tier2_peak:
-            drawdown_ratio = base_drawdown_ratio + cfg.profit_tier2_inc
-        else:
-            drawdown_ratio = base_drawdown_ratio + cfg.profit_tier3_inc
-
-        # 当前回撤超过分级比例时触发
-        if total_pnl < peak * (1 - drawdown_ratio):
-            return f"profit_take: peak={peak:.0f}, current={total_pnl:.0f}, drawdown={(peak-total_pnl)/peak:.0%}, tier_ratio={drawdown_ratio:.0%}"
-        return None
-
     def _builtin_min_hold_rule(self, ctx):
         """最小持仓时间: 仅做状态记录，不触发风控平仓"""
         return None
@@ -296,61 +264,18 @@ class RiskMgr:
         return None
 
     def _builtin_coint_quality_rule(self, ctx):
-        """协整质量门控: 协整p值恶化时限制新开仓(衰减而非禁止)
+        """协整质量门控: 协整p值恶化时强平持仓
 
         P1-1修复: 阈值从RiskConfig读取，不再硬编码0.10/0.05
-        默认值: coint_force_exit_p=0.15(原0.10对rb-i过严), coint_block_entry_p=0.05
+        默认值: coint_force_exit_p=0.15(原0.10对rb-i过严)
+
+        B-2(2026-07): 删除 block-entry 死分支 — 空仓时 check() 提前 return,
+        该分支永不触发; 新开仓协整门控已前移至 ArbCore.compute_decision。
         """
         coint_p = ctx.coint_p
         current_direction = ctx.current_direction
         force_exit_p = self._risk_cfg.coint_force_exit_p if hasattr(self._risk_cfg, 'coint_force_exit_p') else 0.15
-        block_entry_p = self._risk_cfg.coint_block_entry_p if hasattr(self._risk_cfg, 'coint_block_entry_p') else 0.05
 
         if coint_p >= force_exit_p and current_direction != 0:
             return f"coint_quality: coint_p={coint_p:.4f}>={force_exit_p}, force exit"
-        if coint_p >= block_entry_p and current_direction == 0:
-            return f"coint_quality: coint_p={coint_p:.4f}>={block_entry_p}, block new entry"
-        return None
-
-    def _builtin_pnl_trailing_rule(self, ctx):
-        """v7: 浮盈追踪止盈安全网 — 基于实际浮盈金额的分级追踪止盈
-
-        与 profit_take 互补:
-        - profit_take: 门槛高(3000), 管大盈 → 让利润跑
-        - pnl_trailing: 门槛低(500),  管小盈 → 保护性兜底
-
-        分级回撤:
-        - peak < 1000:  紧追踪(回撤20%即平仓)
-        - 1000-2000:    中等追踪(回撤30%)
-        - >= 2000:      宽追踪(回撤40%)
-
-        注意: 此规则在规则链中排在 profit_take 之后,
-        profit_take 已触发则不会到达此规则。
-        """
-        cfg = ctx.risk_cfg
-        total_pnl = sum(ctx.pnl.values())
-
-        # 更新浮盈峰值
-        if total_pnl > self._peak_unrealized:
-            self._peak_unrealized = total_pnl
-
-        peak = self._peak_unrealized
-
-        # 未达门槛不触发
-        if peak < cfg.pnl_trailing_threshold:
-            return None
-
-        # 分级回撤比例
-        if peak < 1000:
-            drawdown_ratio = cfg.pnl_trailing_tight
-        elif peak < 2000:
-            drawdown_ratio = cfg.pnl_trailing_medium
-        else:
-            drawdown_ratio = cfg.pnl_trailing_wide
-
-        trigger_line = peak * (1 - drawdown_ratio)
-        if total_pnl < trigger_line:
-            return (f"pnl_trailing: peak={peak:.0f}, current={total_pnl:.0f}, "
-                    f"drawdown={(peak - total_pnl) / peak:.0%}, "
-                    f"tier_ratio={drawdown_ratio:.0%}")
         return None

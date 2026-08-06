@@ -19,14 +19,11 @@ signal:
   profit_protect_floor: 0.4
   profit_protect_peak: 0.9
   range_exit_threshold: 0.4
-  range_signal_decay: 0.8
   short_entry_multiplier: 1.0
   signal_mode: adaptive
   signal_persist_bars: 2
   trailing_decay_ratio: 0.35
   trailing_exit_bars: 4
-  trend_aligned_boost: 1.3
-  trend_counter_decay: 0.3
   trend_counter_decay_factor: 0.5
   trend_trailing_bars: 2
   trend_trailing_ratio: 0.5

@@ -37,6 +37,15 @@ Strategy[*]_PnLAnalyzing_*.xlsx
 # ── 数据 storage (DSB / CSV，本地共享 ../common 数据) ─────────
 storage/
 
+# ── 研究用原始数据 (2GB+ CSV，不入 git) ────────────────────
+storage_research/
+
+# ── 矩阵批跑结果 (per-run，不入 git) ───────────────────────
+matrix_results/
+
+# ── 分析产物 (heatmap/CSV，可重新生成，不入 git) ──────────
+analysis_results/
+
 # ── Baseline indice.csv 太大不入 git ────────────────────────
 backtest_results/**/indice.csv
 

@@ -82,6 +82,8 @@ class ArbExecHelper:
         self._max_retry = max_retry
         # P0-4: 开仓超时保护 — 记录opening/closing进入时间
         self._state_since = None  # 实盘: time.time(); 回测: bar计数
+        # C-1修复(2026-07): 回测模式的 bar 计数器, 替代失真的 wall-clock
+        self._state_bar_count = 0
 
     @classmethod
     def from_config(cls, legs: list, exec_cfg, is_backtest: bool = False):
@@ -128,6 +130,7 @@ class ArbExecHelper:
         self._state = self.STATE_OPENING
         self._direction = direction
         self._state_since = _time.time()  # P0-4: 记录进入opening时间
+        self._state_bar_count = 0  # C-1: 回测 bar 计数重置
         targets = self._calc_target_positions(direction)
         for t in targets:
             code = t['code']
@@ -147,6 +150,7 @@ class ArbExecHelper:
         self._state = self.STATE_CLOSING
         self._reverse_after = reverse_after
         self._state_since = _time.time()  # P0-4: 记录进入closing时间
+        self._state_bar_count = 0  # C-1: 回测 bar 计数重置
         for leg in self._legs:
             code = leg.code
             cur_pos = context.stra_get_position(code)
@@ -184,6 +188,7 @@ class ArbExecHelper:
             self._reverse_after = False
             self._pending_direction = 0
             self._state_since = _time.time()  # P0-4
+            self._state_bar_count = 0  # C-1: 回测 bar 计数重置
         else:
             self._pending.clear()
             self._filled.clear()
@@ -212,7 +217,11 @@ class ArbExecHelper:
         self._pending_direction = 0
 
     def on_tick_check(self, context, sub_config):
-        """tick回调中检查成交状态和追单"""
+        """检查成交状态和追单。
+
+        回测: 由 sync_state 每 bar 调用(非真正 tick), bar_count 计 bar 数。
+        实盘: 由 on_tick 每笔调用 + sync_state 每 bar 调用, 用 wall-clock。
+        """
         for code, pending in list(self._pending.items()):
             cur_pos = context.stra_get_position(code)
             if cur_pos == pending['target']:
@@ -222,9 +231,11 @@ class ArbExecHelper:
 
             should_retry = False
             if self._is_backtest:
-                elapsed_ticks = pending.get('tick_count', 0)
-                pending['tick_count'] = elapsed_ticks + 1
-                if elapsed_ticks >= self._leg_timeout:
+                # 回测: on_tick_check 由 sync_state 每 bar 调用一次(非真正 tick),
+                # 计数器实际为 bar 数, 超过 _leg_timeout 则追单
+                elapsed_bars = pending.get('bar_count', 0)
+                pending['bar_count'] = elapsed_bars + 1
+                if elapsed_bars >= self._leg_timeout:
                     should_retry = True
             else:
                 elapsed = _time.time() - pending['timestamp']
@@ -239,7 +250,7 @@ class ArbExecHelper:
                     pending['retry_count'] += 1
                     pending['timestamp'] = _time.time()
                     if self._is_backtest:
-                        pending['tick_count'] = 0
+                        pending['bar_count'] = 0
                 else:
                     logger.warning(
                         f"leg {code} retry failed ({self._max_retry}x), "
@@ -337,8 +348,10 @@ class ArbExecHelper:
         """P0-4: 检测opening/closing状态是否超时
 
         实盘: 用 wall-clock 时间, 默认30秒
-        回测: 用 bar 计数, 默认20 bar (回测中on_tick_check每个tick调用,
-              但正常成交应在1-2个tick内完成)
+        回测: 用 bar 计数, 默认20 bar
+        (C-1修复2026-07: 回测原来也走 wall-clock, 高速回测30秒覆盖数千bar
+        永不超时, 慢机器/断点调试又会幽灵强平 — 回测结果不可复现。
+        check_state_timeout 每 bar 由 sync_state 调用一次, 计数即 bar 数)
 
         Returns:
             True 如果超时并已执行紧急全平+重置
@@ -348,16 +361,21 @@ class ArbExecHelper:
         if self._state not in (self.STATE_OPENING, self.STATE_CLOSING):
             return False
 
-        elapsed = _time.time() - self._state_since
-        timed_out = (elapsed > timeout_seconds)
+        if self._is_backtest:
+            self._state_bar_count += 1
+            timed_out = self._state_bar_count > timeout_bars
+            elapsed_desc = f"{self._state_bar_count}bars > {timeout_bars}bars"
+        else:
+            elapsed = _time.time() - self._state_since
+            timed_out = elapsed > timeout_seconds
+            elapsed_desc = f"{elapsed:.1f}s > {timeout_seconds}s"
 
         if timed_out:
             logger.warning(
                 f"state timeout: state={self._state}, "
-                f"elapsed={elapsed:.1f}s > {timeout_seconds}s, "
-                f"emergency reset")
+                f"elapsed={elapsed_desc}, emergency reset")
             context.stra_log_text(
-                f"state timeout: {self._state} elapsed {elapsed:.1f}s, "
+                f"state timeout: {self._state} elapsed {elapsed_desc}, "
                 f"emergency close_all", level=3)
             self.close_all(context, sub_config, tag="OT")
             return True

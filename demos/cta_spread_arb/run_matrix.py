@@ -5,9 +5,10 @@ run_matrix.py — 统一实验矩阵化工具 (v2)
 合并 run_multi.py + run_batch.py + 原 run_matrix.py 三个入口。
 
 两种运行模式:
-  --mode serial:   每个实验独立 WtBtEngine (进程隔离, 结果可靠, 慢)
-  --mode session:  所有实验共用 1 个 WtBtEngine session (快, 验证独立性)
-  --mode subprocess: 子进程隔离 (原 run_matrix 行为, 最可靠但最慢)
+  --mode serial:   每个实验独立 WtBtEngine (推荐, 结果可靠)
+  --mode subprocess: 子进程隔离 (最可靠但最慢)
+  --mode session:  已废弃 (A-1: WtBtEngine 单context设计, 回调只路由到
+                   最后一个策略, 输出不可信 — 调用即报错)
 
 用法:
     # 矩阵模式: pair × profile × month 笛卡尔积
@@ -16,7 +17,7 @@ run_matrix.py — 统一实验矩阵化工具 (v2)
     python run_matrix.py -p l_pp --months 2609 --no-run   # 只显示组合
 
     # 直接指定实验列表 (兼容原 run_multi / run_batch)
-    python run_matrix.py -e default rb_hc_2601 --mode session
+    python run_matrix.py -e default rb_hc_2601 --mode serial
     python run_matrix.py -e l_pp_2609 --mode serial
 
 输出:
@@ -74,7 +75,8 @@ def parse_args():
     # 通用
     p.add_argument('--mode', choices=['serial', 'session', 'subprocess'],
                    default='serial',
-                   help='serial=独立引擎 | session=共用引擎 | subprocess=子进程')
+                   help='serial=独立引擎(推荐) | subprocess=子进程隔离 | '
+                        'session=已废弃(A-1: 单context引擎回调路由错误, 结果不可信)')
     p.add_argument('--config-root', type=str, default=None)
     p.add_argument('--capital', type=float, default=1000000)
     p.add_argument('--slippage', type=int, default=0)
@@ -84,6 +86,8 @@ def parse_args():
                    help='Dry-run: 只显示组合不执行')
     p.add_argument('--no-merge', action='store_true',
                    help='不合并资金曲线')
+    p.add_argument('--force-cross-sector', action='store_true',
+                   help='允许跨板块矩阵 (默认阻止)')
     p.add_argument('--matrix-tag', type=str, default=None)
     return p.parse_args()
 
@@ -104,8 +108,52 @@ def discover_experiments(config_root):
     return exps
 
 
+def _load_contract_meta(pair):
+    """读取合约配置的 sector + valid_months"""
+    cfg_path = CONTRACTS_DIR / f'{pair}.yaml'
+    if not cfg_path.exists():
+        return {}
+    with open(cfg_path) as f:
+        return yaml.safe_load(f) or {}
+
+
 def generate_matrix_experiments(args):
-    """从 (pair × month × profile) 生成实验名列表"""
+    """从 (pair × month × profile) 生成实验名列表, 含板块/月份校验"""
+    # 板块校验: 不同板块的品种对不应混跑矩阵
+    sectors = {}
+    for pair in args.pairs:
+        meta = _load_contract_meta(pair)
+        sector = meta.get('sector', pair)
+        sectors.setdefault(sector, []).append(pair)
+
+    if len(sectors) > 1:
+        sector_info = ', '.join(f'{s}({",".join(p)})' for s, p in sectors.items())
+        print(f'[matrix] ⚠️  跨板块配对: {sector_info}')
+        print(f'[matrix] 不同板块品种对无经济关联, 矩阵结果不可信。')
+        print(f'[matrix] 建议: 按板块分别跑矩阵 (如 -p l_pp 或 -p rb_hc)')
+        if not getattr(args, 'force_cross_sector', False):
+            print(f'[matrix] 使用 --force-cross-sector 强制继续, 或拆分运行。')
+            sys.exit(1)
+
+    # 月份校验: 每个 pair 只接受 valid_months 中的月份
+    invalid_combos = []
+    for pair in args.pairs:
+        meta = _load_contract_meta(pair)
+        valid = meta.get('valid_months', [])
+        if valid:
+            for month in args.months:
+                if month not in valid:
+                    invalid_combos.append((pair, month))
+
+    if invalid_combos:
+        print(f'[matrix] ⚠️  无效的 (品种对, 月份) 组合:')
+        for pair, month in invalid_combos:
+            meta = _load_contract_meta(pair)
+            valid = meta.get('valid_months', [])
+            print(f'  {pair} × {month}: 仅支持 {valid}')
+        print(f'[matrix] 请检查 --months 参数。')
+        sys.exit(1)
+
     combos = list(itertools.product(args.pairs, args.months, args.profiles))
     print(f'[matrix] 组合数: {len(combos)} ({len(args.pairs)} pairs × '
           f'{len(args.months)} months × {len(args.profiles)} profiles)')
@@ -232,49 +280,19 @@ def run_serial(experiments, config_root, args):
 
 
 def run_session(experiments, config_root, args):
-    """session 模式: 所有实验共用 1 个 WtBtEngine"""
-    from wtpy import WtBtEngine, EngineType
-    from SpreadArbStrategy import SpreadArbStrategy
+    """session 模式: 已废弃 (2026-07, A-1)
 
-    start, end = _resolve_backtest_window(experiments, config_root, args)
-    print(f'[session] backtest window: {start} → {end}')
-
-    engine = WtBtEngine(EngineType.ET_CTA)
-    engine.init('./common/', "configbt.yaml")
-    engine.configBacktest(start, end)
-    engine.configBTStorage(mode="csv", path="./storage/")
-    engine.commitBTConfig()
-
-    strategies = []
-    for exp_name in experiments:
-        stra_name = f'spread_arb_{exp_name}'
-        print(f'[session] registering: {stra_name}')
-        stra = SpreadArbStrategy.from_experiment(
-            name=stra_name, experiment=exp_name,
-            config_root=config_root, is_backtest=True)
-        engine.set_cta_strategy(stra, slippage=args.slippage)
-        strategies.append((stra_name, stra))
-
-    print(f'[session] {len(strategies)} strategies, running...')
-    engine.run_backtest(bAsync=False)
-
-    # 收集结果
-    results = {}
-    for stra_name, stra in strategies:
-        output_dir = _PROJECT_ROOT / 'outputs_bt' / stra_name
-        metrics = collect_metrics(str(output_dir) if output_dir.exists() else None)
-        if metrics:
-            results[stra_name.replace('spread_arb_', '')] = metrics
-
-    engine.release_backtest()
-
-    # 独立性验证
-    names = [stra.core.name for _, stra in strategies]
-    if len(names) != len(set(names)):
-        print('\n  *** WARNING: ArbCore.name 冲突! ***')
-    else:
-        print(f'\n  ✅ {len(names)} 实例 name 唯一')
-    return results
+    WtBtEngine 是单 context 引擎: set_cta_strategy 直接覆盖 __context__
+    (WtBtEngine.py:381-382), get_context 无视 id 永远返回唯一 context
+    (WtBtEngine.py:408-409)。循环注册多策略时, 底层 CtaMocker 虽创建多个,
+    但所有 mocker 的回调都被路由到最后注册的策略, 前面的实例永远收不到
+    on_init/on_calculate —— session 模式的输出不可信。
+    请改用 --mode serial (推荐) 或 --mode subprocess。
+    """
+    raise RuntimeError(
+        "run_matrix --mode session 已废弃: WtBtEngine 单 context 设计导致"
+        "回调只路由到最后一个策略, 输出不可信 (A-1, 见 docs/PROJECT_ASSESSMENT_20260729.md)。"
+        "请改用 --mode serial 或 --mode subprocess。")
 
 
 def run_subprocess(experiments, config_root, args):

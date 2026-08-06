@@ -304,6 +304,16 @@ class ConfigResolver:
 
         # === 全局 signal/risk/regime/execution 不被 instance 覆盖, 保持 v8.1 行为 ===
         # (v8.1 也是: strategies[].signal_mode 只影响信号模式选择, 不修改 signal 段)
+        # C-2(2026-07): experiment 级 signal/risk_control/regime 覆盖此前被静默忽略,
+        # 改为显式报错 — "YAML写了不生效"是调参实验的隐形炸弹
+        for section in ('signal', 'risk_control', 'regime'):
+            if exp.get(section):
+                raise ValueError(
+                    f"experiment '{experiment}' 包含顶层 '{section}:' 段, 但该段会被"
+                    f"静默忽略 (v8.1 行为: 全局段只来自 base/)。请改用以下方式之一:\n"
+                    f"  1. 修改 config/base/{section}.yaml (影响所有实验)\n"
+                    f"  2. instances[].signal_overrides / risk_overrides (单实例覆盖)\n"
+                    f"  3. instances[].param_profile 引用 profiles/*.yaml")
         signal_dict = base['signal']
         risk_dict = base['risk_control']
         regime_dict = base['regime']

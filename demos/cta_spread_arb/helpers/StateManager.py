@@ -20,15 +20,23 @@ class StateManager:
     def __init__(self, sub_name: str):
         self._sub_name = sub_name
         self._keys = set()
+        # P-5(2026-07): dirty-flag — 每key缓存上次序列化值, 未变化跳过写盘。
+        # 原每bar 4次user_save_data ctypes + 2次json.dumps, 无论状态是否变化。
+        self._last_serialized = {}
 
     def save(self, context, key: str, value):
-        """保存单个状态值"""
+        """保存单个状态值(dirty-flag: 值未变化时跳过)"""
         full_key = f"{self._sub_name}_{key}"
         # user_save_data自动转str，复杂类型先JSON序列化
         if isinstance(value, (int, float, str, bool)):
-            context.user_save_data(full_key, value)
+            serialized = value
         else:
-            context.user_save_data(full_key, json.dumps(value))
+            serialized = json.dumps(value)
+        # P-5: 与上次序列化值相同则跳过(浮点直接比较, JSON字符串比较)
+        if self._last_serialized.get(key, object()) == serialized:
+            return
+        context.user_save_data(full_key, serialized)
+        self._last_serialized[key] = serialized
         self._keys.add(key)
 
     def load(self, context, key: str, default=None, vtype=None):

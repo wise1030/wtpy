@@ -58,8 +58,6 @@ class ConfigManager:
         'min_hold_bars': (1, 120),
         'cooldown_bars': (1, 120),
         'max_loss_per_pair': (100, 50000),
-        'profit_take_threshold': (500, 10000),
-        'profit_drawdown_ratio': (0.1, 0.9),
         'max_spread_deviation': (1.0, 10.0),
         'lots': (1, 100),
         'hurst_window': (10, 200),

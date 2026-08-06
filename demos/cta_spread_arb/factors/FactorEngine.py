@@ -226,17 +226,13 @@ class FactorEngine:
             },
         }
 
-    def _apply_mode_direction(self):
-        """根据signal_mode和因子direction_type计算有效权重和翻转标志
-        
-        固定模式(trend/mean_revert): 用MODE_DIRECTION_MAP
-        adaptive模式: 初始用range(保守), 后续由apply_regime_weights()动态调整
+    def _rebuild_weights(self, mode_cfg: dict):
+        """C-6(2026-07): 权重重建公共逻辑(原 _apply_mode_direction 与
+        apply_regime_weights 循环体完全同构, 合一)。
+
+        Args:
+            mode_cfg: {direction_type: (weight_mult, flip)} 权重映射
         """
-        if self._signal_mode == 'adaptive':
-            # P0-1修复: 使用实例变量而非硬编码REGIME_WEIGHT_MAP
-            mode_cfg = self._regime_weight_map.get('range', {})
-        else:
-            mode_cfg = MODE_DIRECTION_MAP.get(self._signal_mode, MODE_DIRECTION_MAP["trend"])
         self._effective_weights = []
         self._flip_flags = []
         for factor, base_w in zip(self._factors, self._base_weights):
@@ -245,15 +241,28 @@ class FactorEngine:
             self._effective_weights.append(base_w * mult)
             self._flip_flags.append(flip)
 
+    def _apply_mode_direction(self):
+        """根据signal_mode和因子direction_type计算有效权重和翻转标志
+
+        固定模式(trend/mean_revert): 用MODE_DIRECTION_MAP
+        adaptive模式: 初始用range(保守), 后续由apply_regime_weights()动态调整
+        """
+        if self._signal_mode == 'adaptive':
+            # P0-1修复: 使用实例变量而非硬编码REGIME_WEIGHT_MAP
+            mode_cfg = self._regime_weight_map.get('range', {})
+        else:
+            mode_cfg = MODE_DIRECTION_MAP.get(self._signal_mode, MODE_DIRECTION_MAP["trend"])
+        self._rebuild_weights(mode_cfg)
+
     def apply_regime_weights(self, regime: str):
         """根据regime动态调整因子权重(仅adaptive模式有效)
-        
+
         由ArbCore在每次process前调用。
         根据当前regime(trend/mr/range)调整:
         - momentum因子: trend↑, mr↓, range↓↓
         - reversal因子: trend↓, mr↑, range↓↓
         - neutral因子: 不变或微调
-        
+
         Args:
             regime: "trend" / "mr" / "range"
         """
@@ -262,13 +271,7 @@ class FactorEngine:
         self._current_regime = regime
         # P0-1修复: 使用实例变量而非硬编码REGIME_WEIGHT_MAP
         regime_cfg = self._regime_weight_map.get(regime, self._regime_weight_map['range'])
-        self._effective_weights = []
-        self._flip_flags = []
-        for factor, base_w in zip(self._factors, self._base_weights):
-            dt = factor.direction_type
-            mult, flip = regime_cfg.get(dt, (1.0, False))
-            self._effective_weights.append(base_w * mult)
-            self._flip_flags.append(flip)
+        self._rebuild_weights(regime_cfg)
 
     def refit_coint(self, spread: np.ndarray, prices: dict = None,
                     volumes: dict = None, aux_bars: dict = None,

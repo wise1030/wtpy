@@ -443,17 +443,17 @@ rb fee 按金额收取 (万 1，~3.2 元/手)，hc 按手数 (~1 元/手)。rb/h
 
 ### 🟠 High (代码 bug，审计发现)
 
-3. **`FactorBase._append_rank_value()` 从未被调用** — `rank_normalize` 全系统死代码，所有因子实际用 clip 归一化。修复方向：要么删 rank 路径，要么挂上调用。
-4. **`ArbCore._auto_profile_cfg` 未从 `SpreadArbStrategy` 传入** — 实盘动态 profile 切换部分失效 (仅初始化时的 profile 生效，重算路径在 `_recheck_profile` 中走不到 `hasattr(self, '_auto_profile_cfg')` 分支)。
-5. **`CointResidualFactor` refit backoff 反转** — refit 失败后退避时间递减 (5→2→1) 而不是递增。语义反了。
-6. **4 个 `vol_price_factors` 缺 `DIRECTION_TYPE`** — 默认 neutral，导致 regime 权重表/翻转逻辑可能错误。当前因子默认禁用所以未爆，启用时会出错。
-7. **`ArbExecHelper.check_state_timeout` 忽略回测模式** — 用 wall-clock 计 timeout，回测中可能未到 30 个 tick 就误超时。
-8. **`exit_judge` 5 个 PnL 阈值硬编码** — 300/100/4000/1000/2000 写死在代码中，无法通过 YAML 覆盖。
+3. **`FactorBase._append_rank_value()` 从未被调用** — `rank_normalize` 生产路径休眠（`use_rank_v2=True` 时有测试锁定，非字面死代码；所有 YAML 因子均未开启）。修复方向：要么删 rank 路径，要么挂上调用。
+4. ~~**`ArbCore._auto_profile_cfg` 未从 `SpreadArbStrategy` 传入**~~ — ✅ 已修复(2026-07 A-5): 构造函数真正传入，`_recheck_profile` 死分支消除。
+5. ~~**`CointResidualFactor` refit backoff 反转**~~ — ✅ 已修复(A3): 指数递增退避 + 32x cap。另：2026-07 B-4 修复 refit 间隔 YYYYMMDD 跨月/跨年算术失真。
+6. ~~**4 个 `vol_price_factors` 缺 `DIRECTION_TYPE`**~~ — ✅ 已修复(A4): Vwap/VPD=reversal, OBV/VolRatio=momentum。
+7. ~~**`ArbExecHelper.check_state_timeout` 忽略回测模式**~~ — ✅ 已修复(2026-07 C-1): 回测走 bar 计数(`timeout_bars`), 与机器速度无关, 回测可复现。
+8. ~~**`exit_judge` 5 个 PnL 阈值硬编码**~~ — ✅ 已修复(2026-07): 全部参数化到 `SignalConfig` (mr_profit_tier1/tier2, mr_loss_scale, pnl_trailing_tier1/tier2)，YAML 可覆盖。
 9. **P0-γ trend_block 硬阻断 unreachable** — `entry_judge` ×0.5 软衰减已挡死 `should_trade`，硬阻断永远走不到。代码保留+注释，单测保留作回归。
 
 ### 🟡 Medium (架构/重复)
 
-10. **`run_multi.py` + `run_batch.py` + `walk_forward.py` 入口职责重叠** — `run_matrix.py` 已经覆盖，老入口应该退役。
+10. ~~**`run_multi.py` + `run_batch.py` + `walk_forward.py` 入口职责重叠**~~ — 文件已删除，由 `run_matrix.py` 统一（⚠️ `--mode session` 已废弃：WtBtEngine 单 context 设计导致回调路由错误，结果不可信，用 serial/subprocess）。
 11. **`PairScreener` 未集成主流程** — 跑过的实验里 rb/hc 经济性问题如果 preflight 阶段筛掉，本可避免几小时实验。
 12. **`factor_ic_analysis.py` 374 行独立脚本** — 不联动信号生成，无法自动降权弱因子。
 13. **`strategy_config.yaml` 标记 DEPRECATED 但仍是 runBT/runLive 默认入口** — 两份维护，易漂移。
@@ -476,7 +476,40 @@ rb fee 按金额收取 (万 1，~3.2 元/手)，hc 按手数 (~1 元/手)。rb/h
 - WtBtEngine singleton 限制的子进程隔离方案
 - `run_matrix.py` 实验矩阵化 + `walk_forward.py` 过拟合诊断
 - C2 诊断: rb/hc 品种经济性根因定位
-- 153/153 测试全绿
+- 188/188 测试全绿
+- 2026-07 四维评估修复批 (docs/PROJECT_ASSESSMENT_20260729.md, 209/209 测试全绿):
+  - A-1 run_matrix session 模式废弃 (单context引擎回调路由错误, 结果不可信)
+  - C-1 check_state_timeout 回测 bar 计数 (消除回测不可复现)
+  - B-4 refit 间隔跨月/跨年日期算术修复
+  - B-1 双重追踪止盈合并 (删 RiskMgr profit_take, 保留 ExitJudge 软止盈)
+  - B-2 协整 entry gating 前移 compute_decision (原 block-entry 死分支)
+  - C-2 配置单源化 (signal_mode 生效/from_yaml 默认值单源/死字段删除/
+    experiment级覆盖显式报错/RegimeConfig 补 detector 参数)
+  - B-3 反转开仓补入场校验 (persist filter + blocked_hours veto)
+  - A-2/A-3 实盘恢复 on_tick tick级状态机推进 (回测保持bar级)
+  - P-1 align_series 向量化 (intersect1d+searchsorted) + coint 模式去重 join
+  - P-3 回测跳过 write_indicator 构造 / P-5 StateManager dirty-flag
+  - C-3 持仓/盈亏同bar取数去重 (compute→RiskMgr.check/indicators 复用)
+  - P-6 删除 on_calculate 每bar日志 / A-5 auto_profile_cfg 透传
+  - P-8 DiagLogger 60s 兜底 flush / P-4 ArbIndexWriter 缓冲批量写
+- 2026-07 剩余项收尾 (224/224 测试全绿):
+  - P-2 因子向量化: MACD EMA/RSI/ADX 纯Python循环 → lfilter+sliding_window_view
+    (EMA位级一致, Wilder数值等价; 趋势族启用不再有性能悬崖)
+  - C-4/C-5/C-6: regime状态归一SignalGen / 冗余接口deprecated / 权重重建合一
+  - B-5 PairScreener 品种经济性准入 (fee/avg_win<0.8%, 拦截rb/hc类组合)
+  - B-6 理论vs实际PnL对账 (session_end输出gap=滑点+执行损耗)
+  - A-4 runLive 多实例 (--experiment逗号分隔, marker合并写入)
+- 2026-07 修复批 (审计复核后):
+  - B2 价差时间戳对齐 (bartimes join, 缺 timestamps 降级截断)
+  - B5 `_mr_exit` 浮亏降阈等回归 (行为确认, 注释修正+5测试锁定)
+  - B6 regime 切换不再重置 `_peak_pnl` (消除追踪止盈真空)
+  - B11 SignalGen.entry_threshold setter 穿透到 pipeline steps (原死代码+实盘 AttributeError 隐患)
+  - B12 反转门槛加 1.2x 缓冲 (reverse_buffer_multiplier)
+  - C1 exit_judge PnL 阈值全参数化
+  - B4 风控规则优先级重排 (coint_quality 提前)
+  - D2 unrealized_pnl 信号路径去重计算
+  - A8 ArbDecision 移至 schemas.py
+  - B7 复核后回退: 报告前提不成立(detect_regime 不消费 coint_p), 重排反致权重滞后一 bar
 
 ### 短期 (按 ROI 排序)
 

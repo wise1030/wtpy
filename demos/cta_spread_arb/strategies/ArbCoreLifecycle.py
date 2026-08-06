@@ -108,7 +108,12 @@ class ArbCoreLifecycle:
     # WT on_session_end: 交易日结束
     # ------------------------------------------------------------------
     def on_session_end(self, context):
-        """交易日结束: 输出绩效 + flush诊断日志。"""
+        """交易日结束: 输出绩效 + PnL对账 + flush诊断日志。
+
+        时序约定: 依赖 C 引擎保证当日最后一个 on_calculate 完成后才
+        派发 on_session_end, 此处读取的浮盈反映收盘 bar (WtBtEngine.
+        on_session_end 是空 stub, 实际派发在 C 层 on_session_event)。
+        """
         core = self._core
         unrealized = sum(
             context.stra_get_position_profit(leg.code) for leg in core.legs)
@@ -116,4 +121,13 @@ class ArbCoreLifecycle:
         context.stra_log_text(
             f"{core.name} session end, realized={core.rm.realized_pnl:.2f}, "
             f"unrealized={unrealized:.2f}, total={total_pnl:.2f}")
+        # B-6(2026-07): 理论 vs 实际 PnL 对账 - 偏差=滑点+执行损耗
+        # 注: 理论PnL用bar收盘价, 实际PnL用框架浮盈(标记价=最新成交价),
+        # 二者在盘中可能有微小差异, gap 含此标记价差成分。
+        theo, actual = core.pnl_recon_report()
+        if abs(theo) > 1e-9:
+            gap = actual - theo
+            context.stra_log_text(
+                f"{core.name} pnl_recon: theo={theo:.2f}, "
+                f"act={actual:.2f}, gap={gap:.2f} ({gap/theo:+.1%})")
         core._diag.flush_all()

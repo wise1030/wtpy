@@ -57,7 +57,8 @@ class SignalPipeline:
                              regime_dict: dict = None,
                              unrealized_pnl: float = 0.0,
                              current_hour: int = 0) -> dict:
-        """同generate() — 保持接口一致性"""
+        """[DEPRECATED C-5] generate() 的逐参透传别名, 仅为兼容保留。
+        新代码直接调 generate()。"""
         return self.generate(
             factor_signal, aux_bars, current_direction,
             spread_trend_filter=spread_trend_filter,
@@ -66,19 +67,9 @@ class SignalPipeline:
             unrealized_pnl=unrealized_pnl,
             current_hour=current_hour)
 
-    @property
-    def regime(self) -> str:
-        for step in self._steps:
-            if isinstance(step, RegimeDispatchStep):
-                return step.regime
-        return 'unknown'
-
-    @property
-    def regime_direction(self) -> int:
-        for step in self._steps:
-            if isinstance(step, RegimeDispatchStep):
-                return step.regime_direction
-        return 0
+    # C-4(2026-07): 删除 regime/regime_direction properties —
+    # 它们遍历 steps 读 RegimeDispatchStep 的镜像缓存(已删除),
+    # regime 单一来源归 SignalGen(检测后缓存, generate_with_regime 兜底用)。
 
     def reset_trailing(self):
         for step in self._steps:
@@ -87,6 +78,23 @@ class SignalPipeline:
                     step.reset_trailing()
             if isinstance(step, PersistFilterStep):
                 step.reset_history()
+
+    def get_entry_threshold(self) -> float:
+        """读取当前入场阈值(以EntryJudgeStep为准)"""
+        for step in self._steps:
+            if isinstance(step, EntryJudgeStep):
+                return step._entry_threshold
+        return 0.0
+
+    def set_entry_threshold(self, value: float):
+        """B11修复: 同步更新所有持有entry_threshold的step。
+
+        auto_profile动态调整入口 — 此前 ArbCore._recheck_profile 直接
+        给 SignalGen 赋普通属性, 既不传播到step, 首次读取还会 AttributeError。
+        """
+        for step in self._steps:
+            if isinstance(step, (EntryJudgeStep, ExitJudgeStep, PersistFilterStep)):
+                step._entry_threshold = value
 
     @staticmethod
     def from_config(signal_mode, entry_threshold, exit_threshold,
@@ -136,11 +144,22 @@ class SignalPipeline:
                 trend_trailing_bars=_cfg_get(signal_cfg, 'trend_trailing_bars', 3),
                 range_exit_threshold=_cfg_get(signal_cfg, 'range_exit_threshold', 0.4),
                 short_entry_multiplier=_cfg_get(signal_cfg, 'short_entry_multiplier', 1.0),
+                # B12修复: 反转额外缓冲倍数
+                reverse_buffer_multiplier=_cfg_get(signal_cfg, 'reverse_buffer_multiplier', 1.2),
                 # v7: 浮盈追踪止盈参数
                 pnl_trailing_threshold=_cfg_get(signal_cfg, 'pnl_trailing_threshold', 500.0),
                 pnl_trailing_tight=_cfg_get(signal_cfg, 'pnl_trailing_tight', 0.2),
                 pnl_trailing_medium=_cfg_get(signal_cfg, 'pnl_trailing_medium', 0.3),
                 pnl_trailing_wide=_cfg_get(signal_cfg, 'pnl_trailing_wide', 0.4),
+                # C1修复: _mr_exit PnL 阈值参数化
+                mr_profit_tier1=_cfg_get(signal_cfg, 'mr_profit_tier1', 300.0),
+                mr_profit_tier2=_cfg_get(signal_cfg, 'mr_profit_tier2', 100.0),
+                mr_loss_scale=_cfg_get(signal_cfg, 'mr_loss_scale', 4000.0),
+                # C1修复: _pnl_trailing_check 分级边界参数化
+                pnl_trailing_tier1=_cfg_get(signal_cfg, 'pnl_trailing_tier1', 1000.0),
+                pnl_trailing_tier2=_cfg_get(signal_cfg, 'pnl_trailing_tier2', 2000.0),
+                # B-3: 反转 veto 的时段过滤(与 EntryJudge 同配置)
+                blocked_hours=_cfg_get(signal_cfg, 'blocked_hours', '14'),
             ),
         ]
         return SignalPipeline(steps)

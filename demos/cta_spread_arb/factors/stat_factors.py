@@ -2,6 +2,22 @@ import numpy as np
 from FactorBase import FactorBase
 
 
+def _ymd_to_ordinal(d: int) -> int:
+    """B-4修复(2026-07): YYYYMMDD整数转连续日序数。
+
+    原 refit 间隔用 YYYYMMDD 整数减法, 跨月差70/跨年差8870,
+    导致月末/年末后第一个交易日必然提前refit。
+    非法/占位输入(如-999/0)原样返回, 保持"差值巨大"语义。
+    """
+    if d < 10000101:
+        return d
+    try:
+        from datetime import date as _date
+        return _date(d // 10000, (d // 100) % 100, d % 100).toordinal()
+    except ValueError:
+        return d
+
+
 class ZScoreFactor(FactorBase):
     """
     滚动Z标准化因子
@@ -115,11 +131,13 @@ class CointResidualFactor(FactorBase):
         #       cap 在 2^5=32 倍, 防止 cur_date 永远追不上.
         backoff_mult = 2 ** min(self._refit_fail_count, 5)
         effective_interval = refit_interval * backoff_mult
-        if self._beta is not None and (cur_date - self._last_refit_day) < effective_interval:
+        # B-4修复: 转日序数后再做差, 避免 YYYYMMDD 整数减法跨月/跨年失真
+        days_since_refit = _ymd_to_ordinal(cur_date) - _ymd_to_ordinal(self._last_refit_day)
+        if self._beta is not None and days_since_refit < effective_interval:
             return  # 不需要refit (含 backoff 期内的失败延展)
         # 即使 beta=None, 也不能每个 bar 都 refit, 否则浪费算力. 同样走 backoff.
         if self._beta is None and self._refit_fail_count > 0 and \
-           (cur_date - self._last_refit_day) < effective_interval:
+           days_since_refit < effective_interval:
             return
         try:
             new_beta, new_c, coint_valid = self._ols_coint(

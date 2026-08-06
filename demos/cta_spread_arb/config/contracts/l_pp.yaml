@@ -8,6 +8,8 @@
 product_pair: l_pp
 type: cross_commodity
 spread_mode: coint
+sector: chemicals           # 产业链板块 (用于矩阵校验: 不同板块不应混跑)
+valid_months: ["2609"]      # 该品种对可用的合约月份 (空=全部可用)
 
 legs_template:
   # 正腿(l): 多 l / 空 l 由价差方向决定, ratio=+1

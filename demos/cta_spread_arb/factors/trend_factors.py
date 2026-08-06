@@ -14,7 +14,41 @@ trend_factors.py — 趋势类因子
 - direction_type = "momentum": 由FactorEngine根据regime处理方向
 """
 import numpy as np
+from scipy.signal import lfilter
 from FactorBase import FactorBase
+
+
+def _ema_vec(data: np.ndarray, period: int) -> np.ndarray:
+    """P-2(2026-07): EMA 向量化 — scipy lfilter 一阶IIR,
+    与原 Python 递推 ema[i]=alpha*x[i]+(1-alpha)*ema[i-1] (seed=x[0])
+    位级一致(已验证 max diff=0.0), O(n) Python循环 → C速度。
+    """
+    alpha = 2.0 / (period + 1)
+    y, _ = lfilter([alpha], [1.0, -(1.0 - alpha)], data,
+                   zi=[(1.0 - alpha) * data[0]])
+    return y
+
+
+def _wilder_smooth_vec(seed: float, segment: np.ndarray, period: int) -> np.ndarray:
+    """P-2(2026-07): Wilder 平滑向量化(均值尺度)。
+    递推 x_t = (x_{t-1}*(n-1) + cur_t)/n = x_{t-1}*(1-1/n) + cur_t/n,
+    seed 为递推起点的前一值, segment 为递推输入段。
+    与原 Python 形式数值等价(浮点舍入差 ~1e-16/步)。
+    """
+    alpha = 1.0 / period
+    y, _ = lfilter([alpha], [1.0, -(1.0 - alpha)], segment,
+                   zi=[(1.0 - alpha) * seed])
+    return y
+
+
+def _wilder_sum_smooth_vec(seed: float, segment: np.ndarray, period: int) -> np.ndarray:
+    """P-2(2026-07): Wilder 平滑向量化(和尺度, ATR/DM 用)。
+    递推 x_t = x_{t-1} - x_{t-1}/n + cur_t = x_{t-1}*(1-1/n) + cur_t,
+    输入不除 n(seed 为前 n 项 SUM, 序列保持和尺度)。
+    """
+    beta = 1.0 - 1.0 / period
+    y, _ = lfilter([1.0], [1.0, -beta], segment, zi=[beta * seed])
+    return y
 
 
 class MACDSpreadFactor(FactorBase):
@@ -38,13 +72,13 @@ class MACDSpreadFactor(FactorBase):
         if len(spread) < min_len:
             return 0.0
 
-        # EMA计算
-        fast_ema = self._ema(spread, fast_period)
-        slow_ema = self._ema(spread, slow_period)
+        # EMA计算(P-2: 向量化)
+        fast_ema = _ema_vec(spread, fast_period)
+        slow_ema = _ema_vec(spread, slow_period)
         macd_line = fast_ema - slow_ema
 
         # 信号线 = MACD的EMA
-        signal_line = self._ema(macd_line, signal_period)
+        signal_line = _ema_vec(macd_line, signal_period)
         histogram = macd_line - signal_line
 
         # 用柱状图的z-score作为信号
@@ -58,12 +92,8 @@ class MACDSpreadFactor(FactorBase):
 
     @staticmethod
     def _ema(data: np.ndarray, period: int) -> np.ndarray:
-        alpha = 2.0 / (period + 1)
-        ema = np.zeros_like(data)
-        ema[0] = data[0]
-        for i in range(1, len(data)):
-            ema[i] = alpha * data[i] + (1 - alpha) * ema[i - 1]
-        return ema
+        """[DEPRECATED P-2] 保留兼容, 内部转发到向量化实现"""
+        return _ema_vec(data, period)
 
 
 class ADXSpreadFactor(FactorBase):
@@ -113,49 +143,42 @@ class ADXSpreadFactor(FactorBase):
         spread = np.asarray(spread, dtype=np.float64)
 
         # === Step 1: 合成 OHLC (用滚动窗口的 max/min) ===
-        # 对每个 t (t >= hl_window-1) 计算 H_t = max(spread[t-hl_window+1:t+1])
-        # 用 numpy 向量化(stride trick 也可，这里用简单循环保证可读性)
+        # P-2(2026-07): sliding_window_view 向量化(原纯Python循环)
+        from numpy.lib.stride_tricks import sliding_window_view
+        windows = sliding_window_view(spread, hl_window)  # shape (n-hl+1, hl)
         high = np.empty(n)
         low = np.empty(n)
         high[:hl_window - 1] = spread[:hl_window - 1]
         low[:hl_window - 1] = spread[:hl_window - 1]
-        for i in range(hl_window - 1, n):
-            window = spread[i - hl_window + 1 : i + 1]
-            high[i] = window.max()
-            low[i] = window.min()
+        high[hl_window - 1:] = windows.max(axis=1)
+        low[hl_window - 1:] = windows.min(axis=1)
         close = spread  # 当前 bar 收盘 = spread 本身
 
         # === Step 2: TR / +DM / -DM (从 i=1 开始，需要 t-1) ===
         # 有效计算起点 = hl_window (前 hl_window-1 个点 H/L 不可靠)
+        # P-2(2026-07): 全向量化(原纯Python循环)
         start = hl_window
         m = n - start  # 有效样本数
         if m < period * 2 + 1:
             return 0.0
 
-        tr = np.empty(m)
-        plus_dm = np.empty(m)
-        minus_dm = np.empty(m)
+        h = high[start:]
+        l = low[start:]
+        prev_close = close[start - 1:-1]
+        prev_high = high[start - 1:-1]
+        prev_low = low[start - 1:-1]
 
-        for k in range(m):
-            i = start + k
-            # True Range
-            h_l = high[i] - low[i]
-            h_pc = abs(high[i] - close[i - 1])
-            l_pc = abs(low[i] - close[i - 1])
-            tr[k] = max(h_l, h_pc, l_pc)
-            # Directional Movement (互斥规则)
-            up_move = high[i] - high[i - 1]
-            down_move = low[i - 1] - low[i]
-            if up_move > down_move and up_move > 0:
-                plus_dm[k] = up_move
-            else:
-                plus_dm[k] = 0.0
-            if down_move > up_move and down_move > 0:
-                minus_dm[k] = down_move
-            else:
-                minus_dm[k] = 0.0
+        tr = np.maximum(h - l,
+                        np.maximum(np.abs(h - prev_close),
+                                   np.abs(l - prev_close)))
+        up_move = h - prev_high
+        down_move = prev_low - l
+        # Directional Movement (互斥规则)
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
 
         # === Step 3: Wilder 平滑 (前 period 根取 sum，之后递推) ===
+        # P-2(2026-07): lfilter 向量化(原纯Python递推循环)
         atr = np.zeros(m)
         pdm_s = np.zeros(m)
         mdm_s = np.zeros(m)
@@ -164,11 +187,10 @@ class ADXSpreadFactor(FactorBase):
         pdm_s[period - 1] = plus_dm[:period].sum()
         mdm_s[period - 1] = minus_dm[:period].sum()
 
-        for k in range(period, m):
-            # Wilder: x_t = x_{t-1} - x_{t-1}/period + cur_t
-            atr[k] = atr[k - 1] - atr[k - 1] / period + tr[k]
-            pdm_s[k] = pdm_s[k - 1] - pdm_s[k - 1] / period + plus_dm[k]
-            mdm_s[k] = mdm_s[k - 1] - mdm_s[k - 1] / period + minus_dm[k]
+        # Wilder: x_t = x_{t-1} - x_{t-1}/period + cur_t (和尺度)
+        atr[period:] = _wilder_sum_smooth_vec(atr[period - 1], tr[period:], period)
+        pdm_s[period:] = _wilder_sum_smooth_vec(pdm_s[period - 1], plus_dm[period:], period)
+        mdm_s[period:] = _wilder_sum_smooth_vec(mdm_s[period - 1], minus_dm[period:], period)
 
         # === Step 4: +DI / -DI / DX ===
         valid = atr > 0
@@ -183,13 +205,15 @@ class ADXSpreadFactor(FactorBase):
         dx[mask] = 100.0 * np.abs(plus_di[mask] - minus_di[mask]) / di_sum[mask]
 
         # === Step 5: ADX = Wilder 平滑(DX), 从 2*period-1 开始 ===
+        # P-2(2026-07): lfilter 向量化
         adx_start = 2 * period - 1
         if adx_start >= m:
             return 0.0
         adx = np.zeros(m)
         adx[adx_start] = dx[period - 1 : adx_start + 1].mean()
-        for k in range(adx_start + 1, m):
-            adx[k] = (adx[k - 1] * (period - 1) + dx[k]) / period
+        # adx[k] = (adx[k-1]*(period-1) + dx[k]) / period
+        adx[adx_start + 1:] = _wilder_smooth_vec(
+            adx[adx_start], dx[adx_start + 1:], period)
 
         current_adx = adx[-1]
         if not np.isfinite(current_adx) or current_adx <= 0:

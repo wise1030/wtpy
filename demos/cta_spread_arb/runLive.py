@@ -21,8 +21,10 @@ def parse_args():
     parser.add_argument('--config', type=str, default=None, help='strategy_config路径')
     parser.add_argument('--factor-config', type=str, default=None, help='factor_config路径')
     # v9: --experiment 分层配置入口
+    # A-4(2026-07): 支持逗号分隔多实验, 每个实验一个策略实例(多品种组合=
+    # 多策略实例, 兑现 v10 架构声明; 策略名必须唯一)
     parser.add_argument('--experiment', type=str, default='default',
-                        help='实验名 (对应 config/experiments/<name>.yaml)')
+                        help='实验名, 逗号分隔多实例 (如 l_pp_2609,rb_hc_2601)')
     parser.add_argument('--config-root', type=str, default=None,
                         help='config目录路径')
     parser.add_argument('--port', type=int, default=8080, help='监控端口')
@@ -58,20 +60,32 @@ if __name__ == "__main__":
     else:
         config_root = os.path.abspath(args.config_root) if args.config_root else config_dir
 
-        # R2-B: 启动期静态自检 (失败即 exit 2, 避免带病启动)
-        if not args.skip_preflight:
-            preflight_run_or_exit(
-                _PROJECT_ROOT,
-                use_legacy=False,
-                experiment=args.experiment,
+        # A-4: 多实验多实例部署
+        experiments = [e.strip() for e in args.experiment.split(',') if e.strip()]
+        multi = len(experiments) > 1
+
+        straInfos = []
+        for exp in experiments:
+            # 单实例保持历史命名 'spread_arb'; 多实例加实验名后缀保证唯一
+            stra_name = 'spread_arb' if not multi else f'spread_arb_{exp}'
+
+            # R2-B: 启动期静态自检 (失败即 exit 2, 避免带病启动)
+            if not args.skip_preflight:
+                preflight_run_or_exit(
+                    _PROJECT_ROOT,
+                    use_legacy=False,
+                    experiment=exp,
+                    config_root=config_root,
+                )
+
+            stra = SpreadArbStrategy.from_experiment(
+                name=stra_name,
+                experiment=exp,
                 config_root=config_root,
             )
-
-        straInfo = SpreadArbStrategy.from_experiment(
-            name='spread_arb',
-            experiment=args.experiment,
-            config_root=config_root,
-        )
+            straInfos.append((stra_name, stra))
+        if multi:
+            print(f"[runLive] 多实例模式: {[n for n, _ in straInfos]}")
 
     engine = WtEngine(EngineType.ET_CTA)
     engine.init('../common/', "config.yaml")
@@ -79,10 +93,15 @@ if __name__ == "__main__":
     writer = ArbIndexWriter()
     engine.set_writer(writer)
 
-    engine.add_cta_strategy(straInfo)
-
-    # 写入套利配置到输出目录
-    writer.write_arb_config("spread_arb", straInfo.sub_strategies)
+    if use_legacy:
+        engine.add_cta_strategy(straInfo)
+        writer.write_arb_config("spread_arb", straInfo.sub_strategies)
+    else:
+        for stra_name, stra in straInfos:
+            engine.add_cta_strategy(stra)
+        # A-4: 多策略合并写 marker.json
+        writer.write_arb_config_multi(
+            [(name, stra.sub_strategies) for name, stra in straInfos])
 
     engine.commitConfig()
     engine.run(bAsync=True)

@@ -2,36 +2,18 @@
 # profiles/trending_contract.yaml — 趋势单边市场参数覆盖包
 # 来源: strategy_config.yaml 的 param_profiles.trending_contract (第64-67行)
 # 用途: 应用于强趋势合约 (如 l/pp 2609 — 日线 R²>0.55, 价差持续单边)
-# 关键: 提高开仓阈值 + 抑制逆势信号 + 趋势友好因子权重
+# 关键: 提高开仓阈值 + 抑制逆势信号
 #
-# S1 (2026-06): 新增 factor_overrides
-# IC 分析结论: RSI/ADX/TrendStrength 在 trending 行情恶化(-91%),
-# 因此 trending profile 不启用这些因子, 保持核心3因子 + 低权 ChannelBreak。
-# mr_contract 已启用 RSI(0.15) + coint=0.45, 两者互补。
+# S1 (2026-06): factor_overrides 已移除。
+# 基线3因子 (coint_residual=0.5, half_life=0.2, spread_momentum=0.3)
+# 在 l/pp 2609 trending 上已验证 net=+299。
+# 新因子/权重调整应走 matrix 实验验证, 不直接改默认 profile。
 # ============================================================
 
 name: trending_contract
-description: "趋势单边市场: 提高入场门槛, 偏向顺势, 趋势友好因子权重"
+description: "趋势单边市场: 提高入场门槛, 偏向顺势 SHORT_SPREAD"
 
 overrides:
   signal:
     entry_threshold: 0.60        # 0.45 → 0.60, 过滤弱信号
     short_entry_multiplier: 0.7  # 1.0 → 0.7, 提升 SHORT_SPREAD 通过率(顺势)
-  factors:
-    # === 核心3因子: 微调权重 ===
-    - name: coint_residual
-      weight: 0.50           # 保持主导 (趋势中协整残差仍是最强 alpha)
-    - name: half_life
-      weight: 0.20           # 保持不变
-    - name: spread_momentum
-      weight: 0.25           # 0.30 → 0.25, 微降 (趋势中动量本身已强, 避免过度顺周期)
-    # === 新增: ChannelBreak 趋势突破因子 (IC=0.29, 趋势行情友好) ===
-    - name: channel_break
-      enabled: true
-      weight: 0.05           # 低权补充, 捕捉突破信号
-      params:
-        channel_period: 60
-        breakout_threshold: 0.5
-    # === 明确不启用 (IC 分析: 在 trending 行情恶化) ===
-    # RSI/ADX/TrendStrength: 在 MR 行情有效(+23.6%), 但 trending 行情恶化(-91%)
-    # 这些因子由 mr_contract profile 启用, trending 中保持关闭

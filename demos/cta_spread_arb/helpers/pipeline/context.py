@@ -60,6 +60,7 @@ class SignalContext:
         self.should_trade = False
         self.should_exit = False
         self.should_reverse = False
+        self.pnl_trailing_exit = False  # v7: 浮盈追踪止盈标记
 
         # 追踪止损状态
         self.bars_since_peak = 0
@@ -83,4 +84,5 @@ class SignalContext:
             regime=self.regime,
             regime_confidence=self.regime_confidence,
             regime_direction=self.regime_direction,
+            pnl_trailing_exit=self.pnl_trailing_exit,
         )

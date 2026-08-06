@@ -55,6 +55,16 @@ class SignalGen:
     def regime_confidence(self) -> float:
         return self._last_regime_confidence
 
+    @property
+    def entry_threshold(self) -> float:
+        """B11修复: 穿透到Pipeline的EntryJudgeStep(此前直接赋普通属性是死代码)"""
+        return self._pipeline.get_entry_threshold()
+
+    @entry_threshold.setter
+    def entry_threshold(self, value: float):
+        """B11修复: 同步更新 EntryJudgeStep/ExitJudgeStep/PersistFilterStep"""
+        self._pipeline.set_entry_threshold(value)
+
     def detect_regime(self, spread, aux_bars: dict = None,
                       coint_p: float = 1.0) -> dict:
         """前置regime检测 — 在FactorEngine.calculate()之前调用
@@ -85,7 +95,12 @@ class SignalGen:
                  spread=None,
                  coint_p: float = 1.0,
                  unrealized_pnl: float = 0.0) -> SignalResult:
-        """生成信号(内部自动检测regime — 兼容旧接口)"""
+        """[DEPRECATED C-5] 生产零调用(2026-07确认), 仅为兼容保留。
+
+        内部自动检测 regime 再走 generate_with_regime — 与 ArbCore 前置
+        检测的流式路径并存会导致 regime 重复检测, 新代码请用
+        detect_regime() + generate_with_regime()。
+        """
         regime_dict = self.detect_regime(spread, aux_bars, coint_p)
         return self.generate_with_regime(
             factor_signal, aux_bars, current_direction,

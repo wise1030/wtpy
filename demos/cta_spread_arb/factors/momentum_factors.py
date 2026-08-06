@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.signal import lfilter
 from FactorBase import FactorBase
 
 
@@ -56,9 +57,17 @@ class RSISpreadFactor(FactorBase):
         avg_gain = np.mean(gains[:period])
         avg_loss = np.mean(losses[:period])
 
-        for i in range(period, len(gains)):
-            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        # P-2(2026-07): lfilter 向量化(原纯Python递推循环, mr profile 每bar~200次迭代)
+        # 递推 avg = (avg*(period-1) + cur)/period = avg*(1-1/n) + cur/n
+        # 与原形式数值等价(浮点舍入差 ~1e-16/步), 只需终值取 [-1]
+        if len(gains) > period:
+            alpha = 1.0 / period
+            g, _ = lfilter([alpha], [1.0, -(1.0 - alpha)], gains[period:],
+                           zi=[(1.0 - alpha) * avg_gain])
+            l, _ = lfilter([alpha], [1.0, -(1.0 - alpha)], losses[period:],
+                           zi=[(1.0 - alpha) * avg_loss])
+            avg_gain = g[-1]
+            avg_loss = l[-1]
 
         if avg_loss == 0:
             rsi = 100.0

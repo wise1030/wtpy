@@ -38,7 +38,7 @@ engine.set_cta_strategy(stra, slippage=slippage)
 engine.run_backtest(bAsync=False)
 
 result = {
-    'realized_pnl': stra.core.rm._realized_pnl,
+    'realized_pnl': stra.core.rm.realized_pnl,
     'name': stra.core.name,
 }
 engine.release_backtest()

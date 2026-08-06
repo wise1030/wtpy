@@ -13,6 +13,8 @@
 product_pair: rb_hc
 type: cross_commodity
 spread_mode: coint
+sector: ferrous              # 产业链板块: 黑色
+valid_months: ["2510", "2601", "2609"]
 
 legs_template:
   # 正腿(rb): 多 rb / 空 rb 由价差方向决定, 这里 ratio=+1

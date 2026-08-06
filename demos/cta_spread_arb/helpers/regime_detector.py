@@ -370,6 +370,7 @@ def create_regime_detector(regime_cfg) -> RegimeDetector:
         return default
 
     # 映射YAML字段名到RegimeDetector内部参数名
+    # C-2(2026-07): 补映射 adf_maxlag/cache_every/投票权重(此前只能改代码默认值)
     params = {
         'hurst_window': _get(regime_cfg, 'hurst_window', 100),
         'hurst_trend_thresh': _get(regime_cfg, 'trend_hurst_threshold', 0.55),
@@ -378,5 +379,12 @@ def create_regime_detector(regime_cfg) -> RegimeDetector:
         'adx_trend_thresh': _get(regime_cfg, 'trend_adx_threshold', 25.0),
         'regime_persist_bars': _get(regime_cfg, 'regime_memory_bars', 5),
         'regime_min_confidence': _get(regime_cfg, 'regime_switch_cost', 0.4),
+        'adf_maxlag': _get(regime_cfg, 'adf_maxlag', 1),
+        'adf_cache_every': _get(regime_cfg, 'adf_cache_every', 24),
+        'hurst_cache_every': _get(regime_cfg, 'hurst_cache_every', 1),
+        'weight_hurst': _get(regime_cfg, 'weight_hurst', 0.3),
+        'weight_adf': _get(regime_cfg, 'weight_adf', 0.25),
+        'weight_adx': _get(regime_cfg, 'weight_adx', 0.25),
+        'weight_ma': _get(regime_cfg, 'weight_ma', 0.2),
     }
     return RegimeDetector(params=params)
