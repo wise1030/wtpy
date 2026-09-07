@@ -1,0 +1,33 @@
+# datakit (WtDtEngine) 配置 — 双进程拓扑数据侧
+# 订阅范围: contracts.json 全量合约 (WtDtCore/ParserAdapter.cpp: 无过滤器时
+# 订阅 basefiles.contract 列出的全部合约)
+basefiles:
+    commodity: ../common/commodities.json
+    contract: ../common/contracts.json
+    holiday: ../common/holidays.json
+    session: ../common/sessions.json
+    utf-8: true
+
+broadcaster:                    # UDP 广播器 — 交易进程 ParserUDP 对接点
+    active: true
+    bport: 3997                 # 快照查询端口 (ParserUDP sport 对应)
+    broadcast:
+    -   host: 127.0.0.1         # 本机回环; 跨机部署改对端 IP/局域网广播地址
+        port: 9001              # 广播端口 (ParserUDP bport 对应)
+        type: 2                 # 数据类型, 固定 2
+
+parsers: mdparsers.yaml         # 行情接入 (ParserCTP 凭据在此文件维护)
+statemonitor: statemonitor.yaml # 交易时段状态机 (rt初始化/收盘转储his的驱动器,
+                                # 非allday模式必需 — 缺失则tick不落盘不广播)
+
+writer:
+    module: WtDataStorage       # K线合成/落盘 (rt mmap + his DSB 会话轮转)
+    async: false                # 期货推荐同步落地
+    groupsize: 20
+    path: ../storage/           # make_deploy 重写为绝对路径, 与交易侧共享
+    savelog: false
+    disabletick: true           # 策略不读历史tick, 关闭减少fd/磁盘压力
+    disablemin1: true           # 策略只用 d1/m5, 关闭m1合成 (2026-09-01 实测)
+    disablemin5: false
+    disableday: false
+    disablehis: false

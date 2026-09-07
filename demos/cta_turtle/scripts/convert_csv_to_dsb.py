@@ -6,18 +6,38 @@
 
 用法:
   python3 convert_csv_to_dsb.py --csv-dir ./storage/csv --storage-dir ./storage
+  python3 convert_csv_to_dsb.py ... --stop-tdate 20260831  # 滤掉>=当日行 (his/rt 分区律)
 """
 import argparse
 import datetime
 import os
-import sys
 
-from ctypes import POINTER, cast
-from wtpy.wrapper.WtDtHelper import WtDataHelper
-from wtpy.WtCoreDefs import WTSBarStruct
+# wtpy 相关导入下沉到函数内: 模块保持纯逻辑可导入 (CI 无 C++ 库可测)
 
-# CSV 列: date,open,high,low,close,volume,turnover,open_interest
+# CSV 列: 日线 date,open,... ; 分钟线可带 time 列 ('HH:MM:SS' 或 HHMMSS)
 # 文件名: {EXCHG}.{product}.HOT_{period}.csv, period 后缀 d/m5/m1
+
+
+def parse_hhmm(s: str) -> int:
+    """'09:05:00' / '90500' → 905 (HHMM); 非法 → -1"""
+    s = s.strip().strip('"')
+    if ":" in s:
+        parts = s.split(":")
+        try:
+            hh, mm = int(parts[0]), int(parts[1])
+        except (ValueError, IndexError):
+            return -1
+    elif s.isdigit():
+        v = int(s)
+        if v >= 10000:
+            hh, mm = v // 10000, v // 100 % 100
+        else:
+            hh, mm = v // 100, v % 100
+    else:
+        return -1
+    if not (0 <= hh < 24 and 0 <= mm < 60):
+        return -1
+    return hh * 100 + mm
 
 
 def parse_csv_bar_date(ds: str) -> int:
@@ -32,13 +52,19 @@ def parse_csv_bar_date(ds: str) -> int:
     raise ValueError(f"无法解析日期: {ds}")
 
 
-def load_csv_to_bars(csv_path: str):
-    """读取 CSV → WTSBarStruct 数组 (POINTER) + count"""
+def iter_csv_rows(csv_path: str, stop_tdate: int = 0,
+                  is_min: bool = False) -> list:
+    """纯函数: CSV → [(date, time_int, o,h,l,c, vol,turnover,oi), ...]
+
+    stop_tdate>0 时丢弃 >= 该交易日的行 (his/rt 交易日分区律);
+    分钟线带 time 列时解析为 HHMM, 否则回落收盘时间 1500。
+    无 wtpy 依赖, 可脱离 C++ 环境单测。
+    """
     rows = []
-    with open(csv_path, encoding='utf-8') as f:
+    with open(csv_path, encoding='utf-8-sig') as f:
         lines = f.readlines()
     if len(lines) < 2:
-        return None, 0
+        return rows
 
     header = lines[0].strip().replace('\r', '').split(',')
     # 映射列名 (处理可能的空格/大小写差异)
@@ -47,6 +73,8 @@ def load_csv_to_bars(csv_path: str):
         c = col.strip().lower()
         if c in ('date', '日期'):
             col_map['date'] = i
+        elif c in ('time', '时间'):
+            col_map['time'] = i
         elif c in ('open', '开盘'):
             col_map['open'] = i
         elif c in ('high', '最高'):
@@ -68,7 +96,14 @@ def load_csv_to_bars(csv_path: str):
             continue
         try:
             date_int = parse_csv_bar_date(parts[col_map['date']])
-            time_int = (date_int - 19900000) * 10000 + 1500  # 日线收盘时间
+            if stop_tdate and date_int >= stop_tdate:
+                continue                  # his/rt 分区: 滤掉当日行
+            hhmm = 1500
+            if is_min and 'time' in col_map:
+                hhmm = parse_hhmm(parts[col_map['time']])
+                if hhmm < 0:
+                    continue
+            time_int = (date_int - 19900000) * 10000 + hhmm
             rows.append((
                 date_int, time_int,
                 float(parts[col_map['open']]),
@@ -81,7 +116,16 @@ def load_csv_to_bars(csv_path: str):
             ))
         except (ValueError, IndexError, KeyError):
             continue
+    return rows
 
+
+def load_csv_to_bars(csv_path: str, stop_tdate: int = 0,
+                     is_min: bool = False):
+    """读取 CSV → WTSBarStruct 数组 (POINTER) + count (需 wtpy 运行时)"""
+    from ctypes import POINTER, cast
+    from wtpy.WtCoreDefs import WTSBarStruct
+
+    rows = iter_csv_rows(csv_path, stop_tdate=stop_tdate, is_min=is_min)
     n = len(rows)
     if n == 0:
         return None, 0
@@ -97,16 +141,20 @@ def load_csv_to_bars(csv_path: str):
         bar.high = h
         bar.low = l
         bar.close = c
-        bar.volume = vol
-        bar.turnover = turnover
-        bar.open_interest = oi
+        # 注意: 结构体字段名为 vol/money/hold (非 volume/turnover/oi),
+        # 误用会被 ctypes 吞成 Python 实例属性 → C++ 侧恒 0
+        bar.vol = vol
+        bar.money = turnover
+        bar.hold = oi
 
     ptr = cast(buffer, POINTER(WTSBarStruct))
     # 保持 buffer 引用防止 GC
     return (ptr, buffer), n
 
 
-def convert(csv_dir: str, storage_dir: str, periods: list):
+def convert(csv_dir: str, storage_dir: str, periods: list,
+            stop_tdate: int = 0):
+    from wtpy.wrapper.WtDtHelper import WtDataHelper
     helper = WtDataHelper()
     converted = 0
 
@@ -141,7 +189,9 @@ def convert(csv_dir: str, storage_dir: str, periods: list):
                 out_name = f"{std_code.replace('.', '_')}.dsb"
             out_path = os.path.join(out_dir, out_name)
 
-            (result), count = load_csv_to_bars(csv_path)
+            (result), count = load_csv_to_bars(
+                csv_path, stop_tdate=stop_tdate,
+                is_min=(wt_period in ('m1', 'm5')))
             if result is None or count == 0:
                 print(f"  SKIP {csv_file}: 0 bars")
                 continue
@@ -163,13 +213,19 @@ def main():
     ap.add_argument('--csv-dir', type=str, required=True)
     ap.add_argument('--storage-dir', type=str, required=True)
     ap.add_argument('--periods', type=str, nargs='+', default=['d', 'm5'])
+    ap.add_argument('--stop-tdate', type=int, default=0,
+                    help='滤掉 >= 该交易日(yyyymmdd)的行 (his/rt 分区律, '
+                         '默认当日: 传0关闭)')
     args = ap.parse_args()
 
     print(f"CSV 目录: {args.csv_dir}")
     print(f"Storage 目录: {args.storage_dir}")
-    print(f"周期: {args.periods}\n")
+    print(f"周期: {args.periods}")
+    if args.stop_tdate:
+        print(f"分区截断: >= {args.stop_tdate} 的行被丢弃\n")
 
-    convert(args.csv_dir, args.storage_dir, args.periods)
+    convert(args.csv_dir, args.storage_dir, args.periods,
+            stop_tdate=args.stop_tdate)
 
 
 if __name__ == '__main__':

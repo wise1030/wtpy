@@ -35,6 +35,13 @@ def main():
 
     svr = WtMonSvr(deploy_dir=os.path.abspath(args.deploy_dir))
     if token:
+        # token 同时用作 AES 密钥 (WtMonSvr.AES_Encrypt): 必须 16/24/32 字节,
+        # 否则登录令牌生成抛 ValueError (2026-09-01 实测: token_urlsafe(16)
+        # 生成 22 字节串 → 登录 500)
+        if len(token.encode("utf-8")) not in (16, 24, 32):
+            raise SystemExit(
+                f"[runMonSvr] token 长度须为 16/24/32 字节 "
+                f"(当前 {len(token.encode('utf-8'))}), 用作 AES 密钥")
         svr.enable_token(seckey=token)
         print("[runMonSvr] token access enabled")
 

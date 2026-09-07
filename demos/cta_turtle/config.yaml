@@ -15,14 +15,20 @@ env:
     product:
         session: TRADING                        #交易时段模板
     riskmon:                                    #组合级风控(SimpleRiskMon, C++核心执行)
+        # 参数平铺于 riskmon 下 (官方口径, 嵌套 params 层 C++ 读不到
+        # → 2026-09-03 实盘日志证实参数全 0 空转)
         active: true
         module: WtRiskMonFact
         name: SimpleRiskMon
-        params:
-            inner_day_fd: 20%                   #日内资金回撤熔断比例
-            multi_day_fd: 60%                   #多日资金回撤熔断比例
-            risk_scale: 1.0                     #目标仓位缩放(1.0=不缩放)
-            base_amount: 5000000                #虚拟基础资金
+        base_amount: 5000000    #组合基础资金(增量+基础=动态权益)
+        basic_ratio: 101        #日内高点百分比阈值
+        calc_span: 5            #计算间隔(s)
+        inner_day_active: true  #日内跟踪止损: 收益从高点回撤 20% 熔断
+        inner_day_fd: 20.0
+        multi_day_active: false #多日跟踪止损关闭 (策略层 RiskManager 已做预算)
+        multi_day_fd: 60.0
+        risk_scale: 1.0         #目标仓位缩放 (1.0=不缩放; 缩量由 RiskManager 负责)
+        risk_span: 30           #风控日志间隔(s)
 executers: executers.yaml                       #执行单元配置
 parsers: tdparsers.yaml                         #行情通道配置
 traders: tdtraders.yaml                         #交易通道配置

@@ -5,11 +5,12 @@
   python3 make_deploy.py --target /opt/wt_deploy  # 同步到服务器部署根目录
 
 行为:
-- 复制: run.py / StraTurtle.py / schemas.py / helpers/ / config/ + live yaml
-- 重写 config.yaml: ../common/ ../storage/ → 绝对路径 (CWD 无关化,
-  WtEngine.init 的 folder 参数不传文件名时被忽略, basefiles 按 CWD 解析,
-  WatchDog cwd=组合目录, 不重写会指错)
-- --keep-secrets (默认): tdparsers/tdtraders 目标已存在则跳过,
+- 复制: run.py / runDt.py / StraTurtle.py / schemas.py / helpers/ / config/
+  + live yaml + datakit yaml (dtcfg/logcfgdt/mdparsers)
+- 重写 config.yaml 与 dtcfg.yaml: ../common/ ../storage/ → 绝对路径
+  (CWD 无关化, WtEngine.init 的 folder 参数不传文件名时被忽略,
+  basefiles 按 CWD 解析, WatchDog cwd=组合目录, 不重写会指错)
+- --keep-secrets (默认): tdtraders/mdparsers 目标已存在则跳过,
   避免覆盖服务器上已填的账户凭据
 - 幂等: 重复执行 = 覆盖同步 (除 secrets)
 """
@@ -20,12 +21,22 @@ import shutil
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 CODE_FILES = ["StraTurtle.py", "schemas.py"]
-CODE_DIRS = ["helpers"]
+CODE_DIRS = ["helpers", "filters"]
 CFG_FILES = ["config/turtle_config.yaml"]
 LIVE_YAMLS = ["executers.yaml", "actpolicy.yaml", "filters.yaml",
-              "logcfg.yaml"]
-SECRET_YAMLS = ["tdparsers.yaml", "tdtraders.yaml"]
-TPL_FILES = {"deploy_tpl/run.py": "run.py"}
+              "logcfg.yaml", "tdparsers.yaml"]
+SECRET_YAMLS = ["tdtraders.yaml"]
+TPL_FILES = {"deploy_tpl/run.py": "run.py",
+             "deploy_tpl/runDt.py": "runDt.py",
+             "deploy_tpl/dtcfg.yaml": "dtcfg.yaml",
+             "deploy_tpl/statemonitor.yaml": "statemonitor.yaml",
+             "deploy_tpl/logcfgdt.yaml": "logcfgdt.yaml",
+             "scripts/update_contracts.py": "scripts/update_contracts.py",
+             "scripts/pick_hot_sina.py": "scripts/pick_hot_sina.py",
+             "scripts/update_hots.py": "scripts/update_hots.py",
+             "scripts/ctp_loader/map_future.ini":
+                 "scripts/ctp_loader/map_future.ini"}
+SECRET_TPL = {"deploy_tpl/mdparsers.yaml": "mdparsers.yaml"}
 
 
 def sync_file(src: str, dst: str):
@@ -69,10 +80,18 @@ def make_deploy(target_root: str, common: str, storage: str,
             print(f"[make_deploy] keep existing secrets: {fname}")
         else:
             sync_file(os.path.join(HERE, fname), dst)
+    for rel, dst_rel in SECRET_TPL.items():
+        dst = os.path.join(grp, dst_rel)
+        if keep_secrets and os.path.exists(dst):
+            print(f"[make_deploy] keep existing secrets: {dst_rel}")
+        else:
+            sync_file(os.path.join(HERE, rel), dst)
 
     dst_cfg = os.path.join(grp, "config.yaml")
     sync_file(os.path.join(HERE, "config.yaml"), dst_cfg)
     rewrite_config(dst_cfg, common, storage)
+    # datakit 配置同样含 ../common//../storage 相对路径, 一并绝对化
+    rewrite_config(os.path.join(grp, "dtcfg.yaml"), common, storage)
 
     print(f"[make_deploy] synced -> {grp}")
     return grp

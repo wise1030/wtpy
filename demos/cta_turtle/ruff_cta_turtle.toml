@@ -1,0 +1,31 @@
+# ruff 配置 — cta_turtle 纯逻辑层 lint (CI 与本地一致)
+# 用法: ruff check . --config ruff_cta_turtle.toml
+target-version = "py39"
+line-length = 90
+
+exclude = [
+    "outputs_bt",
+    "outputs_bt_sens",
+    "BtLogs",
+    "Logs",
+    "logs",
+    "deploy",
+    "matrix_results",
+    "__pycache__",
+]
+
+[lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # warnings
+    "F",   # pyflakes
+    "B",   # bugbear 常见错误
+]
+ignore = [
+    "E501",  # 行长由 line-length 警告即可, 不强制 (中文注释宽字符)
+    "E741",  # OHLC 单字母 (h/l/o/c) 为金融代码既有约定
+]
+
+[lint.per-file-ignores]
+"tests/*" = ["F403", "F401"]  # conftest 星号导入为既有约定
+"deploy_tpl/*" = ["E402"]     # run.py 需先注入 sys.path 再 import 策略层

@@ -24,6 +24,71 @@ def stra_name(code: str) -> str:
     return f"turtle_{code.replace('.', '_')}"
 
 
+def parse_weights(s: str) -> dict:
+    """'rb:0.6,i:0.4' → {'SHFE.rb.HOT':0.6,...} 按代码后缀匹配"""
+    out = {}
+    for part in s.split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        k, v = part.split(":", 1)
+        try:
+            out[k.strip()] = float(v)
+        except ValueError:
+            pass
+    return out
+
+
+def synthesize_portfolio(codes, args, out_dir) -> dict:
+    """组合层权益合成 + 贡献分解 (P1-4); 失败返回 {} 不阻断"""
+    from helpers import portfolio as pf
+    curves = {}
+    for c in codes:
+        path = os.path.join(HERE, "outputs_bt", stra_name(c), "funds.csv")
+        curve = pf.read_funds_curve(path)
+        if curve:
+            curves[c] = curve
+        else:
+            print(f"[matrix] WARN {c}: funds.csv 缺失/为空, 跳过合成")
+    if not curves:
+        return {}
+    wmap = parse_weights(args.weights)
+    dates, port_pnl, aligned = pf.merge_curves(curves, wmap or None)
+    metrics = pf.portfolio_metrics(dates, port_pnl, args.capital,
+                                   rf=args.rf)
+    contrib = pf.contribution(aligned, port_pnl)
+
+    os.makedirs(out_dir, exist_ok=True)
+    eq_path = os.path.join(out_dir, "portfolio_equity.csv")
+    with open(eq_path, "w", newline='', encoding='utf-8') as f:
+        w = csv.writer(f)
+        w.writerow(["date", "equity", "pnl"] +
+                   [f"pnl_{c}" for c in aligned])
+        for i, d in enumerate(dates):
+            w.writerow([d, round(args.capital + float(port_pnl[i]), 2),
+                        round(float(port_pnl[i]), 2)] +
+                       [round(float(a[i]), 2) for a in aligned.values()])
+    summary = {"capital": args.capital,
+               "weights": {c: round(_w_of(c, curves, wmap), 4)
+                           for c in aligned},
+               "metrics": metrics,
+               "contribution": contrib}
+    with open(os.path.join(out_dir, "portfolio_summary.json"), "w",
+              encoding='utf-8') as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+    print(f"[matrix] portfolio equity -> {eq_path}")
+    print(f"[matrix] portfolio metrics: {metrics}")
+    print(f"[matrix] contribution: {contrib}")
+    return summary
+
+
+def _w_of(code, curves, wmap):
+    tot = sum(wmap.get(c, 0.0) for c in curves)
+    if wmap and tot > 0 and code in wmap:
+        return wmap[code] / tot
+    return 1.0 / max(1, len(curves))
+
+
 def collect(row_code: str) -> dict:
     folder = os.path.join(HERE, "outputs_bt", stra_name(row_code))
     path = os.path.join(folder, "summary.json")
@@ -48,8 +113,11 @@ def run_serial(codes, args):
 
     for code in codes:
         print(f"[matrix] serial backtest {code}")
+        m5_csv = os.path.join(HERE, "..", "storage", "csv",
+                              f"{code}_m5.csv")
         stra = StraTurtle.from_config(
-            name=stra_name(code), code=code, config_path=args.config)
+            name=stra_name(code), code=code, config_path=args.config,
+            bt_no_simtick=not os.path.exists(m5_csv))
         engine = WtBtEngine(EngineType.ET_CTA)
         engine.init('../common/', "configbt.yaml")
         engine.configBacktest(args.start, args.end)
@@ -88,6 +156,11 @@ def main():
     ap.add_argument("--end", type=int, default=202510151500)
     ap.add_argument("--capital", type=float, default=5000000)
     ap.add_argument("--slippage", type=int, default=0)
+    ap.add_argument("--weights", type=str, default="",
+                    help="组合权重 'code后缀:权重' 如 'rb:0.5,i:0.3'; "
+                         "缺省等权")
+    ap.add_argument("--rf", type=float, default=0.02,
+                    help="组合指标无风险利率 (年化)")
     args = ap.parse_args()
 
     cfg = ConfigLoader.load(args.config)
@@ -110,6 +183,12 @@ def main():
     print(f"[matrix] summary -> {out_path}")
     for r in rows:
         print(r)
+
+    # 组合层权益合成与贡献分解 (P1-4): 单品种曲线等权/自定义权合并
+    try:
+        synthesize_portfolio(codes, args, out_dir)
+    except Exception as e:
+        print(f"[matrix] WARN portfolio synthesis failed: {e}")
 
 
 if __name__ == "__main__":

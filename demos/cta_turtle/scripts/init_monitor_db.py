@@ -2,8 +2,10 @@
 
 注册内容 (与 /mgr/addgrp + /mgr/cfgmon 等价):
 - groups 表: cta_turtle 组合 (DataMgr.add_group, insert-or-update)
-- schedules 表: WatchDog 调度 (applyAppConf, insert-or-update)
-  path=python3 绝对路径, param=run.py, folder=组合目录, guard=自动重启
+- schedules 表: WatchDog 调度 (applyAppConf, insert-or-update), 双进程:
+  - cta_turtle_dt:  datakit 行情进程 (runDt.py, 数据底盘, guard)
+  - cta_turtle:     交易引擎进程 (run.py, 组合主应用 isGroup, guard)
+  path=python3 绝对路径, folder=组合目录, guard=自动重启
 
 用法:
   python3 scripts/init_monitor_db.py \
@@ -49,14 +51,20 @@ def init_db(db_path: str, group_dir: str, mqurl: str = DEFAULT_MQURL,
     # === 首个管理员播种 ===
     # users 表初始为空且无默认账号, GUI 创建用户需先登录(鸡生蛋),
     # 故此处播种。已存在时 add_user 走 UPDATE 分支(不重置密码)。
+    #
+    # ⚠️ 密码哈希口径 (2026-09-01 实测订正): 前端先 md5(明文) 再提交,
+    # 后端/播种再 md5(loginid + 前端值) — 双层 md5。因此播种存的是
+    # md5(loginid + md5(明文)); 单层 md5(loginid+明文) 会导致永远登不上。
     if admin_pass is None:
         import secrets as _sec
         admin_pass = _sec.token_urlsafe(12)
         print(f"[init_db] generated admin password: {admin_pass} "
               f"(仅本次显示, 请立即保存)")
+    import hashlib as _hl
+    front_md5 = _hl.md5(admin_pass.encode("utf-8")).hexdigest()
     dm.add_user({
         "loginid": "admin", "name": "管理员", "role": "superman",
-        "passwd": admin_pass, "iplist": "", "products": "",
+        "passwd": front_md5, "iplist": "", "products": "",
         "remark": "seeded by init_monitor_db.py",
     }, admin="init_monitor_db")
     print("[init_db] admin user seeded (role=superman)")
@@ -76,24 +84,33 @@ def init_db(db_path: str, group_dir: str, mqurl: str = DEFAULT_MQURL,
     print(f"[init_db] group registered: cta_turtle -> {group_dir}")
 
     dog = WatchDog(db=dm.get_db(), logger=_StubLogger())
-    app_conf = {
-        "id": "cta_turtle",
-        "path": python_bin,
-        "folder": group_dir,
-        "param": "run.py",
-        "span": 10,
-        "guard": guard,
-        "redirect": False,
-        "mqurl": mqurl,
-        "schedule": {
-            "active": False,
-            "weekflag": "0000000",
-            "tasks": [dict(EMPTY_TASK) for _ in range(6)],
-        },
-    }
-    dog.applyAppConf(app_conf, isGroup=True)
-    print(f"[init_db] schedule registered: {python_bin} run.py "
-          f"(cwd={group_dir}, guard={guard})")
+
+    # === 双进程调度: datakit(数据底盘) + 交易引擎 ===
+    # 启动顺序无强依赖: ParserUDP 在 datakit 未就绪时静默等待;
+    # 两者均 guard 崩溃自动重启
+    apps = [
+        {"id": "cta_turtle_dt", "param": "runDt.py", "is_group": False},
+        {"id": "cta_turtle", "param": "run.py", "is_group": True},
+    ]
+    for a in apps:
+        app_conf = {
+            "id": a["id"],
+            "path": python_bin,
+            "folder": group_dir,
+            "param": a["param"],
+            "span": 10,
+            "guard": guard,
+            "redirect": False,
+            "mqurl": mqurl,
+            "schedule": {
+                "active": False,
+                "weekflag": "0000000",
+                "tasks": [dict(EMPTY_TASK) for _ in range(6)],
+            },
+        }
+        dog.applyAppConf(app_conf, isGroup=a["is_group"])
+        print(f"[init_db] schedule registered: {python_bin} {a['param']} "
+              f"(appid={a['id']}, cwd={group_dir}, guard={guard})")
 
 
 def main():

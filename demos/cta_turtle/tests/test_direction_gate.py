@@ -59,19 +59,9 @@ def _make_stra(direction="both", units=2):
     inst = InstrumentConfig(code="SHFE.rb.HOT", period="d1", system="S1",
                             units=units, direction=direction)
     base = TurtleBaseConfig()
-    stra = StraTurtle.__new__(StraTurtle)
-    from wtpy import BaseCtaStrategy
-    BaseCtaStrategy.__init__(stra, "test_turtle")
-    stra._inst = inst
-    stra._base = base
-    from helpers.TurtleEngine import TurtleEngine
-    from helpers.PositionSizer import PositionSizer
-    stra._engine = TurtleEngine(system="S1", stop_atr_mult=2.0,
-                                pyramid_layers=4, pyramid_step_atr=0.5)
-    stra._sizer = PositionSizer(base.unit_var)
-    stra._volscale = 10.0
+    stra = StraTurtle("test_turtle", inst, base)
+    stra._volscale = 10.0     # on_init 才从框架取, 直测路径手工注入
     stra._pricetick = 1.0
-    stra._last_veto_key = None
     return stra
 
 
@@ -94,9 +84,13 @@ def test_direction_gate_allows_long():
     dec = {"decision": DEC_ENTER, "direction": 1, "price": 3500.0,
            "n": 30.0, "failsafe": False}
     stra._execute(ctx, dec, n=30.0)
-    assert ctx.orders == [("SHFE.rb.HOT", 1333, "Enter")]  # 400000/300=1333
+    # sizer: floor(400000/(30*10))=1333; 风控单品种预算:
+    # floor(5e6×0.02/(30×10×2))=166 (FakeCtx 无资金接口 → 回退 500 万)
+    assert ctx.orders == [("SHFE.rb.HOT", 166, "Enter")]
     assert stra._engine.direction == 1
-    assert stra._engine.layers == [[1333, 3500.0]]
+    assert stra._engine.layers == [[166, 3500.0]]
+    assert stra._risk.has_position("SHFE.rb.HOT")   # 风控账本已记
+    assert stra._risk.open_risk() == 166 * 30 * 10 * 2.0
 
 
 def test_insufficient_lots_veto():

@@ -13,18 +13,146 @@ base:
   s1_exit: 10
   s2_entry: 55
   s2_exit: 20
+  enable_s1_filter: true  # S1 盈利跳过过滤 (false=裸20/10突破)
+  entry_mode: trigger     # close=收盘确认(旧口径) | trigger=盘中触发(方案C,
+                          # 经典海龟原生: tick穿越通道即触发, 止损/加仓同理)
+  recon_patience: 3       # 运行时对账: 连续失配 N 根 bar 后按实际持仓重建
+  journal_dir: ""         # K线旁路日志目录 (空=关闭; 生产建议 "./journals",
+                          # 配合 WT_AUTO_REPAIR=1 宕机自愈, 见 docs/DATA_OPS.md)
+
+risk:                     # 组合级风险预算 (helpers/RiskManager, 下单前最后闸门)
+  max_risk_per_mkt: 0.02  # 单品种本笔 2N 止损潜亏 <= equity×2%
+  max_total_risk_frac: 0.10  # 组合在途 2N 总潜亏 <= equity×10% (多品种组合口径)
+  max_margin_usage: 0.60  # 预估保证金占用 <= equity×60%
+  margin_rate: 0.12       # 保证金率预估 (框架无保证金数据)
+  max_units_per_group: 2  # 同相关性组同时持仓品种数 (0=不限)
+  max_units_total: 6      # 全组合同时持仓品种数 (0=不限)
+  fallback_capital: 5000000  # 动态权益无效时回退资金
+
+notify:                   # webhook 事件推送 (helpers/notifier.py)
+  enabled: false          # 启用后 reconcile/risk/session 事件推送到 urls
+  type: generic           # wechat(企业微信bot) | dingtalk(钉钉bot) | generic
+  urls: []
+  cooldown: 300           # 同事件 key 冷却秒数 (防刷屏)
 
 instruments:
+  # === 多品种组合 (2026-09 扩展): 12 品种跨 6 相关性组 ===
+  # 黑色
   - code: SHFE.rb.HOT
-    period: d1            # d1 | h1, 每品种独立选择
-    system: S1            # S1(20/10+盈利跳过+55fail-safe) | S2(55/20)
-    units: 2              # 每层 2 × 20万 = 40万 VaR
-    direction: both       # both | long | short
-  # 注意: 启用某品种需同时满足
-  #   1) common/hots.json 含该品种键 (空列表=不换月即可, 缺键 C++ 回放器会崩溃)
-  #   2) storage 有对应 period 的 K 线数据 (h1 需小时线)
-  # - code: DCE.i.HOT
-  #   period: d1
-  #   system: S2
-  #   units: 1
-  #   direction: long       # 只做多: 空头信号禁止开仓
+    period: d1
+    system: S1
+    units: 1
+    direction: both
+    group: black
+    intrabar_stop: false
+  # 有色
+  - code: SHFE.cu.HOT
+    period: d1
+    system: S1
+    units: 1
+    direction: both
+    group: metal
+    intrabar_stop: false
+  - code: SHFE.al.HOT
+    period: d1
+    system: S1
+    units: 1
+    direction: both
+    group: metal
+    intrabar_stop: false
+  # 能源
+  - code: INE.sc.HOT
+    period: d1
+    system: S1
+    units: 1
+    direction: both
+    group: energy
+    intrabar_stop: false
+  # 化工
+  - code: CZCE.TA.HOT
+    period: d1
+    system: S1
+    units: 1
+    direction: both
+    group: cheme
+    intrabar_stop: false
+  - code: CZCE.MA.HOT
+    period: d1
+    system: S1
+    units: 1
+    direction: both
+    group: cheme
+    intrabar_stop: false
+  - code: DCE.pp.HOT
+    period: d1
+    system: S1
+    units: 1
+    direction: both
+    group: cheme
+    intrabar_stop: false
+  - code: DCE.l.HOT
+    period: d1
+    system: S1
+    units: 1
+    direction: both
+    group: cheme
+    intrabar_stop: false
+  # 油脂油料
+  - code: DCE.m.HOT
+    period: d1
+    system: S1
+    units: 1
+    direction: both
+    group: oils
+    intrabar_stop: false
+  - code: DCE.p.HOT
+    period: d1
+    system: S1
+    units: 1
+    direction: both
+    group: oils
+    intrabar_stop: false
+  # 软商品
+  - code: CZCE.CF.HOT
+    period: d1
+    system: S1
+    units: 1
+    direction: both
+    group: soft
+    intrabar_stop: false
+  # 股指
+  - code: CFFEX.IF.HOT
+    period: d1
+    system: S1
+    units: 1
+    direction: both
+    group: equity
+    intrabar_stop: false
+
+# === 单品种历史配置存档 (字段模板备查) ===
+#   period: d1            # d1 | h1, 每品种独立选择
+#   system: S1            # S1(20/10+盈利跳过+55fail-safe) | S2(55/20)
+#   # system: "S1+S2"     # 双系统并行: 各半 units 独立引擎, 净仓合并执行,
+#                         # 品种内风险/保证金预算按 units 占比切分 (经典海龟口径)
+#   units: 2              # 每层 N × 20万 VaR
+#   direction: both       # both | long | short (隐式方向闸)
+#   group: black          # 相关性组标签 (配合 risk.max_units_per_group)
+#   intrabar_stop: false  # 盘中止损: 主K切为 base.intrabar_period,
+#                         # 信号仍按 d1 收盘确认+日期去重; 需 storage 有分钟线
+#   # filters: 辅助信号过滤链 (隐式方向闸之后依次判定; 全部放行才入场)
+#   # filters:
+#   #   - type: AdxTrend        # ADX 趋势强度下限 (震荡市否决)
+#   #     params: {period: 14, threshold: 25}
+#   #   - type: VolatilityBand  # N 处于近窗分位带内才交易
+#   #     params: {window: 250, min_pct: 0.10, max_pct: 0.90}
+#   #   - type: LiquidityFloor  # 成交量/持仓量下限
+#   #     params: {k: 5, min_volume: 10000}
+# 注意: 启用某品种需同时满足
+#   1) common/hots.json 含该品种键 (空列表=不换月即可, 缺键 C++ 回放器会崩溃)
+#   2) storage 有对应 period 的 K 线数据 (h1 需小时线)
+# - code: DCE.i.HOT
+#   period: d1
+#   system: S2
+#   units: 1
+#   direction: long       # 只做多: 空头信号禁止开仓
+#   group: black

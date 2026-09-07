@@ -128,6 +128,11 @@ def test_full_calculate_uptrend_enters():
     assert any(k[1] == "position" for k in ctx.indices)   # 图表值已写
     assert ("test_turtle_engine" in ctx.kv)
     snap = json.loads(ctx.kv["test_turtle_engine"])
+    if "v" in snap and snap["v"] in (3, 4):  # v3/v4: 子系统+去重键包装
+        assert set(snap["subs"].keys()) == {"S1"}
+        snap = snap["subs"]["S1"]
+    elif "v" in snap and snap["v"] == 2:
+        snap = snap["engine"]
     assert snap["direction"] == 1
 
 
