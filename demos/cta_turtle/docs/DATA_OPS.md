@@ -233,5 +233,74 @@ _post_calculate(mark=False) 跳过图表段。
    价格已穿越昨日通道时首 tick 立即触发, 成交价比武装位高约 0.5N,
    与 trigger 语义自洽但滑差大于常规盘中触发, 评估绩效时应知悉;
 5. 图表 API 非 schedule 时段防护: add_chart_mark/set_index_value
-   仅 schedule 可用 (CtaStraBaseCtx.cpp:1978/2036), tick 路径全部走
+  仅 schedule 可用 (CtaStraBaseCtx.cpp:1978/2036), tick 路径全部走
    _safe_mark (_in_schedule 闸) / _post_calculate(mark=False)。
+
+## 9. 执行单元卡死: 源码级路径核验与处置 (2026-09-15)
+
+### 9.1 卡死点的确定性路径 (本仓库源码口径)
+
+报错文本 `No lastest tick data of {code}, execute later` 出现在
+`WtExeFact/WtMinImpactExeUnit.cpp:315` (Diff 变体 :268 同构): 执行单元
+在 `_last_tick == NULL` 时**直接 return**, 不发单也不报错退出循环。
+`_last_tick` 只在单元的 `on_tick` 里赋值, 而 tick 到单元的路径有两道
+前置条件, 任一不满足即永久停在 "execute later":
+
+1. **单元必须已经存在**: `WtLocalExecuter::on_tick` 用
+   `getUnit(stdCode, false)` (不自动创建), 单元不存在时**直接丢 tick**
+   (`WtCore/WtLocalExecuter.cpp:444-449`); 单元只在首次目标变化时被
+   `on_position_changed` → `getUnit(stdCode)` 懒创建 (同文件 :282,
+   自动创建分支 :151-165, 创建时若 `_channel_ready` 会补发
+   `on_channel_ready`)。
+2. **代码必须严格相等**: `WtMinImpactExeUnit::on_tick` 首行即
+   `if (newTick == NULL || _code.compare(newTick->code()) != 0) return;`
+   (`WtExeFact/WtMinImpactExeUnit.cpp:197-199`)。单元键 = 策略下单时
+   解析出的**真实月份合约** (`WtCtaEngine::handle_pos_change` 用
+   hots 规则把 `XXX.HOT` 换成 `XXX.YYMM` 后写入执行器,
+   `WtCore/WtCtaEngine.cpp:421-472`), 而 tick 的 code 来自行情推送。
+
+结论: 懒创建时机 + tick 供应 + 代码口径三者必须同时成立。F1 预热
+(`on_init` 同值 `set_position(tag="PreWarm")`) 之所以有效, 是因为
+它在**启动期**为全部品种预先走完 `on_position_changed` → 单元提前
+创建, 从而满足条件 1。条件 2 (HOT↔月份代码错配) 与条件 1 (换月后
+新月份单元懒创建遇上该合约 tick 断供) 都会表现为**非确定性**卡死,
+与 2026-09-09 实测特征一致 (cu/al 卡死一天、MA 幽灵加仓 4 手)。
+
+### 9.2 现场诊断步骤 (服务器上只读)
+
+```bash
+D=~/projects/cta_turtle/deploy/cta_turtle
+grep -n "No lastest tick data\|No tick of .* updated\|Live orders exist" \
+     $D/Logs/Runner_$(date +%F).log | tail -30
+grep -n "Target position of .* changed" $D/Logs/Runner_$(date +%F).log | tail
+# 对照真值源: 券商侧真实持仓 vs 策略信号仓
+python3 -c "import json;d=json.load(open('$D/generated/traders/simnow/\
+rtdata.json'));print([p for p in d['positions'] if p['long']['prevol']\
+or p['short']['prevol'] or p['long']['newvol'] or p['short']['newvol']])"
+```
+
+- 出现 `No lastest tick data` 且**该合约当日无 tick 订阅/推送** → 条件 1
+  (换月/tick 断供): 重启 `runDt.py` + `run.py` (WatchDog) 即可恢复,
+  并把该月份补进 datakit 订阅 (`mdparsers.yaml` 按品种订阅, 换月后
+  需确认新月份在订阅集内)。
+- 出现 `No tick of ... updated` → 单元拿到了 tick 但时间戳未推进
+  (行情未更新), 属数据源问题。
+- 出现 `Live orders exist` 且长挂 → 未完成单未消解, 查撤单/通道。
+- 单元与行情代码不一致 → 报错里 `code` 与 `newTick->code()` 会同时出现在
+  日志上下文 (策略侧 watch: `armed`/`_exec_trigger_decs` 打印的 stdCode)。
+
+### 9.3 运行时自愈 (有界, opt-in)
+
+策略侧已能**确认**卡死 (交易通道真值源: 券商侧仓位 ≠ 目标 → `ghost_fill`
+告警, 见 README 偏离 #5)。据此提供分级处置:
+
+| 环境变量 | 行为 |
+|---|---|
+| `WT_EXEC_RECOVER` 未设/`0` | **默认**: 仅 `ghost_fill` 告警 + webhook, 人工处置 |
+| `WT_EXEC_RECOVER=restart` | 告警后进程自退, WatchDog guard 拉起 (启动期重建执行单元), 重启后按真值源重新收养持仓 |
+
+restart 模式的三道闸: ①真值源必须新鲜 (排除真值陈旧误判)；
+②每自然日至多一次 (`.exec_recover_<yyyymmdd>` marker, 可用
+`WT_RECOVER_DIR` 改目录)；③仍存在 ghost 时改发 `exec_recover_skip`
+告警提示人工介入。**权衡**: 退出到重启完成之间持仓无保护 (通常数秒),
+故默认关闭; 若日志确认卡死频发再开启。

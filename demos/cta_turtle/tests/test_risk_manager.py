@@ -31,6 +31,59 @@ def test_invalid_risk_config_rejected():
         RiskManager(RiskConfig(margin_rate=0))
     with pytest.raises(ValueError, match="fallback_capital"):
         RiskManager(RiskConfig(fallback_capital=-1))
+    with pytest.raises(ValueError, match="account_gate_mode"):
+        RiskManager(RiskConfig(account_gate_mode="strict"))
+    with pytest.raises(ValueError, match="account_reserve_frac"):
+        RiskManager(RiskConfig(account_reserve_frac=1.0))
+
+
+# ---------- 账户可用资金闸门 (P1, 共享账户) ----------
+
+def _cap(rm, lots=10, avail=None):
+    return rm.cap_entry("SHFE.rb.HOT", lots=lots, n=50.0, volscale=10.0,
+                        price=3500.0, stop_mult=2.0, equity=5_000_000.0,
+                        group="black", avail=avail)
+
+
+def test_account_gate_warn_only_notes_reason():
+    """warn (默认): 记录原因但不改手数 — 先观察再切 veto"""
+    rm = RiskManager(RiskConfig(account_gate_mode="warn",
+                                account_reserve_frac=0.2))
+    lots, reasons = _cap(rm, avail=1000.0)      # 可用资金远不够
+    assert lots == 10                            # 手数不变
+    assert any(r.startswith("account_margin(") for r in reasons)
+    assert "affordable=0" in [r for r in reasons
+                              if r.startswith("account_margin(")][0]
+
+
+def test_account_gate_veto_scales_then_blocks():
+    """veto: 缩量优先, 归零才否决 (reserve 安全垫之内不放行)"""
+    rm = RiskManager(RiskConfig(account_gate_mode="veto",
+                                account_reserve_frac=0.2))
+    per_lot = 3500.0 * 10.0 * 0.12               # 单手保证金 = 4200
+    avail = per_lot * 5 / 0.8                    # 扣 20% 安全垫后够 5 手
+    lots, reasons = _cap(rm, avail=avail)
+    assert lots == 5
+    assert any(r.startswith("account_margin(") for r in reasons)
+    lots0, reasons0 = _cap(rm, avail=per_lot * 0.5)   # 连安全垫都不够
+    assert lots0 == 0
+    assert any(r.startswith("account_margin(") for r in reasons0)
+
+
+def test_account_gate_off_and_absent():
+    """off 或未提供 avail (回测/真值缺失): 行为与升级前完全一致"""
+    rm_off = RiskManager(RiskConfig(account_gate_mode="off"))
+    lots, reasons = _cap(rm_off, avail=1.0)
+    assert lots == 10 and reasons == []
+    rm_warn = RiskManager(RiskConfig(account_gate_mode="warn"))
+    lots2, reasons2 = _cap(rm_warn, avail=None)
+    assert lots2 == 10 and reasons2 == []
+
+
+def test_account_gate_ample_funds_no_reason():
+    rm = RiskManager(RiskConfig(account_gate_mode="veto"))
+    lots, reasons = _cap(rm, avail=50_000_000.0)
+    assert lots == 10 and reasons == []
 
 
 # ---------- 权益来源 ----------

@@ -210,6 +210,49 @@ def test_prepare_data_cli_exit_codes(tmp_path):
     bad_storage.mkdir()
     r_bad = subprocess.run(
         [sys.executable, os.path.join(root, "scripts", "prepare_data.py"),
-         "--config", str(cfgp), "--common", str(common),
-         "--storage", str(bad_storage)], capture_output=True, text=True)
+        "--config", str(cfgp), "--common", str(common),
+        "--storage", str(bad_storage)], capture_output=True, text=True)
     assert r_bad.returncode == 1
+
+
+# ---------- B1: --weights 解析/校验 (旧实现静默清零组合) ----------
+
+def test_parse_and_resolve_weights_suffix_matching():
+    import run_matrix as rm
+    codes = ["SHFE.rb.HOT", "DCE.i.HOT", "INE.sc.HOT"]
+    wmap = rm.resolve_weights(codes, rm.parse_weights("rb:0.6,sc:0.4"))
+    assert wmap == {"SHFE.rb.HOT": 0.6, "INE.sc.HOT": 0.4}
+    # 完整 code 直传 / 大小写不敏感
+    assert rm.resolve_weights(codes, {"SHFE.rb.HOT": 1.0}) \
+        == {"SHFE.rb.HOT": 1.0}
+    assert rm.resolve_weights(codes, {"RB": 1.0}) == {"SHFE.rb.HOT": 1.0}
+
+
+def test_resolve_weights_fails_fast_on_bad_key():
+    import run_matrix as rm
+    codes = ["SHFE.rb.HOT", "DCE.i.HOT"]
+    with pytest.raises(ValueError, match="未匹配"):
+        rm.resolve_weights(codes, {"nk": 1.0})
+    with pytest.raises(ValueError, match="非数值"):
+        rm.parse_weights("rb:abc")
+    with pytest.raises(ValueError, match="品种:权重"):
+        rm.parse_weights("rb")
+
+
+def test_merge_curves_rejects_unmatched_weights():
+    """权重键与代码完全对不上时必须报错 (而非静默输出全 0 曲线)"""
+    curves = {"SHFE.rb.HOT": {20240101: 0.0, 20240102: 100.0}}
+    with pytest.raises(ValueError, match="不匹配"):
+        pf.merge_curves(curves, {"rb": 0.7})
+
+
+def test_resolved_weights_drive_portfolio():
+    """解析后的权重真正生效 (rb 权重 1/0 时组合等于单品种)"""
+    import run_matrix as rm
+    codes = ["SHFE.rb.HOT", "DCE.i.HOT"]
+    curves = {"SHFE.rb.HOT": {20240101: 0.0, 20240102: 100.0},
+              "DCE.i.HOT": {20240101: 0.0, 20240102: 200.0}}
+    wmap = rm.resolve_weights(codes, rm.parse_weights("rb:1,i:0"))
+    _, port, aligned = pf.merge_curves(curves, wmap)
+    assert abs(float(port[-1]) - 100.0) < 1e-9
+    assert abs(float(aligned["DCE.i.HOT"][-1])) < 1e-9

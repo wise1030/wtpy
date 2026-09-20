@@ -30,6 +30,7 @@ class FullCtx:
         self.pos = 0
         self.avgpx = 0.0
         self.orders = []
+        self.prewarmed = []
         self.logs = []
         self.kv = {}
         self.indices = {}
@@ -53,6 +54,9 @@ class FullCtx:
         return self.pos
 
     def stra_set_position(self, code, target, tag=""):
+        if tag == "PreWarm":
+            self.prewarmed.append((code, target))
+            return   # 执行单元预热 (F1): 非策略信号, 不计入订单
         self.orders.append((code, target, tag))
         old = self.pos
         self.pos = target

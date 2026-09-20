@@ -18,12 +18,16 @@ class MiniCtx:
         self.pos = pos
         self.avgpx = 0.0
         self.orders = []
+        self.prewarmed = []
         self.logs = []
 
     def stra_get_position(self, code, *a, **k):
         return self.pos
 
     def stra_set_position(self, code, target, tag=""):
+        if tag == "PreWarm":
+            self.prewarmed.append((code, target))
+            return   # 执行单元预热 (F1): 非策略信号, 不计入订单
         self.orders.append((code, target, tag))
         self.pos = target
         if target == 0:
@@ -241,3 +245,86 @@ def test_daily_two_stage_entries_s1_then_s2():
     assert ctx.pos == total
     tags = [t for t in ctx.orders if t[2] == "Dual"]
     assert len(tags) == 2                        # 两日各一次合并净仓单
+
+
+# ---------- B5: 双系统换月/漂移 re-anchor ----------
+
+def test_dual_reanchor_shifts_both_subsystems():
+    """两子系统同时持仓时 avgpx 漂移 re-anchor 必须生效 (旧实现恒跳过)"""
+    stra = _mk_dual()
+    e1, e2 = stra._subs[0]["engine"], stra._subs[1]["engine"]
+    e1.confirm_enter(1, 10, 3400.0, n=30.0)
+    e2.confirm_enter(1, 10, 3420.0, n=30.0)
+    ctx = MiniCtx(pos=20)
+    ctx.avgpx = 3415.0            # 框架净均价: 我们的 3410 + 换月价差 5
+    stra._reanchor_on_roll(ctx)
+    assert e1.layers == [[10, 3405.0]]
+    assert e2.layers == [[10, 3425.0]]
+    assert any("re-anchor" in t and "2 sub" in t for _, t in ctx.logs)
+
+
+def test_dual_reanchor_handles_opposite_subsystems():
+    """反向并存 (S1 多 / S2 空): 按净成本口径同样平移"""
+    stra = _mk_dual()
+    e1, e2 = stra._subs[0]["engine"], stra._subs[1]["engine"]
+    e1.confirm_enter(1, 10, 3400.0, n=30.0)
+    e2.confirm_enter(-1, 4, 3500.0, n=30.0)
+    net_cost = 10 * 3400.0 - 4 * 3500.0          # 20000
+    our_avg = abs(net_cost) / 14.0               # 1428.57
+    ctx = MiniCtx(pos=6)                         # 净仓 10-4
+    ctx.avgpx = our_avg + 5.0
+    stra._reanchor_on_roll(ctx)
+    assert abs(e1.layers[0][1] - 3405.0) < 1e-9
+    assert abs(e2.layers[0][1] - 3505.0) < 1e-9
+
+
+def test_dual_reanchor_skips_on_position_mismatch():
+    """框架持仓与净目标不符 (部分成交/手工干预) → 不平移"""
+    stra = _mk_dual()
+    e1, e2 = stra._subs[0]["engine"], stra._subs[1]["engine"]
+    e1.confirm_enter(1, 10, 3400.0, n=30.0)
+    e2.confirm_enter(1, 10, 3420.0, n=30.0)
+    ctx = MiniCtx(pos=15)                        # 与净目标 20 不符
+    ctx.avgpx = 3415.0
+    stra._reanchor_on_roll(ctx)
+    assert e1.layers[0][1] == 3400.0 and e2.layers[0][1] == 3420.0
+
+
+# ---------- B6: 双系统风控账本按层冻结 N 记账 ----------
+
+def test_dual_risk_book_uses_layer_n_not_current():
+    """批量同步账本用各层冻结 N 汇总, 不用当根 N (旧实现每根 bar 覆盖)"""
+    stra = _mk_dual()
+    e1, e2 = stra._subs[0]["engine"], stra._subs[1]["engine"]
+    e1.confirm_enter(1, 10, 3400.0, n=60.0)
+    e2.confirm_enter(1, 5, 3420.0, n=80.0)
+    stra._sync_risk_book(200.0)          # 当根 N 已漂到 200
+    expect = 10 * 60.0 * 10.0 * 2.0 + 5 * 80.0 * 10.0 * 2.0
+    assert abs(stra._risk.open_risk() - expect) < 1e-6
+    book = stra._risk._book["SHFE.rb.HOT"]
+    assert book["lots"] == 15
+    assert abs(book["risk"] - expect) < 1e-6
+
+
+def test_engine_booked_risk_per_layer():
+    """engine.booked_risk(): 逐层按各自冻结 N (缺 N 的层跳过)"""
+    from helpers.TurtleEngine import TurtleEngine
+    e = TurtleEngine("S1", stop_atr_mult=2.0, pyramid_layers=4)
+    e.confirm_enter(1, 10, 3000.0, n=60.0)
+    e.confirm_add(5, 3030.0, n=80.0)
+    assert abs(e.booked_risk(10.0) - (10 * 60 + 5 * 80) * 10 * 2) < 1e-9
+    assert abs(e.booked_risk(10.0, stop_mult=3.0)
+               - (10 * 60 + 5 * 80) * 10 * 3) < 1e-9
+
+
+def test_risk_manager_explicit_risk_override():
+    """on_rebuilt/sync_position 支持显式风险值 (多子系统汇总口径)"""
+    from helpers.RiskManager import RiskManager
+    rm = RiskManager()
+    rm.on_rebuilt("SHFE.rb.HOT", 1, 15, 3410.0, 200.0, 10.0, 2.0,
+                  "black", risk=1234.0)
+    assert abs(rm.open_risk() - 1234.0) < 1e-9
+    rm.sync_position("SHFE.rb.HOT", 1, 15, 3410.0, 200.0, 10.0, 2.0,
+                     "black", risk=999.0)
+    assert abs(rm.open_risk() - 999.0) < 1e-9
+    assert rm.open_units == 1

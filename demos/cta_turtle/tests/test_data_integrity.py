@@ -64,6 +64,29 @@ def test_read_dedups_and_sorts_by_key(tmp_path):
 
 # ---------- journal → csv 回补 ----------
 
+def test_journal_keeps_turnover(tmp_path):
+    """P2: turnover(成交额/money 列) 一并旁路, 回补后不再恒 0"""
+    bj = BarJournal(str(tmp_path / "j"))
+    bj.append("SHFE.rb.HOT", "m5",
+              {"date": 20230103, "time": 90500, "open": 1, "high": 2,
+               "low": 0.5, "close": 1.5, "volume": 10,
+               "turnover": 12345.5, "open_interest": 777})
+    rows = bj.read("SHFE.rb.HOT", "m5")
+    assert rows[0]["turnover"] == 12345.5
+    csv_path = tmp_path / "out.csv"
+    assert bj.merge_to_csv("SHFE.rb.HOT", "m5", str(csv_path)) == 1
+    body = csv_path.read_text().strip().splitlines()[1]
+    assert "12345.5" in body and ",777" in body      # turnover 不再写 0
+
+
+def test_journal_turnover_defaults_zero_for_legacy_rows(tmp_path):
+    """旧 journal 行 (无 turnover 字段) → 回补为 0, 不报错"""
+    bj = BarJournal(str(tmp_path / "j"))
+    bj.append("A.B.HOT", "d", {"date": 20230103, "time": 1500, "open": 1,
+                               "high": 1, "low": 1, "close": 1})
+    assert bj.read("A.B.HOT", "d")[0]["turnover"] == 0.0
+
+
 def test_merge_to_csv_creates_and_appends(tmp_path):
     bj = BarJournal(str(tmp_path / "j"))
     for d in (20230103, 20230104, 20230105):

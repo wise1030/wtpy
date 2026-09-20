@@ -39,6 +39,8 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 MAP_FILE = os.path.join(HERE, "ctp_loader", "map_future.ini")
+sys.path.insert(0, HERE)
+from timer_notify import notify   # noqa: E402  (P1-4 失败告警)
 
 # 子进程内执行的引导代码: ContractLoader 同步拉取,
 # C++ 侧 dump 完成后 exit(0), 子进程退出码 0 即成功
@@ -189,6 +191,9 @@ def main():
         if not getattr(args, k):
             print(f"[contracts] 缺少凭据: --{k} 或环境变量 "
                   f"CTP_{k.upper()}", file=sys.stderr)
+            notify("contracts_fail",
+                   f"合约信息更新失败: 缺少凭据 --{k} (检查 tdtraders.yaml"
+                   f" 与 CTP_* 环境变量)")
             return 1
 
     tmpdir = tempfile.mkdtemp(prefix="ctp_loader_",
@@ -219,6 +224,9 @@ def main():
             print(f"[contracts] loader FAILED (rc={r.returncode}):\n"
                   f"{r.stdout[-1500:]}\n{r.stderr[-1500:]}",
                   file=sys.stderr)
+            notify("contracts_fail",
+                   f"合约信息更新失败 {today}: CTP loader rc={r.returncode} "
+                   f"— 沿用旧文件, 新上市/到期合约滞后一天")
             return 2
 
         new_cont_file = os.path.join(tmpdir, "contracts.json")
@@ -226,6 +234,8 @@ def main():
         if not (os.path.exists(new_cont_file)
                 and os.path.exists(new_comm_file)):
             print("[contracts] loader 未产出 json 文件", file=sys.stderr)
+            notify("contracts_fail",
+                   f"合约信息更新失败 {today}: loader 未产出 json")
             return 2
         with open(new_cont_file, encoding="utf-8") as f:
             contracts = json.load(f)
@@ -236,6 +246,9 @@ def main():
             print(f"[contracts] 合约数异常 ({n_cont}), 拒绝替换; "
                   f"loader 输出:\n{r.stdout[-1200:]}\n{r.stderr[-600:]}",
                   file=sys.stderr)
+            notify("contracts_fail",
+                   f"合约信息更新失败 {today}: 合约数异常 {n_cont}<100, "
+                   f"拒绝替换")
             return 2
 
         contracts, removed = filter_expired(contracts, today)
@@ -258,6 +271,9 @@ def main():
     except subprocess.TimeoutExpired:
         print(f"[contracts] loader 超时 ({args.timeout}s), 保留旧文件",
               file=sys.stderr)
+        notify("contracts_fail",
+               f"合约信息更新失败 {today}: CTP loader 超时 "
+               f"{args.timeout}s, 保留旧文件")
         return 2
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)

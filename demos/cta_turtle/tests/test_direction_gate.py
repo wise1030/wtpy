@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 
 from conftest import *  # noqa: F401,F403
 from schemas import InstrumentConfig, TurtleBaseConfig
-from helpers.TurtleEngine import DEC_ENTER, DEC_EXIT
+from helpers.TurtleEngine import DEC_ENTER, DEC_EXIT, DEC_ADD
 
 
 class FakeCtx:
@@ -116,29 +116,53 @@ def test_veto_log_dedup():
     assert len(veto_logs) == 1
 
 
-def test_implied_fill_on_add():
-    """加仓成交价 = avgpx 加权反推"""
+def test_veto_log_per_key_cooldown_and_count():
+    """P2: 逐 key 冷却 (原全局单槽在交替原因下会刷屏); 复发带累计次数,
+    且成功入场不再重置冷却"""
+    stra = _make_stra(direction="long")
+    ctx = FakeCtx()
+    stra._veto_log(ctx, "risk1", "veto A")
+    stra._veto_log(ctx, "rscale1", "veto B")      # 不同 key 独立记录
+    stra._veto_log(ctx, "risk1", "veto A")        # 同 key 冷却抑制
+    stra._veto_log(ctx, "rscale1", "veto B")
+    logs = [t for _, t in ctx.logs]
+    assert sum("veto A" in t for t in logs) == 1
+    assert sum("veto B" in t for t in logs) == 1
+    # 冷却过期后再次记录, 带被抑制期间累计次数 (A 共 2 次命中)
+    stra._veto_last["risk1"] -= stra._VETO_LOG_COOLDOWN + 1
+    stra._veto_log(ctx, "risk1", "veto A")
+    tail = [t for _, t in ctx.logs if "veto A" in t][-1]
+    assert "[x2 since last log]" in tail
+
+
+def test_confirm_price_is_decision_price_not_signal_book_avgpx():
+    """记账价 = 决策价 (触发/收盘), 不再从信号账面 avgpx 反推。
+
+    旧 `_implied_fill` 的输入是"信号口径"的 position/avgpx: set_position
+    即改写信号仓, 真实成交要等下一个 tick 落地, 故 confirm 时反推得到的
+    是"新信号仓 × 旧成交均价"的混合值 (加仓场景甚至等于加仓前旧均价
+    3400, 而非真实成交价) — 该口径 2026-09-15 删除, 真实成交价统一由
+    `_reanchor_actual_fill` (逐笔成交优先) 回写。
+    """
     stra = _make_stra()
     ctx = FakeCtx(pos=100, avgpx=3400.0)
     stra._engine.confirm_enter(1, 100, 3400.0)
-    # 直接测 _implied_fill: 加仓 100 手 @3500 → new_avg=3450, fill=3500
-    ctx.stra_set_position("SHFE.rb.HOT", 200, "Add")
-    fill = stra._implied_fill(ctx, prev_pos=100, prev_avg=3400.0,
-                              fallback=9999.0)
-    assert abs(fill - 3500.0) < 1e-9
+    dec = {"decision": DEC_ENTER, "direction": 1, "price": 3500.0,
+           "n": 30.0, "failsafe": False}
+    stra._execute(ctx, dec, n=30.0)
+    assert abs(stra._engine.layers[-1][1] - 3500.0) < 1e-9   # 决策价
+    assert not hasattr(stra, "_implied_fill")                # 旧口径已删
 
 
-def test_implied_fill_short_signed_avgpx():
-    """框架 avgpx 空头为负(符号约定): 反推成交价仍为正价格
-
-    复核发现: WT C++ 层 avgpx 带持仓方向符号 (avgpx×pos=成本>0),
-    空头 avgpx=-3773, 若不做符号处理 re-anchor 会误判 -2×price 漂移。
-    """
+def test_add_confirm_price_is_decision_price():
+    """加仓同理: 记账价=加仓位决策价, 不受旧均价干扰 (待回写修正)"""
     stra = _make_stra()
-    ctx = FakeCtx(pos=-552, avgpx=-3773.0)   # 空头: avgpx 负值
-    fill = stra._implied_fill(ctx, prev_pos=0, prev_avg=0.0,
-                              fallback=9999.0)
-    assert abs(fill - 3773.0) < 1e-9
+    ctx = FakeCtx(pos=100, avgpx=3400.0)
+    stra._engine.confirm_enter(1, 100, 3400.0, n=30.0)
+    ctx.stra_set_position("SHFE.rb.HOT", 100, "Keep")     # 同步框架仓
+    dec = {"decision": DEC_ADD, "price": 3500.0, "n": 30.0}
+    stra._execute(ctx, dec, n=30.0)
+    assert abs(stra._engine.layers[-1][1] - 3500.0) < 1e-9
 
 
 def test_reanchor_short_signed_avgpx_no_false_roll():

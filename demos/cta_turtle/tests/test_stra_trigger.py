@@ -42,6 +42,9 @@ class TrigCtx(MultiCtx):
         self.subscribed.append(code)
 
     def stra_set_position(self, code, target, tag=""):
+        if tag == "PreWarm":
+            self.prewarmed.append((code, target))
+            return   # 执行单元预热 (F1): 非策略信号, 不计入订单
         old = self.pos
         self.orders.append((code, target, tag))
         self.pos = target
@@ -63,7 +66,10 @@ def _make_trig(direction="both", units=2, intrabar=False,
     inst = InstrumentConfig(code="SHFE.rb.HOT", period="d1", system="S1",
                             units=units, intrabar_stop=intrabar,
                             direction=direction)
-    base = TurtleBaseConfig(entry_mode="trigger", unit_var=unit_var)
+    # stop_n_mode 固定为 entry: 本文件测的是 tick 触发/成交价回写链路,
+    # 不测 N 口径 (三种模式各有专属用例, 见 test_n_freeze.py)
+    base = TurtleBaseConfig(entry_mode="trigger", unit_var=unit_var,
+                            stop_n_mode="entry")
     return StraTurtle("tb", inst, base)
 
 
@@ -281,7 +287,7 @@ def _trigger_enter_with_pending_avgpx(stra, ctx):
     stra.on_tick(ctx, "SHFE.rb.HOT", None)       # 触发入场
     ctx.stra_get_position_avgpx = orig
     assert stra._engine.direction == 1
-    assert stra._fill_pending is not None        # 回写标记已挂
+    assert stra._fill_pending        # 回写标记已挂
     assert stra._engine.layers[-1][1] == lv      # 记账=触发价
     return lv
 
@@ -297,7 +303,7 @@ def test_fill_reanchor_on_next_tick():
     ctx.avgpx = lv - 3.0                         # 执行层回报实际均价
     ctx.px = lv - 1.0                            # 未触 stop/add 的任意价
     stra.on_tick(ctx, "SHFE.rb.HOT", None)       # 回写在触发检查前
-    assert stra._fill_pending is None
+    assert not stra._fill_pending
     assert e.layers[-1][1] == lv - 3.0
     assert abs(e.armed["stop"] - (lv - 3.0 - 2.0 * n)) < 1e-9
     assert abs(e.armed["add"] - (lv - 3.0 + 0.5 * n)) < 1e-9
@@ -312,7 +318,7 @@ def test_fill_reanchor_ignores_sub_tick_deviation():
     ctx.avgpx = lv - 0.4                         # pricetick=1.0 → 0.4<0.5
     ctx.px = lv - 1.0
     stra.on_tick(ctx, "SHFE.rb.HOT", None)
-    assert stra._fill_pending is None            # 标记清除
+    assert not stra._fill_pending            # 标记清除
     assert e.layers[-1][1] == lv                 # 未修正
 
 
@@ -326,11 +332,11 @@ def test_fill_reanchor_waits_for_partial_fill():
     ctx.avgpx = lv - 3.0
     ctx.px = lv - 1.0
     stra.on_tick(ctx, "SHFE.rb.HOT", None)
-    assert stra._fill_pending is not None        # 等待中
+    assert stra._fill_pending        # 等待中
     assert e.layers[-1][1] == lv                 # 未修正
     ctx.pos = target                             # 分批完成
     stra.on_tick(ctx, "SHFE.rb.HOT", None)
-    assert stra._fill_pending is None
+    assert not stra._fill_pending
     assert e.layers[-1][1] == lv - 3.0
 
 
@@ -346,7 +352,7 @@ def test_fill_reanchor_add_layer_only_fixes_last():
     ctx.avgpx = lv                               # 首层实际价=触发价, 回写无变化
     ctx.px = lv - 1.0
     stra.on_tick(ctx, "SHFE.rb.HOT", None)
-    assert stra._fill_pending is None
+    assert not stra._fill_pending
     lots1 = e.layers[0][0]
     # 触发加仓: confirm 时 avgpx 读不到 → fallback
     ctx.px = e.armed["add"]
@@ -374,7 +380,7 @@ def test_catchup_eval_reanchors_stale_fill():
     stra, ctx, d1 = _setup()
     lv = _trigger_enter_with_pending_avgpx(stra, ctx)   # 入场, 记账=触发价
     e = stra._engine
-    stra._fill_pending = None                            # 模拟重启丢失标记
+    stra._fill_pending = {}                            # 模拟重启丢失标记
     ctx.avgpx = lv - 3.0                                 # 框架实际均价
     ctx.tdate = 20230090                                 # 新交易日首 tick
     ctx.px = lv + 1.0                                    # stop<px<add 不触发任何信号
@@ -387,8 +393,13 @@ def test_catchup_eval_reanchors_stale_fill():
     stra.on_tick(ctx, "SHFE.rb.HOT", None)
     assert abs(e.layers[-1][1] - (lv - 3.0)) < 1e-9
     # 止损/加仓武装位随平移后的层价重算
-    n = e._n
-    assert abs(e.armed["stop"] - (lv - 3.0 - 2.0 * n)) < 1e-9
+    # P0-2 口径 (2026-09-14): 止损距离用**该层入场时点冻结 N**, 不用
+    # 当根 N — catchup 评估时 N 已漂移 (本用例 7.18→5.60), 用当根 N
+    # 会让止损位比风险预算更近/更远, 实际亏损偏离 2N 记账
+    n_entry = e.layer_ns[-1]
+    assert abs(e.armed["stop"] - (lv - 3.0 - 2.0 * n_entry)) < 1e-9
+    assert abs(n_entry - e._n) > 1e-9            # 该用例 N 确实漂移
+    assert abs(e.armed["stop"] - (lv - 3.0 - 2.0 * e._n)) > 1e-3  # 旧口径
 
 
 def test_session_end_reanchors_stale_fill():
@@ -396,7 +407,7 @@ def test_session_end_reanchors_stale_fill():
     stra, ctx, d1 = _setup()
     lv = _trigger_enter_with_pending_avgpx(stra, ctx)
     e = stra._engine
-    stra._fill_pending = None
+    stra._fill_pending = {}
     ctx.avgpx = lv - 3.0
     stra._d1_date = None                      # 让 session_end 走评估分支
     stra.on_session_end(ctx, 20230089)
@@ -481,7 +492,7 @@ def test_fill_timeout_alerts_once():
     stra._notify = nt
     lv = _trigger_enter_with_pending_avgpx(stra, ctx)
     ctx.pos = ctx.pos - 1                      # 模拟 1 手始终未成交
-    stra._fill_pending["ts"] -= 700            # 回拨 700s 越过超时线
+    stra._fill_pending["S1"]["ts"] -= 700            # 回拨 700s 越过超时线
     ctx.avgpx = lv
     ctx.px = lv + 1.0
     stra.on_tick(ctx, "SHFE.rb.HOT", None)
@@ -489,7 +500,7 @@ def test_fill_timeout_alerts_once():
     n1 = len(nt.events)
     stra.on_tick(ctx, "SHFE.rb.HOT", None)     # 不重复告警
     assert len(nt.events) == n1
-    assert stra._fill_pending is not None      # 继续等待成交
+    assert stra._fill_pending      # 继续等待成交
 
 
 # ------------------------------------------------------------------
@@ -563,3 +574,69 @@ def test_add_veto_lot0_rejects_trigger():
     assert stra._engine._pending is None          # reject 已清挂起
     assert stra._engine.armed["add"] is None      # 当日撤武装防刷屏
     assert any("veto add" in t for _, t in ctx.logs)
+
+
+# ------------------------------------------------------------------
+# F1/F2: 执行单元预热 + fees 幽灵仓位检测 (2026-09-10)
+# ------------------------------------------------------------------
+def test_exec_unit_prewarm_on_init():
+    """F1: on_init 同值 set_position(PreWarm) 强制预建执行单元
+    (盘中新建单元有 tick 断供卡死风险, wtpy 0.9.9.3 实测);
+    不计入策略订单流"""
+    stra, ctx, d1 = _setup()
+    assert ctx.prewarmed == [("SHFE.rb.HOT", 0)]   # 空仓预热 target=0
+    assert all(t[2] != "PreWarm" for t in ctx.orders)  # 不污染信号流
+
+
+def test_ghost_fill_detected_via_fees():
+    """F2: 信号仓达标但 fees 未增 → 判定幽灵仓位 (执行单元卡死),
+    禁止用模拟 avgpx 回写, 超时 600s 告警 ghost_fill"""
+    class FundCtx(TrigCtx):
+        def __init__(self):
+            super().__init__()
+            self.fees = 100.0
+
+        def stra_get_fund_data(self, flag=0):
+            return self.fees if flag == 3 else 0.0
+
+    stra = _make_trig()
+    ctx = FundCtx()
+    d1 = ctx.add_store("d1")
+    _fill_daily(d1)
+    stra.on_init(ctx)
+    stra.on_calculate(ctx)
+    lv = stra._engine.armed["long"]
+    ctx.px = lv
+    stra.on_tick(ctx, "SHFE.rb.HOT", None)        # 触发入场
+    fp = stra._fill_pending["S1"]
+    assert fp is not None and fp["fees0"] == 100.0
+    # 信号仓立即达标 (mock 同步), 但 fees 未变 → 幽灵: 不回写 avgpx
+    e = stra._engine
+    recorded = e.layers[-1][1]
+    ctx.avgpx = lv + 50.0                          # 模拟假 avgpx 漂移
+    stra._reanchor_actual_fill(ctx)
+    assert e.layers[-1][1] == recorded             # 未回写 ✓
+    assert stra._fill_pending          # 继续等待
+    # 超时 → 告警 (无真值源 → fees 代理口径, 事件 key=fill_timeout;
+    # 真值源可用时同类问题以 ghost_fill 报出, 见 test_live_truth.py)
+    fp["ts"] -= 700
+    stra._reanchor_actual_fill(ctx)
+    assert any("fill_timeout" in t and "未达标" in t
+               for _, t in ctx.logs)
+    # 真实成交到达 (fees 增加) → 回写恢复
+    ctx.fees = 105.0
+    stra._reanchor_actual_fill(ctx)
+    assert not stra._fill_pending              # 回写完成
+    assert abs(e.layers[-1][1] - (lv + 50.0)) < 1e-6
+
+
+def test_fill_reanchor_unaffected_without_fees_api():
+    """无 fund_data 接口的上下文 (老 mock) → 幽灵检测降级跳过,
+    avgpx 回写行为与修复前一致 (兼容)"""
+    stra, ctx, d1 = _setup()
+    lv = _trigger_enter_with_pending_avgpx(stra, ctx)
+    assert stra._fill_pending          # 标记已挂
+    ctx.avgpx = lv + 2.0                           # 实际成交价偏离
+    stra._reanchor_actual_fill(ctx)                # 显式回写
+    assert not stra._fill_pending              # 正常回写 ✓
+    assert abs(stra._engine.layers[-1][1] - (lv + 2.0)) < 1e-6

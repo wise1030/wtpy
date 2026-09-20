@@ -34,6 +34,7 @@ sys.path.insert(0, ROOT)
 
 from pick_hot_sina import (PRODUCTS, active_contracts, pick_hots,  # noqa: E402
                            merge_hots)
+from timer_notify import notify as _notify  # noqa: E402
 
 
 def _current_hots(hots: dict) -> dict:
@@ -46,21 +47,44 @@ def _current_hots(hots: dict) -> dict:
     return cur
 
 
-def _notify(cfg_path: str, text: str):
-    """读 turtle_config.yaml notify 段发 webhook (未配置/失败静默)"""
+def _pick_holds_tqsdk(candidates: dict) -> dict:
+    """tqsdk 兜底主力判定: 按 open_interest 最大 (P1-7)。
+
+    sina 不可达/限流导致 pick_hots 失败时启用 — 此前 hots 定时器对
+    sina 单点依赖, 失败=换月静默顺延一天。candidates 与 pick_hots
+    同构 ({品种key: [新浪代码...]}), 返回也回新浪代码, 下游口径不变。
+
+    tqsdk 未装/无凭据/查询失败 → 抛异常 (main 发告警 rc=1, 沿用旧
+    映射, 次日 timer 重试; 绝不写陈旧/空缺映射)。"""
+    import os as _os
+    from tqsdk import TqApi, TqAuth
+    user, pwd = _os.environ.get("TQ_USER"), _os.environ.get("TQ_PASS")
+    if not user or not pwd:
+        raise RuntimeError("tqsdk 兜底需 TQ_USER/TQ_PASS 环境变量")
+    api = TqApi(auth=TqAuth(user, pwd), web_gui=False)
     try:
-        import yaml
-        sys.path.insert(0, os.path.join(ROOT, ".."))
-        from helpers.notifier import WebhookNotifier
-        with open(cfg_path, encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-        n = cfg.get("notify") or {}
-        if not n.get("enabled"):
-            return
-        WebhookNotifier(urls=n.get("urls"), wtype=n.get("type",
-                        "generic")).send("hots_roll", text)
-    except Exception:
-        pass
+        out = {}
+        for key, codes in candidates.items():
+            exchg = key.split(".")[0]
+            best, best_oi = None, -1.0
+            for c in codes:
+                # CZCE: tqsdk 用 CTP 3 位码 (TA701), 新浪 4 位 (TA2701)
+                sym = c if exchg != "CZCE" \
+                    else c[:len(c) - 4] + c[-3:]
+                try:
+                    q = api.get_quote(f"{exchg}.{sym}")
+                    oi = float(getattr(q, "open_interest", 0) or 0)
+                except Exception:
+                    continue
+                if oi > best_oi:
+                    best, best_oi = c, oi
+            out[key] = (best, best_oi)
+        return out
+    finally:
+        try:
+            api.close()
+        except Exception:
+            pass
 
 
 def _restart_datakit():
@@ -108,13 +132,32 @@ def main() -> int:
     if not candidates:
         print("[hots] 无候选合约 (contracts.json 异常?), 拒绝变更",
               file=sys.stderr)
+        _notify("hots_fail", f"海龟主力更新失败 {today}: 无候选合约 "
+                f"(contracts.json 异常), 沿用旧映射")
         return 1
 
-    picked = pick_hots(candidates)
+    try:
+        picked = pick_hots(candidates)
+        src = "sina"
+    except Exception as e:
+        # P1-7: sina 单点依赖 → tqsdk 兜底; 双失败才告警 (次日重试)
+        print(f"[hots] sina 持仓查询失败: {e} — 尝试 tqsdk 兜底",
+              file=sys.stderr)
+        try:
+            picked = _pick_holds_tqsdk(candidates)
+            src = "tqsdk"
+            print("[hots] tqsdk 兜底成功")
+        except Exception as e2:
+            print(f"[hots] tqsdk 兜底也失败: {e2}", file=sys.stderr)
+            _notify("hots_fail", f"海龟主力更新失败 {today}: sina({e}) "
+                    f"tqsdk({e2}) — 沿用旧映射, 次日自动重试")
+            return 1
     empty = [k for k, (h, _) in picked.items() if not h]
     if empty:
         print(f"[hots] 警告: {len(empty)} 品种无持仓数据 {empty}",
               file=sys.stderr)
+        _notify("hots_partial", f"海龟主力更新 {today} ({src}): "
+                f"{len(empty)} 品种无持仓数据 {empty} — 该品种沿用旧映射")
 
     with open(hots_path, encoding="utf-8") as f:
         hots = json.load(f)
@@ -148,7 +191,7 @@ def main() -> int:
     killed = [] if args.no_restart else _restart_datakit()
     if killed:
         print(f"[hots] 已重启: {', '.join(killed)} (WatchDog 自动拉起)")
-    _notify(args.config, f"海龟主力换月 {today}: {detail}"
+    _notify("hots_roll", f"海龟主力换月 {today} ({src}): {detail}"
             + (f", 已重启 {len(killed)} 进程" if killed else ""))
     return 0
 

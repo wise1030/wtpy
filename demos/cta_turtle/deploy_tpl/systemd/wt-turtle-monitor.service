@@ -1,0 +1,20 @@
+[Unit]
+Description=WonderTrader Monitor (cta_turtle)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=@PREFIX@
+Environment=WT_MON_TOKEN=@MON_TOKEN@
+# P1-5: 执行单元卡死自愈 (ghost_fill 检测后进程自退, WatchDog 拉起;
+# 有界: 每日至多一次 + 真值新鲜度双闸, 见 StraTurtle._maybe_exec_recover)
+Environment=WT_EXEC_RECOVER=restart
+Environment=WT_RECOVER_DIR=@PREFIX@/deploy/cta_turtle
+ExecStart=@PREFIX@/venv/bin/python @PREFIX@/cta_turtle/runMonSvr.py --port 8081 --host 0.0.0.0 --deploy-dir @PREFIX@/deploy
+Restart=always
+LimitNOFILE=1048576
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

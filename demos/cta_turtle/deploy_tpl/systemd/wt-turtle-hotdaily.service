@@ -1,0 +1,9 @@
+[Unit]
+Description=cta_turtle HOT daily bar continuation (real contract -> HOT file)
+After=network.target wt-turtle-hots.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=@PREFIX@/deploy/cta_turtle
+ExecStart=@PREFIX@/venv/bin/python scripts/update_hot_daily.py --config config/turtle_config.yaml --common @PREFIX@/common --storage @PREFIX@/storage

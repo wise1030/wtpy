@@ -245,6 +245,53 @@ def test_real_trade_loss_recorded():
     assert e.s1_last["result"] == "loss"
 
 
+def test_same_bar_exit_settles_filter_before_entry_eval():
+    """同 bar 出场+反向突破: 实单输赢必须在入场评估前结清。
+
+    两层多仓均价 115、通道出场 112 = loss (非 win) → 反向突破应被
+    **放行** (enter)。若等到 confirm_exit 才记录, 入场评估会读到期
+    持仓的旧记录 (首层价 100 < 112 = 浮盈) 而误判 skip, 并让 sim 单
+    覆盖 taken 记录 → 真实输赢永久丢失 (2026-09-14 审计)。
+    """
+    e = _mk_engine("S1")
+    e.confirm_enter(1, 1, 100.0, n=10.0)
+    e.confirm_add(1, 130.0, n=10.0)      # 均价 115, 止损=110
+    # 显式正价格通道 (生产口径; _ch 的镜像值只适合纯方向用例)
+    ch = {'entry_upper': 200.0, 'entry_lower': 120.0,
+          'exit_upper': 300.0, 'exit_lower': 115.0,
+          'fs_upper': 400.0, 'fs_lower': 100.0,
+          'prev_entry_upper': 199.0, 'prev_entry_lower': 111.0,
+          'prev_fs_upper': 399.0, 'prev_fs_lower': 101.0}
+    dec = e.on_bar(high=130.0, low=111.0, close=112.0, prev_close=112.0,
+                   n=10.0, channels=ch)
+    assert [d["decision"] for d in dec] == ["exit", "enter"]
+    assert dec[1]["direction"] == -1
+    # 结清发生在决策阶段: 记录为 closed/loss (而非被 sim 覆盖)
+    assert e.s1_last["status"] == "closed"
+    assert e.s1_last["result"] == "loss"
+    assert e.s1_last["taken"] is True    # 持仓态仍由策略层 confirm 收尾
+    e.confirm_exit(112.0)
+    assert e.s1_last["result"] == "loss"  # confirm 幂等, 不覆盖
+    e.confirm_enter(-1, 1, 112.0, 10.0)
+    assert e.s1_last["direction"] == -1 and e.s1_last["status"] == "open"
+
+
+def test_same_bar_exit_then_skip_still_records_result():
+    """同 bar 出场后同向/反向信号被跳过时: sim 单接管记录, 但真实
+    输赢在跳过之前已入账 (confirm_exit 幂等不重复判定)"""
+    e = _mk_engine("S1")
+    e.confirm_enter(1, 1, 100.0, n=10.0)
+    e.confirm_add(1, 130.0, n=10.0)
+    ch = _ch(entry=100.0, exit_=115.0)   # 破 10-low 出场, 不构成新突破
+    dec = e.on_bar(high=130.0, low=111.0, close=112.0, prev_close=113.0,
+                   n=10.0, channels=ch)
+    assert [d["decision"] for d in dec] == ["exit"]
+    assert e.s1_last["status"] == "closed"
+    assert e.s1_last["result"] == "loss"
+    e.confirm_exit(112.0)
+    assert e.s1_last["result"] == "loss"
+
+
 # ---------- 持久化 / 换月 ----------
 
 def test_snapshot_restore_roundtrip():

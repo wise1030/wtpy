@@ -83,9 +83,28 @@ SimpleRiskMon (C++ 账户级熔断)      ← 引擎内置兜底
 
 - **通道语义**：唐奇安通道**不含当根**（用前 N-1 根计算，无未来函数）。
 - **N**：ATR(20) Wilder 平滑，波动率单位，所有仓位/止损/加仓的标尺。
-- **加仓**：每盈利 0.5N 加一层，最多 `pyramid_layers` 层（当前配置 units=1
-  **不加仓**，层数=1）。
-- **止损**：最后加仓价 ∓ 2N（`stop_atr_mult`）。
+- **加仓**：每盈利 0.5N 加一层，最多 `pyramid_layers` 层。当前配置
+  `pyramid_layers: 4` 且 `pyramid_step_atr: 0.5` → **实际会加仓**
+  （rb 2018-2023 基线 111 次：layer2×44 / layer3×35 / layer4×32）；
+  置 1 才是不加仓。`units` 只影响每层手数，不决定是否加仓。
+- **止损**：最后加仓价 ∓ 2N（`stop_atr_mult`）。N 口径由 `stop_n_mode`
+  控制：`ratchet`（默认）= 当根 N 但只收紧不放宽（多头止损只上移），
+  两次加仓之间单调、加仓时按新单位重锚；`entry` = 冻结入/加仓时点 N
+  （纯经典，与风控 2N 记账严格一致）；`current` = 当根 N（2026-09-15 前
+  行为，N 放大时止损被放宽，实际止损亏损可超风控记账 2 倍）。
+- **持仓/成交真值**：框架侧 `stra_get_position/avgpx/fund_data` 都是
+  **信号口径**（`set_position` 即变），故对账与成交确认优先读交易通道
+  落盘的 `generated/traders/<id>/rtdata.json`（真实持仓+账户资金）；
+  真值缺失时回退框架口径（回测自动降级）。**真值文件超过
+  `truth_max_age`（默认 1800s）视为陈旧 → 回退框架口径并告警
+  `truth_stale`**：陈旧券商仓位绝不能触发对账重建/账户资金闸门
+  （2026-09-15 实测：残留 22 小时前的样本文件把回测基线从 335% 拉到 76%）。
+  **真值用途由 `truth_rebuild_mode` 控制**：`alert`（默认）= 只观测告警
+  （券商持仓是账户级、非策略级，共享账户下同一合约可能含其他策略仓位 —
+  实测 CZCE.TA 账户 112 vs 本策略 64，无法归属 → 不据此重建/收养，
+  差额发 `truth_mismatch`）；`rebuild` = 允许按真值重建/收养（仅独占账户）。
+  成交确认两者一致：用**下单窗口内账户持仓增量 == 本层手数**判定（对共享
+  账户免疫），未到位则 `ghost_fill`。
 - **S1+S2 双系统**：`system: "S1+S2"` 时两引擎各半 units 并行，净仓批量
   执行（当前配置均为单 S1）。
 
@@ -136,11 +155,20 @@ S1 盈利跳过保留在引擎内（与 sim 单推进深度耦合），可用
 
 - **目标仓位制**：`stra_set_position(目标净仓)`，执行单元
   （MiniImpactExecUnit）分批追单至目标（MA 曾 53 手分 50 分钟成交）。
-- **记账价**：confirm 时从 avgpx 增量反推（`_implied_fill`）；分批窗口
-  未闭合时 fallback 触发价，**待成交齐后自动用实际成交均价回写**
+- **记账价**：confirm 时直接记**决策价**（触发位/收盘价/tick 价）——
+  不再从框架 avgpx 反推（那是信号账面：`set_position` 即变、真实成交要等
+  下一个 tick 落地，反推得到"新信号仓 × 旧成交均价"的混合值，加仓场景
+  甚至等于加仓前旧均价，该口径 2026-09-15 已删除）；**待成交齐后自动回写
+  真实成交价**
   （`_reanchor_actual_fill`，偏差>0.5tick 才动，stop/add 武装位跟随）。
+  回写口径优先级：①**逐笔成交**（`generated/traders/<id>/trades.csv`，
+  按手数分配 → 每层各自精确，双系统/连续加仓都成立）；②净均价反推
+  （仅在"只有一层未知"时可解，多笔待回写时欠定 → 交聚合漂移修正）。
   回写期间监控显示的浮盈基于框架真实成本，引擎记账价收敛有最多一个
   评估窗口的延迟。
+- **待回写队列**：`_fill_pending` 按子系统分槽（P2）；同槽连续确认时
+  结转手数（同窗口内先确认的成交必须先被消费），故末层不会再取到
+  首笔成交价。
 - **换月 re-anchor**：HOT 切换导致 avgpx 整体漂移时，各层价格平移对齐
   （与 fill 回写协同：先精确修最后一层，换月检测不误报）。
 
@@ -166,6 +194,7 @@ S1 盈利跳过保留在引擎内（与 sim 单推进深度耦合），可用
 | 参数 | 默认 | 说明 |
 |---|---|---|
 | `entry_mode` | close | `trigger`=盘中触发（当前生产）；`close`=收盘确认 |
+| `stop_n_mode` | ratchet | 止损/加仓 N 口径：`ratchet`=只收紧不放宽（当前生产）；`entry`=冻结入场 N；`current`=当根 N（旧口径，A/B 用） |
 | `unit_var` | 200000 | 1 个交易单位的 VaR 预算（CNY，按 1N 口径） |
 | `atr_period` | 20 | N = ATR(20)，Wilder 平滑 |
 | `stop_atr_mult` | 2.0 | 止损 = 最后加仓价 ∓ 2N |
@@ -178,6 +207,9 @@ S1 盈利跳过保留在引擎内（与 sim 单推进深度耦合），可用
 | `recon_patience` | 3 | 对账连续失配 N 根后重建 |
 | `intrabar_period/cnt` | m5/300 | 盘中止损主K（配合 intrabar_stop） |
 | `journal_dir` | "" | K线旁路日志目录（空=关闭） |
+| `truth_json` | "" | 交易通道真值源路径（空=自动探测 `generated/traders/<id>/rtdata.json`；`off`=关闭） |
+| `truth_max_age` | 1800 | 真值时效阈值（秒）；生产 d1 部署用 86400（无成交不刷新但内容仍准） |
+| `truth_rebuild_mode` | alert | `alert`=只观测告警（共享账户默认）；`rebuild`=允许按真值重建/收养 |
 
 ### 3.2 instruments[] 段（每品种）
 
@@ -206,6 +238,14 @@ S1 盈利跳过保留在引擎内（与 sim 单推进深度耦合），可用
 | `max_units_per_group` | 2 | 2 | 相关性组单位数上限（0=不限） |
 | `max_units_total` | 4 | **6** | 全组合单位数上限（0=不限） |
 | `fallback_capital` | 500万 | 500万 | 权益基准/接口失效回退 |
+| `account_gate_mode` | warn | warn | 共享账户可用资金闸门（需真值源）：`off`=不检查 / `warn`=只告警 / `veto`=缩量优先、归零否决 |
+| `account_reserve_frac` | 0.20 | 0.20 | 保留的可用资金比例（安全垫） |
+
+> **在途风险口径（2026-09-16 修复）**：`RiskManager` 的在途敞口按**当前实际
+> 止损位**计（Σ (层价 − 止损位) × 方向 × 手数 × 乘数，净额下限 0），即
+> "全部持仓同时被止损"的真实最坏亏损。早期"每层 2N"口径在棘轮收紧止损后会
+> 虚高数倍（实测 52.7 万 vs 20.4 万）→ 组合预算被占满，所有加仓被
+> `total_risk(cap=0)` 否决。
 
 ### 3.4 config.yaml — riskmon 段（C++ 账户熔断）
 
@@ -238,6 +278,10 @@ riskmon:
 | 更多品种 | instruments 增加 + hots.json/contracts.json/commodities.json 配套 |
 | 关闭 S1 跳过 | `enable_s1_filter: false` |
 | 账户级熔断阈值 | config.yaml riskmon `inner_day_fd` |
+| 止损随波动率收紧/放宽 | `stop_n_mode`（ratchet 只收紧；current 会随 N 放大放宽） |
+| 关闭/指定真值源 | `truth_json`（`off` 或显式路径；仅用于排障，不建议生产关闭） |
+| 共享账户资金紧张 | `account_gate_mode`（warn→veto；`account_reserve_frac` 调安全垫） |
+| 执行单元卡死自愈 | 环境变量 `WT_EXEC_RECOVER=restart`（默认只告警；诊断见 DATA_OPS §9） |
 
 ---
 
@@ -246,7 +290,8 @@ riskmon:
 | 定时任务 | 时间 | 职责 |
 |---|---|---|
 | wt-turtle-contracts.timer | 周一~五 20:30 | contracts.json 全量更新（CTPLoader，过期合约剔除） |
-| wt-turtle-hots.timer | 周一~五 20:35 | hots.json 主力映射更新（新浪持仓量判定）；**有变更才写盘+重启 datakit/run.py**（WatchDog 拉起）并 webhook 告警 |
+| wt-turtle-hots.timer | 周一~五 20:35 | hots.json 主力映射更新（新浪持仓量判定，**tqsdk 兜底**：sina 不可达时自动切换 TQ_USER/TQ_PASS 查询）；**有变更才写盘+重启 datakit/run.py**（WatchDog 拉起）并 webhook 告警；双源失败推送 `hots_fail` |
+| wt-turtle-hotdaily.timer | 每日 20:40 | **主力连续日线续接**（`scripts/update_hot_daily.py`）：按 hots 映射把真实合约当日日线去重后并入 HOT csv 并重建 HOT DSB（否则策略 N/通道用陈旧窗口）；DSB 重建失败推送 `hotdaily_fail` |
 
 换月告警示例：`海龟主力换月 20260908: SHFE.rb: rb2701→rb2705, 已重启 2 进程`。
 
@@ -255,11 +300,23 @@ riskmon:
 | key | 触发 | 冷却 |
 |---|---|---|
 | veto_* | 风控否决/缩量、手数为 0（首见，同类去重） | 300s |
-| fill_timeout | 下单 10 分钟未达目标仓位（涨跌停/执行失败的代理信号） | 300s |
+| fill_timeout | 下单 10 分钟未达目标仓位（真值源不可用时走 fees 代理口径） | 300s |
+| ghost_fill | 真值源显示券商侧仓位未达目标（执行单元卡死/订单未到柜台） | 300s |
+| ghost_trim | ghost_fill 自愈动作：信号层已按券商实际持仓自动裁剪（只缩量） | 300s |
+| limit_lock | 疑似涨跌停锁死：价格钉住 >limit_lock_secs 且有未闭合成交窗口，加仓已暂停 | 300s |
+| truth_stale | 真值文件陈旧（>truth_max_age）→ 真值对账/资金闸门已停用 | 300s |
+| truth_mismatch | alert 模式：账户真值与框架仓差额（共享账户归属需人工确认） | 300s |
+| exec_recover / exec_recover_skip | `WT_EXEC_RECOVER=restart` 时自愈重启 / 本日已重启过需人工介入 | 300s |
 | reconcile | 引擎与券商持仓持续失配→重建 / 外部全平 | 300s |
 | session | 收盘持仓汇总 | 每日 |
 | hots_roll | 主力换月（update_hots.py） | 每次变更 |
+| hots_fail / hots_partial | 主力更新双源（sina+tqsdk）都失败 / 部分品种无持仓数据 | 每次 |
+| contracts_fail | contracts 定时同步失败（CTP 断连/超时/产出异常） | 每次 |
+| hotdaily_fail | HOT 日线续接 DSB 重建失败（16 天冻结事故同款检测点） | 每次 |
 | trigger_drop | 触发决策因 N 缺失被丢弃（不应发生，发生即 bug） | 300s |
 
 启用方式：turtle_config.yaml `notify.enabled: true` + 填入企业微信/钉钉
-webhook URL（`type: wechat|dingtalk`）。
+webhook URL（`type: wechat|dingtalk`）。⚠️ **生产必须启用**：
+2026-09-17 裸露持仓两天无人知晓的事故根因就是 `enabled=false` —
+所有 S 级检测都终止于本地 `Logs/alerts.log`。即使不启用 webhook，
+`_alert` 仍无条件追加 `Logs/alerts.log` 作为最后一道留痕。

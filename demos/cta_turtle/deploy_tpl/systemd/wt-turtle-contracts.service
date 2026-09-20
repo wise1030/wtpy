@@ -1,0 +1,9 @@
+[Unit]
+Description=cta_turtle daily contract info sync (CTPLoader)
+After=network.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=@PREFIX@
+ExecStart=@PREFIX@/venv/bin/python @PREFIX@/deploy/cta_turtle/scripts/update_contracts.py --common @PREFIX@/common --cred @PREFIX@/deploy/cta_turtle/tdtraders.yaml --timeout 240

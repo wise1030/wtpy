@@ -16,9 +16,44 @@ base:
   enable_s1_filter: true  # S1 盈利跳过过滤 (false=裸20/10突破)
   entry_mode: trigger     # close=收盘确认(旧口径) | trigger=盘中触发(方案C,
                           # 经典海龟原生: tick穿越通道即触发, 止损/加仓同理)
+  stop_n_mode: ratchet    # 止损/加仓步长的 N 口径 (P0-2):
+                          # ratchet=当根 N 但只收紧不放宽 (默认: 风险口径唯一
+                          #   自洽 — 记账 2N == 实际止损亏损; 12 品种
+                          #   2019-01~2026-08 实测 54.9%/回撤28.5%/sharpe0.32)
+                          # entry  =冻结入/加仓时点 N (纯经典, 同口径; 同窗
+                          #   49.9%/29.5%/0.29)
+                          # current=当根 N (2026-09-14 前行为, N 放大时止损被
+                          #   放宽 → 实际亏损可超记账 2 倍; 同窗 56.9%/27.3%/
+                          #   0.33 — 收益略高但风险记账失真, 仅 A/B/回退用)
   recon_patience: 3       # 运行时对账: 连续失配 N 根 bar 后按实际持仓重建
   journal_dir: ""         # K线旁路日志目录 (空=关闭; 生产建议 "./journals",
                           # 配合 WT_AUTO_REPAIR=1 宕机自愈, 见 docs/DATA_OPS.md)
+  truth_json: ""          # 交易通道真值源 (真实持仓/资金, P0-3; 空=自动探测
+                          # generated/traders/<tdtraders.id>/rtdata.json,
+                          # "off"=关闭, 其他=显式路径; 回测自动降级)
+  truth_max_age: 86400    # 真值时效阈值(秒): 超过视为陈旧 → 回退框架口径
+                          # (陈旧券商仓位不得触发对账重建/资金闸门)
+                          # 生产取值依据 (2026-09-15 远端实测): rtdata.json 只在
+                          # 登录/每笔成交/on_calculate 末尾刷新, d1 主K不闭合时
+                          # 无成交就长时间不更新 (实测 8 小时前的时间戳), 但
+                          # **内容仍是准的** — 持仓只随成交变化, 而每次成交后
+                          # trader 都会重新查询账户; 故 24h 用于区分"无成交"与
+                          # "刷新链路已死"。频繁刷新的部署可收紧到 1800。
+  truth_rebuild_mode: alert  # 真值用途 (2026-09-15 生产实测后定): alert=只观测
+                           #   告警 (券商持仓是**账户级**、非策略级 — 实测
+                           #   CZCE.TA 账户 112 vs 本策略 64, 共享账户下无法
+                           #   归属, 不得据此重建/收养); rebuild=允许按真值
+                           #   重建/收养 (仅当本策略独占该账户时使用)
+                           # 成交确认不受影响: 用"下单窗口内增量 == 本层手数"
+                           # 判定, 对共享账户免疫
+  ghost_auto_trim: true    # ghost_fill 自愈 (2026-09-17 CF 34 手幽灵仓事故):
+                           #   真值确认"订单未到柜台"后, 自动把信号层从尾部
+                           #   裁剪到与券商同向且不超过它的手数 (只缩量绝不
+                           #   放大, 共享账户免疫); false=只告警人工处置
+  limit_lock_secs: 120     # 涨跌停锁死检测 (秒, 0=关闭): tick 价钉住不动超
+                           #   过该时长且存在未闭合成交窗口 → 告警并暂停该
+                           #   品种加仓 (出场/止损不受影响, 有界实现见
+                           #   StraTurtle._detect_limit_lock)
 
 risk:                     # 组合级风险预算 (helpers/RiskManager, 下单前最后闸门)
   max_risk_per_mkt: 0.02  # 单品种本笔 2N 止损潜亏 <= equity×2%
@@ -30,9 +65,17 @@ risk:                     # 组合级风险预算 (helpers/RiskManager, 下单�
   fallback_capital: 5000000  # 动态权益无效时回退资金
 
 notify:                   # webhook 事件推送 (helpers/notifier.py)
-  enabled: false          # 启用后 reconcile/risk/session 事件推送到 urls
+  # ⚠️ 生产必须启用: 2026-09-17 裸露持仓两天无人知晓的事故根因就是
+  # enabled=false — 所有 S 级检测 (ghost_fill/truth_mismatch/exec 卡死/
+  # reconcile/定时器失败) 都终止于本地 alerts.log。填入企业微信/钉钉
+  # bot 地址后把 enabled 置 true 即接线; 未启用时 _alert 仍会无条件
+  # 落盘 <group>/Logs/alerts.log 作为最后一道留痕。
+  enabled: false          # 启用后 reconcile/risk/session/veto/ghost_fill/
+                          #   定时器失败等事件推送到 urls
   type: generic           # wechat(企业微信bot) | dingtalk(钉钉bot) | generic
   urls: []
+                          # 例: ["https://qyapi.weixin.qq.com/cgi-bin/webhook/
+                          #       send?key=你的bot key"]
   cooldown: 300           # 同事件 key 冷却秒数 (防刷屏)
 
 instruments:

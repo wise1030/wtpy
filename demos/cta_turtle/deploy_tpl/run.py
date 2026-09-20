@@ -82,6 +82,12 @@ def _preflight(cfg, csv_dir: str):
         storage = os.path.abspath(os.path.join(csv_dir, '..'))
         issues = DataChecker.check_config(cfg, common, storage,
                                           live=True)
+        # 时效断言 (P1-4): 2026-09 HOT 日线冻结 16 天而预检无感 —
+        # 按日历推导"数据应该到哪天", 滞后只告警 (可能早于 20:40 定时器)
+        try:
+            issues.extend(DataChecker.check_staleness(cfg, common, storage))
+        except Exception as e:
+            print(f"[turtle] staleness check skipped: {e}")
         n_err = 0
         for i in issues:
             if i.level == 'info':

@@ -39,8 +39,13 @@ def _build_notifier(cfg):
         return None
 
 
-def _preflight(cfg, mode: str = "warn"):
-    """启动前数据完整性门禁: hots键/K线健康/暖机深度 (+journal自动回补)"""
+def _preflight(cfg, mode: str = "warn", cfg_path: str = ""):
+    """启动前数据完整性门禁: hots键/K线健康/暖机深度 (+journal自动回补)
+
+    cfg_path: 实际生效的配置文件路径 (默认 config/turtle_config.yaml)。
+    回补子进程必须用同一个配置, 否则 --config 指定的非默认配置会被忽略
+    (P2 修复)。
+    """
     if mode not in ("warn", "strict"):
         return
     try:
@@ -55,7 +60,8 @@ def _preflight(cfg, mode: str = "warn"):
                 r = _sp.run([sys.executable,
                              os.path.join(HERE, "scripts",
                                           "prepare_data.py"),
-                             "--config", _cfg_path(), "--common", common,
+                             "--config", cfg_path or _cfg_path(),
+                             "--common", common,
                              "--storage", storage,
                              "--repair-journal", jdir],
                             capture_output=True, text=True, timeout=120)
@@ -96,7 +102,8 @@ def main():
 
     # === 数据完整性预检 (P1 运维) ===
     # WT_PREFLIGHT=off|warn|strict (默认 warn); strict 时 error 阻断启动
-    _preflight(cfg, mode=os.environ.get("WT_PREFLIGHT", "warn").lower())
+    _preflight(cfg, mode=os.environ.get("WT_PREFLIGHT", "warn").lower(),
+               cfg_path=args.config)
 
     engine = WtEngine(EngineType.ET_CTA)
     engine.init('../common/', "config.yaml")

@@ -1,0 +1,9 @@
+[Unit]
+Description=cta_turtle HOT daily bar timer (after hots update, before night open)
+
+[Timer]
+OnCalendar=Mon-Fri 20:40:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

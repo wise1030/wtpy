@@ -1,0 +1,42 @@
+name: cta_turtle CI
+
+on:
+  push:
+    paths:
+      - "demos/cta_turtle/**"
+      - ".github/workflows/cta_turtle.yml"
+  pull_request:
+    paths:
+      - "demos/cta_turtle/**"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: demos/cta_turtle
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.10", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy scipy pyyaml pandas
+          pip install ruff pytest-cov
+          # wtpy 运行时依赖 C++ 动态库, CI 仅做纯逻辑层校验:
+          # 引擎/指标/过滤器/风控/配置/组合合成均不 import wtpy;
+          # StraTurtle 相关测试在无 wtpy 环境自动跳过 (见 conftest)。
+      - name: Ruff lint
+        run: ruff check . --config ruff_cta_turtle.toml
+      - name: Pytest (pure-logic layer + coverage gate)
+        # 门槛 70% (helpers+filters+scripts 合计, 2026-09-20 实测 75%+):
+        # 防"新代码零测试"回归; 逐步抬升, 目标 helpers ≥85%
+        run: >-
+          python -m pytest tests/ -q
+          --cov=helpers --cov=filters --cov=scripts
+          --cov-report=term --cov-fail-under=70

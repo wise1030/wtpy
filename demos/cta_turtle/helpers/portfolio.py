@@ -50,6 +50,12 @@ def merge_curves(curves: dict, weights: dict = None):
         weights = {c: w for c in codes}
     else:
         tot = sum(weights.get(c, 0.0) for c in codes)
+        if tot <= 0:
+            # 静默清零是最危险的失败模式 (组合看起来"完全不赚钱"):
+            # 权重键与实际品种代码对不上时直接报错
+            raise ValueError(
+                f"weights 与品种代码不匹配 (无任何命中): weights="
+                f"{sorted(weights)} codes={sorted(codes)}")
         weights = {c: (weights.get(c, 0.0) / tot if tot > 0 else 0.0)
                    for c in codes}
 

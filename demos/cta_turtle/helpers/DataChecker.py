@@ -8,6 +8,7 @@
 设计约束: 本模块必须零崩溃 — DSB 解析走 WtDtHelper 并全程 try/except,
 不可用时降级为文件存在性检查 (历史上有 libWtDataStorage 段错误前科)。
 """
+import datetime as _dt
 import json
 import os
 
@@ -217,6 +218,79 @@ def check_depth(base_cfg, code: str, period: str,
             f"(bar_cnt/intrabar_cnt); 补数后再启动, 否则指标 NaN 空转")]
     return [DataIssue(
         code, "info", f"{period}: 深度 OK ({rows} >= {need})")]
+
+
+def load_holidays(common_dir: str) -> set:
+    """读取 holidays.json (CHINA 段, 'YYYYMMDD' 字符串集); 缺失/损坏 → 空集"""
+    try:
+        with open(os.path.join(common_dir, "holidays.json"),
+                  encoding="utf-8") as f:
+            d = json.load(f)
+        return {str(x) for x in d.get("CHINA", [])}
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return set()
+
+
+def expected_trade_date(today: int = None, holidays: set = None) -> int:
+    """预期数据基准日 (YYYYMMDD): **今天之前**的最近交易日。
+
+    口径: 当日 bar 只有在收盘/20:40 定时器后才落盘, 启动期断言
+    "数据 >= 今天" 在早盘必然误报 → 基准恒取严格早于今天的最近
+    交易日 (跳过周末与 holidays.json 节假日)。后果: 周五晚间
+    基准=周四, 数据到周五属"超前"不误报 — 判定只松不紧。
+
+    用途: 数据时效断言的基准 (2026-09-01→16 HOT 日线冻结 16 天,
+    存在性/深度/倒置检查全部无感 — 本断言按日历推导"数据应该到哪天")。
+    """
+    if today is None:
+        today = int(_dt.datetime.now().strftime("%Y%m%d"))
+    holidays = holidays or set()
+    d = _dt.datetime.strptime(str(today), "%Y%m%d") - _dt.timedelta(days=1)
+    for _ in range(20):            # 最长连休保护
+        key = d.strftime("%Y%m%d")
+        if d.weekday() < 5 and key not in holidays:
+            return int(key)
+        d -= _dt.timedelta(days=1)
+    return int(d.strftime("%Y%m%d"))
+
+
+def check_staleness(cfg, common_dir: str, storage_dir: str,
+                    today: int = None) -> list:
+    """数据时效检查 (P1-4): 最后 bar 日期早于"预期最近交易日" → warn。
+
+    warn 而非 error: 启动可能早于 20:40 hotdaily 定时器 (夜盘前窗口
+    属正常), 由 run.py 在日志中显式标出, 供运维判断是否干预。
+    """
+    issues = []
+    exp = expected_trade_date(today, load_holidays(common_dir))
+    for inst in cfg.instruments:
+        dsb = _dsb_path(inst.code, inst.period, storage_dir)
+        health = None
+        if dsb and os.path.exists(dsb):
+            health = _read_dsb_health(dsb)
+        if health is None:
+            for cand in _csv_candidates(
+                    inst.code, _PERIOD_SUFFIX.get(inst.period, ""),
+                    storage_dir):
+                if os.path.exists(cand):
+                    health = _read_csv_health(cand)
+                    break
+        if health is None or not health.get("last"):
+            continue                  # 存在性由 check_bars 负责
+        last = int(health["last"])
+        if last < exp:
+            lag = (_dt.datetime.strptime(str(exp), "%Y%m%d")
+                   - _dt.datetime.strptime(str(last), "%Y%m%d")).days
+            issues.append(DataIssue(
+                inst.code, "warn",
+                f"{inst.period} 数据滞后: 最后 bar={last}, 预期>={exp} "
+                f"(滞后 {lag} 交易日) — 检查 wt-turtle-hotdaily.timer "
+                f"与 scripts/update_hot_daily.py 运行记录; 策略将用陈旧 "
+                f"N/通道评估"))
+        else:
+            issues.append(DataIssue(
+                inst.code, "info", f"{inst.period}: 时效 OK (last={last})"))
+    return issues
 
 
 def check_config(cfg, common_dir: str, storage_dir: str,

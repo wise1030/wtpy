@@ -44,6 +44,8 @@ class BarJournal:
                 "open": float(row["open"]), "high": float(row["high"]),
                 "low": float(row["low"]), "close": float(row["close"]),
                 "volume": float(row.get("volume") or 0),
+                # P2: turnover 一并旁路 (原实现丢弃 → 回补后 money 列恒 0)
+                "turnover": float(row.get("turnover") or 0),
                 "open_interest": float(row.get("open_interest") or 0),
             }
         except (KeyError, TypeError, ValueError):
@@ -222,6 +224,7 @@ class BarJournal:
                     cells.append(self._fmt_time(int(r.get("time", 0))))
                 cells += [str(r["open"]), str(r["high"]), str(r["low"]),
                           str(r["close"]), str(r.get("volume", 0)),
-                          "0", str(r.get("open_interest", 0))]
+                          str(r.get("turnover", 0) or 0),
+                          str(r.get("open_interest", 0))]
                 f.write(",".join(cells) + "\n")
         return len(todo)

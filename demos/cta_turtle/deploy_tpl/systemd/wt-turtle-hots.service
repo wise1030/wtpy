@@ -1,0 +1,12 @@
+[Unit]
+Description=cta_turtle daily hot contract mapping update (sina OI, tqsdk fallback)
+After=network.target wt-turtle-contracts.service
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=@PREFIX@/deploy/cta_turtle
+# P1-7: tqsdk 兜底源凭据 (sina 不可达时启用; 不配则只有 sina 单源)
+Environment=TQ_USER=@TQ_USER@
+Environment=TQ_PASS=@TQ_PASS@
+ExecStart=@PREFIX@/venv/bin/python scripts/update_hots.py --common @PREFIX@/common --config config/turtle_config.yaml

@@ -60,7 +60,8 @@ class RiskManager:
     # ------------------------------------------------------------------
     def cap_entry(self, code: str, *, lots: int, n: float, volscale: float,
                   price: float, stop_mult: float, equity: float,
-                  group: str = "", share: float = 1.0) -> tuple:
+                  group: str = "", share: float = 1.0,
+                  avail: float = None) -> tuple:
         """对本次入场/加仓手数做缩量或否决。
 
         Args:
@@ -69,6 +70,12 @@ class RiskManager:
                 仅缩放"单品种风险预算"与"保证金预算"的权益基数,
                 使双系统公平共享品种额度而不互相挤占;
                 组合总敞口仍为全局口径。
+            avail: 券商口径**账户可用资金** (交易通道真值源提供, 共享
+                 账户下含其他策略占用)。按 account_gate_mode 处理:
+                 off 忽略 / warn 只记录原因 / veto 缩量优先、归零否决。
+                 与第 3 项的区别: 第 3 项用本策略记账估算保证金, 本项
+                 用券商真实可用资金 (已含其他策略占用), 是"资金耗尽"
+                 事故 (2026-09-09 p 追单 3357 次被拒) 的防线。
 
         Returns:
             (final_lots: int, reasons: list[str])
@@ -106,6 +113,19 @@ class RiskManager:
             reasons.append(f"total_risk(cap={tot_cap})")
         if mar_cap < lots:
             reasons.append(f"margin(cap={mar_cap})")
+
+        # 5. 账户可用资金闸门 (共享账户; 真值源可用时)
+        if avail is not None and self.cfg.account_gate_mode != "off" \
+                and per_lot_margin > 0:
+            base = max(0.0, float(avail))
+            reserve = base * self.cfg.account_reserve_frac
+            affordable = int(max(0.0, base - reserve) // per_lot_margin)
+            if affordable < final:
+                reasons.append(
+                    f"account_margin(avail={base:.0f},"
+                    f"reserve={reserve:.0f},affordable={affordable})")
+                if self.cfg.account_gate_mode == "veto":
+                    final = max(0, affordable)
 
         # 4. 市场单位限制 (只约束新开仓)
         if new_unit and lots > 0:
@@ -155,20 +175,28 @@ class RiskManager:
 
     def on_rebuilt(self, code: str, direction: int, lots: int,
                    price: float, n: float, volscale: float,
-                   stop_mult: float, group: str = ""):
-        """对账重建: 以实际持仓覆盖式重记账"""
+                   stop_mult: float, group: str = "", risk: float = None):
+        """对账重建: 以实际持仓覆盖式重记账。
+
+        risk: 显式 2N 潜亏记账值。多子系统持仓 (S1+S2) 或恢复的分层持仓
+        应按各层冻结 N 汇总后传入 — 缺省才用 lots×n×volscale×stop_mult,
+        否则账面风险会随当根 N 漂移 (B6)。
+        """
         self.on_closed(code)
         if lots > 0 and direction != 0:
             self.on_filled(code, direction, lots, price, n,
                            volscale, stop_mult, group)
+            if risk is not None:
+                self._book[code]["risk"] = float(risk)
 
     def sync_position(self, code: str, direction: int, lots: int,
                       price: float, n: float, volscale: float,
-                      stop_mult: float, group: str = ""):
+                      stop_mult: float, group: str = "",
+                      risk: float = None):
         """批量执行后按合并目标仓位同步账本 (S1+S2 双系统:
         两子系统共享同一 code 记账 — 单位限制/总敞口按市场口径)"""
         self.on_rebuilt(code, direction, lots, price, n,
-                        volscale, stop_mult, group)
+                        volscale, stop_mult, group, risk=risk)
 
     # ------------------------------------------------------------------
     # 观测

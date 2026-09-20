@@ -1,0 +1,9 @@
+[Unit]
+Description=cta_turtle hot mapping timer (daily after contract sync)
+
+[Timer]
+OnCalendar=Mon-Fri 20:35:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

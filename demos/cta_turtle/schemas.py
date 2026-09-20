@@ -34,6 +34,13 @@ class RiskConfig:
     max_units_per_group: int = 2       # 相关性组同时持仓单位数上限(0=不限)
     max_units_total: int = 4           # 全组合同时持仓单位数上限(0=不限)
     fallback_capital: float = 5000000.0
+    # 共享账户可用资金闸门 (P1, 需交易通道真值源):
+    # 9/9 实盘事故: 账户被多策略共用, 策略侧只能看到自己的权益,
+    # 资金耗尽后 p 追单 3357 次全被拒。真值源 rtdata.json 的 funds.available
+    # 是券商口径可用资金 → 下单前按本笔预估保证金做缩量/否决。
+    # off=不检查; warn=只告警不改变手数 (默认, 先观察); veto=缩量优先, 归零否决
+    account_gate_mode: str = "warn"
+    account_reserve_frac: float = 0.20  # 保留的可用资金比例 (安全垫)
 
     def validate(self):
         for name in ("max_risk_per_mkt", "max_total_risk_frac",
@@ -47,6 +54,12 @@ class RiskConfig:
             raise ValueError("risk.max_units_* 不能为负")
         if self.fallback_capital <= 0:
             raise ValueError("risk.fallback_capital 必须为正")
+        if self.account_gate_mode not in ("off", "warn", "veto"):
+            raise ValueError(
+                f"risk.account_gate_mode 非法 '{self.account_gate_mode}', "
+                "仅支持 off|warn|veto")
+        if not 0.0 <= self.account_reserve_frac < 1.0:
+            raise ValueError("risk.account_reserve_frac 需在 [0,1) 内")
 
 
 @dataclass
@@ -69,6 +82,53 @@ class TurtleBaseConfig:
     journal_dir: str = ""            # K线旁路日志目录 (空=关闭; 见 helpers/BarJournal)
     entry_mode: str = "close"        # close=收盘确认 | trigger=盘中触发(方案C,
                                      # 经典海龟原生; 回测经条件单按触发价成交)
+    stop_n_mode: str = "ratchet"     # 止损/加仓步长的 N 口径 (P0-2):
+                                     # ratchet=当根 N 但只收紧不放宽 (默认;
+                                     #   两次加仓之间止损单调向有利方向,
+                                     #   加仓时按新单位重锚)
+                                     # entry  =入/加仓时点冻结 N (纯经典口径,
+                                     #   与风控 2N 记账严格一致)
+                                     # current=当根 N (2026-09-14 前行为;
+                                     #   N 放大时止损被放宽, 实际止损亏损
+                                     #   可超风控记账 2 倍 — 仅供 A/B/回退)
+    truth_json: str = ""             # 交易通道真值源 (真实持仓/资金):
+                                     # 空=自动探测 generated/traders/<id>/
+                                     # rtdata.json; "off"=关闭; 其他=显式
+                                     # 路径 (回测/无部署环境自动降级)
+    truth_max_age: float = 1800.0    # 真值文件时效阈值(秒): 超过视为陈旧,
+                                     # 回退框架口径 (陈旧券商仓位不得触发
+                                     # 对账重建/资金闸门)
+    # 真值用途 (2026-09-15 生产实测后新增):
+    #   alert  = 只观测/告警 (默认)。券商持仓是**账户级、非策略级**,
+    #            共享账户下同一合约可能含其他策略仓位, 无法归属 → 不得
+    #            用它重建/收养我们自己的持仓 (实测 TA: 账户 112 vs 我们 64)
+    #   rebuild= 允许按真值对账重建/收养 (仅当本策略独占该账户时使用)
+    truth_rebuild_mode: str = "alert"
+    # ghost_fill 自愈 (2026-09-17 CF 34 手幽灵仓事故):
+    #   真值源确认"订单未到柜台"后, 自动把信号层从尾部裁剪到与券商
+    #   实际持仓同向且不超过它的手数 (只缩量绝不放大, 对共享账户
+    #   安全: 只丢弃本策略未确认的层, 不按券商绝对值建仓)。
+    #   True=自动裁剪+告警; False=只告警 (旧行为, 人工处置)
+    ghost_auto_trim: bool = True
+    # 涨跌停锁死检测 (秒, 0=关闭): tick 价格钉住不动超过该时长且
+    # 存在未闭合成交窗口时, 判定疑似锁死 → 告警并暂停该品种加仓
+    # (出场/止损不受影响; 入场仍允许但由 ghost_fill 自愈兜底)。
+    # 有界实现: 只依赖"价格钉住"单一信号, 无 tick 时不触发。
+    limit_lock_secs: int = 120
+
+
+@dataclass
+class SpeedConfig:
+    """instruments[].speeds[] 项: 一个"速度"(通道窗口组合, 2026-09-16)
+
+    多速度设计 (Man AHL & 文献): 每档速度 = 一个独立子系统, 各自通道窗口,
+    共享该品种的风险预算 (share 之和 = 1), 框架层净额化后一次下单。
+    """
+    name: str                        # 唯一标识 (日志/快照键)
+    entry: int                       # 入场通道窗口
+    exit: int                        # 出场通道窗口
+    share: float = 1.0               # 该速度占品种风险预算的份额
+    fs: int = 55                     # fail-safe 通道 (S1 过滤器强制入场)
 
 
 @dataclass
@@ -82,6 +142,8 @@ class InstrumentConfig:
     group: str = ""                  # 相关性组标签(如 black/cheme; 空=不参与组限)
     filters: list = field(default_factory=list)   # list[FilterConfig]
     intrabar_stop: bool = False      # 盘中止损 (主K切换为 base.intrabar_period)
+    speeds: list = field(default_factory=list)   # list[SpeedConfig];
+                                     # 非空时忽略 system, 按速度列表装配子系统
 
     def allows_direction(self, direction: int) -> bool:
         """direction: 1=多, -1=空"""

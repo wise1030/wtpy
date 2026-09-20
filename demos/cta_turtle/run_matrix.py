@@ -25,21 +25,55 @@ def stra_name(code: str) -> str:
 
 
 def parse_weights(s: str) -> dict:
-    """'rb:0.6,i:0.4' → {'SHFE.rb.HOT':0.6,...} 按代码后缀匹配"""
+    """'rb:0.6,i:0.4' → {'rb':0.6,'i':0.4}
+
+    返回值是**短名映射**, 需经 resolve_weights() 解析到实际 code
+    (旧实现直接把短名当 code 传给合并函数, 权重全部落空 → 组合被
+    静默清零, B1 2026-09-15 修复)。
+    """
     out = {}
     for part in s.split(","):
         part = part.strip()
-        if not part or ":" not in part:
+        if not part:
             continue
+        if ":" not in part:
+            raise ValueError(f"--weights 项应为 品种:权重, 收到 '{part}'")
         k, v = part.split(":", 1)
         try:
             out[k.strip()] = float(v)
         except ValueError:
-            pass
+            raise ValueError(f"--weights 权重非数值: '{part}'") from None
     return out
 
 
-def synthesize_portfolio(codes, args, out_dir) -> dict:
+def resolve_weights(codes, wmap: dict) -> dict:
+    """短名映射 → {完整 code: 权重}; 未命中/歧义直接报错 (fail-fast)。
+
+    匹配口径: 短名与 code 的品种段相等 (大小写不敏感), 例如
+    'rb' → 'SHFE.rb.HOT'; 也接受完整 code 直接给出。
+    """
+    if not wmap:
+        return {}
+    out = {}
+    for key, w in wmap.items():
+        if key in codes:
+            out[key] = w
+            continue
+        hit = [c for c in codes
+               if len(c.split(".")) >= 2
+               and c.split(".")[1].lower() == str(key).lower()]
+        if not hit:
+            raise ValueError(
+                f"--weights 键 '{key}' 未匹配任何品种 (可用: "
+                f"{sorted(c.split('.')[1] for c in codes)})")
+        if len(hit) > 1:
+            raise ValueError(
+                f"--weights 键 '{key}' 歧义, 命中 {hit}; 请用完整 code")
+        out[hit[0]] = w
+    return out
+
+
+def synthesize_portfolio(codes, args, out_dir, wmap: dict = None) -> dict:
     """组合层权益合成 + 贡献分解 (P1-4); 失败返回 {} 不阻断"""
     from helpers import portfolio as pf
     curves = {}
@@ -52,7 +86,8 @@ def synthesize_portfolio(codes, args, out_dir) -> dict:
             print(f"[matrix] WARN {c}: funds.csv 缺失/为空, 跳过合成")
     if not curves:
         return {}
-    wmap = parse_weights(args.weights)
+    if wmap is None:
+        wmap = resolve_weights(codes, parse_weights(args.weights))
     dates, port_pnl, aligned = pf.merge_curves(curves, wmap or None)
     metrics = pf.portfolio_metrics(dates, port_pnl, args.capital,
                                    rf=args.rf)
@@ -107,10 +142,13 @@ def collect(row_code: str) -> dict:
 
 
 def run_serial(codes, args):
+    """进程内串行 (快, 但复用 WtBtEngine 单例 — P2 提醒)"""
     from wtpy import WtBtEngine, EngineType
     from wtpy.apps import WtBtAnalyst
     from StraTurtle import StraTurtle
 
+    print("[matrix] serial 模式进程内复用 WtBtEngine 单例 (release_backtest "
+          "后状态不完全复位); 如结果异常请改用 --mode subprocess")
     for code in codes:
         print(f"[matrix] serial backtest {code}")
         m5_csv = os.path.join(HERE, "..", "storage", "csv",
@@ -165,6 +203,11 @@ def main():
 
     cfg = ConfigLoader.load(args.config)
     codes = [inst.code for inst in cfg.instruments]
+    # 权重先校验 (fail-fast): 旧实现在合成阶段才静默落空 →
+    # 权重键写错时组合曲线全 0, 看起来像"策略不赚钱" (B1)
+    wmap = resolve_weights(codes, parse_weights(args.weights))
+    if wmap:
+        print(f"[matrix] weights resolved: {wmap}")
 
     if args.mode == "serial":
         run_serial(codes, args)
@@ -186,7 +229,7 @@ def main():
 
     # 组合层权益合成与贡献分解 (P1-4): 单品种曲线等权/自定义权合并
     try:
-        synthesize_portfolio(codes, args, out_dir)
+        synthesize_portfolio(codes, args, out_dir, wmap)
     except Exception as e:
         print(f"[matrix] WARN portfolio synthesis failed: {e}")
 
