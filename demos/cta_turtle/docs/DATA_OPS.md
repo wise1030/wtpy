@@ -304,3 +304,46 @@ restart 模式的三道闸: ①真值源必须新鲜 (排除真值陈旧误判)�
 `WT_RECOVER_DIR` 改目录)；③仍存在 ghost 时改发 `exec_recover_skip`
 告警提示人工介入。**权衡**: 退出到重启完成之间持仓无保护 (通常数秒),
 故默认关闭; 若日志确认卡死频发再开启。
+
+## 10. 部署链事故与修复 (2026-09-20)
+
+### 10.1 rsync --delete 删除运行时数据事故 (P0 级, 当日恢复)
+
+**事故**: 代码部署用 `rsync -a --delete /tmp/deploy_new/cta_turtle/ $D/`
+同步——部署包内不含 `generated/`（运行时产物: stradata/userdata/
+traders/outputs），`--delete` 把线上**全部运行时数据**删了
+（12 策略持仓状态、券商真值 rtdata.json、逐笔成交游标、监控 outputs）。
+
+**恢复**: 部署前 1 分钟刚做过完整备份 (`~/wt_turtle_backup_*.tgz`)，
+`tar xzf` 只解出 `generated/` 子目录回灌，零数据损失。
+教训再次验证: **任何部署动作前先做备份** 这条纪律的价值。
+
+**根治**: make_deploy 生成的部署包是代码-only，往线上同步时
+`--delete` 会清掉包内没有的运行时目录。已固化的防线:
+1. 部署 SOP (本节): rsync 同步**必须**带 `--exclude generated/
+   --exclude Logs/ --exclude outputs/` 或用 tar 解包后逐目录合并;
+2. make_deploy 产物 = 代码包, manifest 校验只覆盖代码文件;
+3. systemd 托管下 WatchDog 会在进程消失后 ~12s 拉起——但进程内
+   存态不丢, 恢复文件必须在拉起后由新进程重写, 故"备份→修状态→
+   杀进程"三步要在一个会话内完成, 避免 WatchDog 拉起旧状态后又把
+   被修文件覆盖。
+
+### 10.2 部署验证与漂移检测
+
+make_deploy 现在生成 `deploy.manifest.json`（代码文件 sha256,
+凭据类只记名不记哈希），远端执行:
+```bash
+python3 make_deploy.py --verify /path/to/deploy/cta_turtle
+```
+即可发现线上漂移/被篡改。配合 systemd unit 入库
+(`deploy_tpl/systemd/`), 新机器重建有完整参照。
+
+### 10.3 幽灵仓处置动作化 (ghost_fill 自愈)
+
+2026-09-17 CF 34 手幽灵仓 (信号 99 vs 券商 65) 的处置从"只告警"
+升级为自动裁剪: `TurtleEngine.trim_to_lots()` 从尾部裁掉未确认层,
+`StraTurtle._maybe_ghost_trim()` 在 ghost_fill 时自动对齐到券商
+同向且不超过的手数 (只缩量/共享账户免疫, `ghost_auto_trim` 默认开)。
+当日手工修复走"备份 stradata/userdata → 裁 layers/signals 段 →
+杀进程由 WatchDog 拉起"路径, 重启后日志验证:
+`restored: dir=-1, layers=2` + `risk book restored: lots=65`。
