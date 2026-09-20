@@ -38,3 +38,5 @@ Strategy[*]_PnLAnalyzing_*.xlsx
 credentials.json
 .env
 .env.local
+*.coverage
+.coverage
