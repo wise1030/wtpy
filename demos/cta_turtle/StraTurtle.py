@@ -1136,6 +1136,9 @@ class StraTurtle(BaseCtaStrategy):
         self._detect_limit_lock(context, stdCode, float(px))
         self._periodic_truth_check(context)   # 定时真值对账 (独立于日评估)
         self._reanchor_actual_fill(context)   # 分批窗口闭合即回写均价
+        # P2-11 补充: fund_live.csv 只挂日评估路径时盘中无行 (2026-09-21
+        # 实测: 全天仅 IF catchup 写了一行); tick 路径节流 60s 增补
+        self._dump_fund_live(context)
         fired = False
         for sub in self._subs:
             decs = sub["engine"].on_price(float(px))
