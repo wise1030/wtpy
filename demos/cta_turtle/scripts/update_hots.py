@@ -197,4 +197,13 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    import traceback
+    try:
+        sys.exit(main())
+    except Exception:
+        tb = traceback.format_exc()
+        print(tb, file=sys.stderr)
+        try:
+            _notify("hots_fail", "主力映射更新脚本崩溃: " + tb[-400:])
+        finally:
+            sys.exit(1)

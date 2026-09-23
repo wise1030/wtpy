@@ -297,4 +297,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import traceback
+    try:
+        main()
+    except Exception:
+        tb = traceback.format_exc()
+        print(tb, file=sys.stderr)
+        try:
+            notify("hotdaily_fail", "HOT 日线续接脚本崩溃: " + tb[-400:])
+        finally:
+            sys.exit(1)

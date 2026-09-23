@@ -347,3 +347,42 @@ python3 make_deploy.py --verify /path/to/deploy/cta_turtle
 当日手工修复走"备份 stradata/userdata → 裁 layers/signals 段 →
 杀进程由 WatchDog 拉起"路径, 重启后日志验证:
 `restored: dir=-1, layers=2` + `risk book restored: lots=65`。
+
+## 11. 残余风险登记与关键不变量 (2026-09-23 复核存档)
+
+> 对 2026-09-21~23 三重根因修复 (AGENTS 同日条目) 的落地复核:
+> 三个根因与三项修复逐条源码对证全部成立。以下为**已知取舍与不变量**,
+> 后续代理改动成交确认 / 日评估 / 数据管道路径前必读。
+
+### 11.1 残余风险 (已知取舍, 非待修 bug)
+
+| 级别 | 风险 | 说明与防线 |
+|---|---|---|
+| P2 | 成交确认 2x 超时放行是条件性 fail-open | 真值陈旧 + 无逐笔成交 + 等待 2x (600s/1800s 档) 后按**决策价**确认 (`_fill_confirmed`)。若成交永不发生 (执行单元饿死/拒单), 幽灵层入账; 防线 = 600s 先告警 + 每日 20:40 重启复活真值后 `truth_mismatch` (alert 模式人工处置) + 执行单元向账本收敛 (9/22 CF -94 手实测会收敛)。`_fill_pending` 不入快照 → 窗口不能跨重启, "真值复活后 t0 缺失回落 fees" 的理论洞生产不可达 |
+| P3 | `_drop_stale_pending` 在日评估**无条件** clear 引擎 pending | 仅因 trigger 的 confirm 与决策在**同一 on_tick 内同步完成** (pending 不跨 tick) 才安全, 见 §11.2-1 |
+| P3 | catchup `n is None` 失败路径每 tick 全量重试无退避 | 仅病态数据 (窗口全 NaN) 触发, 性能/日志噪音, 不影响正确性 |
+| P3 | `_restart_runner` 的 `pgrep -f` 可匹配含同字符串的管理 shell | 恰在 20:40:03 并发执行同字符串命令才误伤, 概率可忽略; 服务上下文自身 argv 不含 pattern (2026-09-23 已验证) |
+
+### 11.2 关键不变量 (改动前必读)
+
+1. **trigger 决策的 confirm/reject 必须与决策产出在同一 on_tick 调用内
+   同步完成** — `_drop_stale_pending` (每次日评估调用) 与 on_init 孤儿
+   清理都**无条件** clear 引擎 pending; 若引入异步确认 (决策下 tick 才
+   confirm), 这两处会误杀在途决策 → 必须同步给 clear 加时效判断。
+2. **fees = 信号口径** (`CtaStraBaseCtx.cpp:1469`, do_set_position 内
+   累加) — 任何把 fees 当"真实成交代理"的新代码必须先过真值陈旧闸
+   (`_truth_stale_now()`), 否则复现 9/21 秒确认幽灵事故。
+3. **外部真值用于破坏性动作前必须过时效闸** (`ChannelTruth.stale()` /
+   `_truth_net` 对 stale 返回 None) — 陈旧真值曾把 cu 基线 335% 拉到 76%。
+4. **C++ WtDataReader 无失效 API** — 外部重建 his DSB 后必须重启交易
+   进程 (update_hot_daily 20:40 重启即此用途), 否则运行中进程永远读
+   旧缓存 (9/18 周五夜盘通道缺 bar 根因)。
+
+### 11.3 定时器崩溃路径告警补强 (2026-09-23)
+
+P1-4 的 `notify(*_fail)` 此前只覆盖脚本**内部**失败分支; 硬崩溃
+(未捕获异常 → 非零退出) 静默 (systemd unit 无 OnFailure=, main 无
+顶层 try)。已补: 三个定时脚本 (`update_hot_daily/update_hots/
+update_contracts`) `__main__` 顶层 try/except → stderr traceback
+(journald 持久留痕) + notify 同名 fail 事件 + sys.exit(1)。
+systemd unit 模板仍不加 OnFailure= (需配对失败单元, 脚本层已覆盖)。

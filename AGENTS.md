@@ -210,7 +210,11 @@ README 测试数/日期区间漂移；加仓阈值用当根 N 无平滑选项；
   **顺带发现（待办）**：共享账户真实资金可见（rtdata.json funds: balance 23.36M/
   available 4.37M/margin 18.29M，含其他策略持仓）→ 可用它做"账户可用资金"闸门，
   对齐 AGENTS P0-3「共享账户资金协议」
-- [x] **生产三日审计与执行链路修复（2026-09-08~10）**：①**RiskManager 旧版未部署事故**——远端 equity 口径停在 8/24 版（fd>0 时权益塌缩为净盈亏几万），sc/MA/cu/al 的 add 全部被 cap=0 误否决 3 次，9/10 凌晨部署修复版后放量恢复正常（al 37 手入场）；②**执行单元非确定性卡死确诊**——盘中新建 MiniImpactExecUnit 大概率 tick 断供（"No lastest tick data" 后永久静默，cu/al 卡死一天、MA 幽灵 add 4 手），启动早期（channel ready 事件前后）创建的单元正常；**框架信号仓全面屏蔽真实成交**（stra_get_position/avgpx/组合层 positions 全是信号口径，Trades 日志按交易日切分加剧误判）；③**F1 执行单元预热**——on_init 同值 set_position(tag="PreWarm") 强制预建 12 品种执行单元（diff=0 不下单，bt 跳过保持基线）；④**F2 幽灵仓位检测**——fees（stra_get_fund_data(3)，只随真实成交回报累积）作为真实成交代理：fill_pending 挂起时记 fees0，信号仓达标但 fees 未增 → 禁止假 avgpx 回写 + 600s 超时 ghost_fill 告警；⑤**F3 veto 全量入参**（equity/want/rpl/vs）；⑥**运维教训**：手工清状态必须同时清 stradata 的 signals 段（残留信号 57 重启后被消费导致 MA 计划外加仓 4 手@3465，已追认进引擎 layers）；MA 幽灵层曾把止损位抬高 345 点（3285 vs 正确 2940）。测试 257→260。**待办**：执行单元卡死根因（wtpy 0.9.9.3 libWtCore.so 与源码差异排查/升级）、共享账户资金协议（P0-3，9/9 上午资金耗尽 p 追单 3357 次拒单实锤）、p 记账价偏差 71.5 点校准
+- [x] **生产三日审计与执行链路修复（2026-09-08~10）**：①**RiskManager 旧版未部署事故**——远端 equity 口径停在 8/24 版（fd>0 时权益塌缩为净盈亏几万），sc/MA/cu/al 的 add 全部被 cap=0 误否决 3 次，9/10 凌晨部署修复版后放量恢复正常（al 37 手入场）；②**执行单元非确定性卡死确诊**——盘中新建 MiniImpactExecUnit 大概率 tick 断供（"No lastest tick data" 后永久静默，cu/al 卡死一天、MA 幽灵 add 4 手），启动早期（channel ready 事件前后）创建的单元正常；**框架信号仓全面屏蔽真实成交**（stra_get_position/avgpx/组合层 positions 全是信号口径，Trades 日志按交易日切分加剧误判）；③**F1 执行单元预热**——on_init 同值 set_position(tag="PreWarm") 强制预建 12 品种执行单元（diff=0 不下单，bt 跳过保持基线）；④**F2 幽灵仓位检测**——fees（stra_get_fund_data(3)）作为真实成交代理
+（**勘误 2026-09-23**：此处"只随真实成交回报累积"记错——9/15 源码复核
+证实 fees 在 do_set_position 信号落地时累加（CtaStraBaseCtx.cpp:1469），
+是**信号口径**；该错误口径正是 9/21 CF/p 秒确认幽灵事故的成因之一，
+证据链已由 4be7512 重构接管）：fill_pending 挂起时记 fees0，信号仓达标但 fees 未增 → 禁止假 avgpx 回写 + 600s 超时 ghost_fill 告警；⑤**F3 veto 全量入参**（equity/want/rpl/vs）；⑥**运维教训**：手工清状态必须同时清 stradata 的 signals 段（残留信号 57 重启后被消费导致 MA 计划外加仓 4 手@3465，已追认进引擎 layers）；MA 幽灵层曾把止损位抬高 345 点（3285 vs 正确 2940）。测试 257→260。**待办**：执行单元卡死根因（wtpy 0.9.9.3 libWtCore.so 与源码差异排查/升级）、共享账户资金协议（P0-3，9/9 上午资金耗尽 p 追单 3357 次拒单实锤）、p 记账价偏差 71.5 点校准
 
 ## 4. 开发约定（给后续代理）
 
@@ -219,7 +223,14 @@ README 测试数/日期区间漂移；加仓阈值用当根 N 无平滑选项；
 2. 引擎保持纯逻辑零框架依赖；框架交互只进 StraTurtle/filters 的 init 阶段；
 3. 过滤器禁止修改引擎状态，只能返回放行与否决原因；
 4. 所有新配置字段必须在 `schemas.py` 定义并在 `ConfigLoader.load` 校验（未知字段报错）；
-5. 回测口径变更（成交价/滑点/撮合时机）需同步更新 README「与经典海龟的偏离」小节。
+5. 回测口径变更（成交价/滑点/撮合时机）需同步更新 README「与经典海龟的偏离」小节；
+6. trigger 决策的 confirm/reject 必须与决策产出在**同一 on_tick 内同步完成**——
+   `_drop_stale_pending`（日评估）与 on_init 孤儿清理都**无条件** clear 引擎
+   pending，依赖"pending 不跨 tick"不变量；引入异步确认必须同步给这两处加
+   时效判断（详见 docs/DATA_OPS.md §11.2）；
+7. fees 是**信号口径**（`CtaStraBaseCtx.cpp:1469`，信号落地即计费）——任何
+   把 fees 当真实成交代理的新代码必须先过 `_truth_stale_now()` 陈旧闸，
+   否则复现 2026-09-21 秒确认幽灵事故。
 - [x] **实盘部署 + 真值用途收窄为 alert（2026-09-15/16 夜盘）**：把 P0/P1/P2 全部
   改动部署到 129.211.5.54（`deploy/cta_turtle/`，rsync 后逐文件 md5 + helpers 全目录
   清单哈希校验一致；备份 `~/wt_turtle_backup_20260915_2332.tgz`），重启 runDt/run.py
