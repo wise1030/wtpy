@@ -1128,8 +1128,12 @@ class StraTurtle(BaseCtaStrategy):
         # 未评估则立即评估武装 (每日至多检查一次)
         tdate = context.stra_get_tdate()
         if tdate and self._catchup_date != int(tdate):
-            self._catchup_date = int(tdate)
-            self._catchup_eval(context)
+            # 闸门的消费权在 _catchup_eval 内部: 只有"结论性"出口
+            # (已评估到最新/评估成功) 才落 _catchup_date; 数据未就绪
+            # 等暂时性失败不消费 → 下一 tick 自动重试 (2026-09-21 实测:
+            # 首 tick 09:00:00 读 bars 未就绪静默失败, 闸被消费后当日
+            # 不再自愈, 商品通道缺一根 bar)
+            self._catchup_eval(context, int(tdate))
         px = context.stra_get_price(stdCode)
         if px is None or px != px or px <= 0:
             return
@@ -1370,26 +1374,42 @@ class StraTurtle(BaseCtaStrategy):
                             "open": o, "high": h, "low": l, "close": c})
         self._post_calculate(context, closes, n, chan)
 
-    def _catchup_eval(self, context: CtaContext):
+    def _catchup_eval(self, context: CtaContext, tdate: int = None):
         """新交易日自愈评估 (仅实盘 trigger 日线): 用 his 数据
         (不含当日) 补做日线评估并武装。与 session_end 的 synth=None
-        兜底分支同口径; bt 不启用 (bt 日K闭合, on_bar 路径完整)。"""
+        兜底分支同口径; bt 不启用 (bt 日K闭合, on_bar 路径完整)。
+
+        tdate: 当前交易日 (由 on_tick 传入)。**闸门消费权在本方法**:
+        只有结论性出口 (已评估到最新 / 评估成功 / 模式性禁用) 才落
+        _catchup_date=tdate; 数据未就绪的暂时性失败不消费 → 下一
+        tick 重试。2026-09-21 实测: 11 个商品策略在 09:00:00 首 tick
+        读 bars 未就绪静默失败, 旧实现闸被消费 → 当日不再自愈,
+        通道缺一根 bar (session_end 15:15 正常触发才未酿成事故)。
+        """
         if self._base.entry_mode != "trigger" or self._inst.intrabar_stop:
+            if tdate is not None:
+                self._catchup_date = tdate      # 模式性禁用 → 结论性
             return
         if getattr(context, "is_backtest", False):
+            if tdate is not None:
+                self._catchup_date = tdate
             return
         code = self._inst.code
         p = self._base
         bars = context.stra_get_bars(code, self._inst.period, p.bar_cnt)
         need = self._need_bars()
-        # 本路径只用 his (不追加合成bar), 故要求完整 need 根
+        # 本路径只用 his (不追加合成bar), 故要求完整 need 根;
+        # 未就绪 → 不消费闸 (下一 tick 重试)
         if bars is None or len(bars) < need:
             return
         last_date = self._bar_last_date(bars)
         if last_date is None:
             return
         if self._d1_date is not None and int(self._d1_date) >= int(last_date):
-            return                        # his 末根已评估过
+            # his 末根已评估过 → 结论性, 消费闸 (避免每 tick 空转)
+            if tdate is not None:
+                self._catchup_date = tdate
+            return
         self._drop_stale_pending(context, f"catchup {last_date}")
         highs = np.asarray(bars.highs, dtype=float)
         lows = np.asarray(bars.lows, dtype=float)
@@ -1401,6 +1421,8 @@ class StraTurtle(BaseCtaStrategy):
         if n is None:
             return
         self._d1_date = int(last_date)
+        if tdate is not None:
+            self._catchup_date = tdate          # 评估成功 → 消费闸
         context.stra_log_text(
             f"{self.name()} catchup eval: his last={last_date} armed "
             f"(session_end 缺失/盘后启动自愈)")
@@ -1908,14 +1930,23 @@ class StraTurtle(BaseCtaStrategy):
                         target: int) -> tuple:
         """真实成交是否已到位 → (confirmed, src, pos)。
 
-        src: "truth" = 交易通道真值(增量)判定; "framework" = 框架信号口径。
+        src: "truth" = 交易通道真值(增量)判定; "trades" = 逐笔成交
+        (trades.csv 只随真实成交回报增长, 与信号口径无关的真实证据);
+        "framework" = 框架信号口径 (fees 代理)。
 
         口径 (2026-09-15 修订为**增量**): 账户持仓含其他策略同合约仓位,
         绝对值无法归属 (实测 CZTA 账户 112/本策略 64)。故只看**本次下单
         窗口内的增量**: 登记时刻记 truth0, 之后要求 (now - truth0) 与
         本层手数同号且足额。这样即使账户已有别家仓位也不误判。
-        真值不可用时退回 fees 代理 (fees 不增视为未成交), 超过 2× 时限
-        放行, 避免免费品种永久阻塞记账价回写。
+
+        证据链 (2026-09-22 修订, CF 47+47/p 29 手幽灵事故):
+        1. 真值增量 (最强, 需 truth0 基线 + 真值新鲜);
+        2. 逐笔成交 journal (次强, 独立于真值 — 真值链路 2026-09-17
+           起因 CTP 重连查询错误永久卡死, 此证据救活确认);
+        3. fees 代理 (最弱, **信号口径**: 信号落地即计费 → fail-open
+           会把未成交瞬间误确认! 仅当真值源未配置/文件缺失时采信;
+           真值已配置但陈旧时视为未验证 → 保持窗口 → 600s fill_timeout
+           告警 → 2x 超时放行, 避免免费品种永久阻塞)。
         """
         pos = float(context.stra_get_position(code))
         engine = fp.get("engine")
@@ -1931,27 +1962,51 @@ class StraTurtle(BaseCtaStrategy):
                 if delta * sign >= lots:
                     return True, "truth", now
                 return False, "truth", now      # 增量未到位 (或未成交)
-            # 真值中途失效 → 落 fees 代理
+            # 真值中途失效 → 落逐笔成交/fees 代理
         if int(round(pos)) != target:
             return False, "framework", pos
-        pos_src = "framework"       # 真值不可用 → fees 兜底口径
+        pos_src = "framework"       # 真值不可用 → 逐笔/fees 兜底口径
+        # === 证据 2: 逐笔成交 (真实成交回报, 独立于真值链路) ===
+        j = self._trade_journal_source()
+        if j is not None and lots > 0 and fp.get("cursor") is not None:
+            actual = j.layer_price(code, fp.get("cursor"), lots,
+                                   float(fp.get("skip") or 0.0))
+            if actual is not None:
+                return True, "trades", pos
+        # === 证据 3: fees 代理 (真值缺失/未配置时才可信) ===
         fees0 = fp.get("fees0")
         if fees0 is None:
             return True, pos_src, pos
         fees = self._get_fees(context)
-        if fees is None or fees > fees0:
+        fees_increased = fees is None or fees > fees0
+        if fees_increased and not self._truth_stale_now():
             return True, pos_src, pos
+        # 以下两种情况都落入超时窗口 (600s 告警 / 2x 放行):
+        # a) fees 未增 (免费/未配置费率品种, 旧行为);
+        # b) fees 增但真值陈旧 — fees 是信号口径 (信号落地即计费),
+        #    fail-open 会把未成交瞬间误确认 (2026-09-21 CF 47+47/
+        #    p 29 手幽灵根因) → 视为未验证, 保持窗口等待真值恢复/
+        #    真实成交落 journal, 超时后放行 (记账价保持决策价)
         waited = time.time() - fp.get("ts", 0)
         limit = 600 if fees0 > 0 else 1800
         if waited > limit * 2:
             if not fp.get("unblocked"):
                 fp["unblocked"] = True
                 context.stra_log_text(
-                    f"{self.name()} fees unchanged {waited:.0f}s "
-                    f"(fees0={fees0:.2f}) — 按免费/未配置费率品种放行 "
-                    f"avgpx 回写 (真值源不可用)", level=3)
+                    f"{self.name()} fills unverified {waited:.0f}s "
+                    f"(truth stale & 无逐笔成交) — 超时放行, "
+                    f"记账价保持决策价", level=3)
             return True, pos_src, pos
         return False, pos_src, pos
+
+    def _truth_stale_now(self) -> bool:
+        """真值源已配置且文件存在但已陈旧 (fees 代理不可信的判据)。
+
+        真值未配置 ("off") 或文件缺失 → False (环境无真值, fees 是
+        唯一代理, 维持旧行为); 已配置但超时 → True。
+        """
+        t = self._truth_source()
+        return t is not None and t.stale()
 
     def _maybe_ghost_trim(self, context, key: str, fp: dict,
                           broker_net: float):

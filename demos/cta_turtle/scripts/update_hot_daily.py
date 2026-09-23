@@ -229,7 +229,44 @@ def update(codes: list, common_dir: str, storage_dir: str,
               f"(csv 末日 {pd}, 新合约首日 {nd})")
     print(f"[hot_daily] 合计增量 {total} 根, 覆盖 {len(codes)} 个品种"
           + (" (dry-run)" if dry_run else ""))
+    # P0 (2026-09-22): 重建后必须重启交易进程 — C++ WtDataReader 按
+    # (code, period) 缓存 his 块, 进程不重启永远看不到新 DSB。实测后果:
+    # ①周五 20:40 重建后, 周五夜盘 catchup 读到的 his 末根仍是周四
+    # (静默跳过) → 商品通道缺一根 bar; ②进程长期运行时指标窗口逐步
+    # 陈旧 (N 漂移); ③每日重启顺带重置执行单元 (已知卡死 bug 的日线
+    # 级自愈) + 重登 CTP (重活 rtdata 账户查询链 — 真值源唯一的
+    # 复活手段)。仅在有增量时重启 (周末空跑不打扰); 环境变量
+    # WT_HOTDAILY_RESTART=0 可关闭。WatchDog span=10s 自动拉起。
+    if not dry_run and total > 0 and \
+            os.environ.get("WT_HOTDAILY_RESTART", "1") != "0":
+        _restart_runner()
     return added
+
+
+def _restart_runner():
+    """kill 交易进程 (run.py), 由 WatchDog 拉起 — 读到新重建的 DSB。
+
+    时点 20:40 在收盘评估 (15:15) 之后、夜盘 (21:00) 之前, 策略状态
+    已随快照持久化, 重启零信息损失 (与 update_hots 的重启同款模式)。"""
+    import signal
+    import subprocess
+    killed = []
+    for pat in ("venv/bin/python run.py",):
+        try:
+            out = subprocess.run(["pgrep", "-f", pat],
+                                 capture_output=True, text=True,
+                                 timeout=10).stdout.split()
+            for pid in out:
+                os.kill(int(pid), signal.SIGTERM)
+                killed.append(f"{pat}(pid={pid})")
+        except Exception as e:
+            print(f"[hot_daily] restart {pat} failed: {e}", file=sys.stderr)
+    if killed:
+        print(f"[hot_daily] 已重启交易进程: {', '.join(killed)} "
+              f"(WatchDog 自动拉起, 读取新 DSB + 重登 CTP 刷新真值链)")
+        notify("hotdaily_restart",
+               f"HOT 日线已续接并重启交易进程 (读新 DSB/重置执行单元/"
+               f"重登 CTP): {', '.join(killed)}")
 
 
 def main():
