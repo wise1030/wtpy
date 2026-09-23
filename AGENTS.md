@@ -316,3 +316,41 @@ README 测试数/日期区间漂移；加仓阈值用当根 N 无平滑选项；
   install_units.sh 渲染安装，@PREFIX@/@MON_TOKEN@ 占位）；⑨**P2-12 CI
   强化**：pytest-cov 门槛 70%（helpers+filters+scripts）、ConfigLoader
   覆盖率 70%→90%（22 条例校验分支正反测试）。测试 326→**375**。
+- [x] **生产三日审计: 真值链死亡/幽灵仓/评估闸门三重根因修复（2026-09-21~23）**：
+  对 9/21 周一盘中"商品策略零活动"的追查推翻了初始假设（tick 断流），源码级
+  定位出三个叠加的真实根因并全部修复（commit 92fef8d/4be7512）：
+  ①**P0 真值链永久死亡 + fees 代理 fail-open 误确认**——`rtdata.json` 只在
+  `TraderAdapter::onRspAccount`（账户查询响应）时写入；CTP 每日 07:0x 例行
+  断线(4097)重连后初始化查询链遇"查询未初始化"错误(错误90) → 状态机卡死在
+  `AS_ALLREADY` 之下 → `queryFund()` 永久 no-op → 真值自 9/17 起冻结。叠加
+  **fees 代理是信号口径**（`CtaStraBaseCtx` 信号落地即计费）→ `_fill_confirmed`
+  的 fees fail-open 把未成交**瞬间误确认**：9/21 20:59 CF 加仓 47+47 手、
+  p 入场 29 手全部未达柜台且**零告警**（truth_mismatch 因真值陈旧也不触发）。
+  修复：`_fill_confirmed` 证据链重构为 **真值增量 > 逐笔成交 journal（trades.csv
+  只随真实成交回报增长，独立于真值链路）> fees 代理**，且真值已配置但陈旧时
+  fees 增长视为未验证（600s fill_timeout 告警 / 2x 超时放行，决策价兜底）。
+  ②**P1 catchup 每日闸被首 tick 数据竞态消费**——`on_tick` 原先在调用
+  `_catchup_eval` **之前**就落 `_catchup_date`：9/21 09:00:00 整 11 个商品策略
+  首 tick 读 bars 未就绪（bars<need 静默 return），闸已消费 → 当日不再自愈；
+  IF 因首 tick 在 09:29（reader 就绪）侥幸成功。修复：闸门消费权内移到
+  `_catchup_eval` 内部，只有结论性出口（已是最新/评估成功/模式禁用）才落闸，
+  暂时性失败下一 tick 自动重试。
+  ③**P1 WtDataReader 缓存使 hotdaily 重建不可见**——C++ reader 按
+  (code,period) 缓存 his 块、无失效 API：9/18(五) 20:40 重建的 DSB 对运行中
+  进程不可见 → 周五夜盘 catchup 静默跳过（his 末根冻结在周四）→ 商品通道缺
+  一根 bar。修复：`update_hot_daily.py` 重建且增量>0 后 kill run.py
+  （`WT_HOTDAILY_RESTART=0` 可关）——每日 20:40 重启一石三鸟：reader 刷新、
+  执行单元重置（已知卡死 bug 的日线级自愈）、CTP 重登复活真值查询链。
+  ④**谜之老合约执行单元破案（无需修复）**——9/21 09:01:20 创建的
+  sc.2610/MA.1610/al.2610/IF.2609 四个单元来自 `WtCtaEngine::on_schedule`
+  （每根分钟线收盘）枚举组合持仓簿时对**残留的过期合约代码**提交目标 0
+  （源码注释原话承认"组合持仓里会有过期的合约代码存在"），`getUnit`
+  自动建单元、diff=0 无订单、过期合约永无 tick 自然饿死——设计上无害。
+  **教训**：①真值/证据的降级路径必须与降级原因匹配——fees fail-open 只在
+  "环境无真值"时成立，"真值已配置但链路死亡"时它从兜底变成谎言；
+  ②一次性闸门（once-per-day）不得在暂时性失败路径上消费；③外部数据重建
+  后必须考虑读取方缓存（C++ reader 无失效 API 就用进程重启）。
+  **后续验证**：9/22 20:35 hots 换月重启后新单元按柜台同步内部仓位，周一
+  挂起的 CF -94/p -29 在途增量**自然收敛**（truth_mismatch 告警链 -93→
+  -140→-159 完整记录成交到达）；9/23 早 rtdata 恢复分钟级刷新；修正后的
+  确认链与 catchup 重试闸当晚 20:40 重启后生效。测试 375→**383**。
