@@ -1,7 +1,7 @@
 # cta_turtle 使用指南：监控页面 · 策略逻辑 · 配置参数
 
 > 适用版本：2026-09 生产部署（12 品种 / trigger 模式 / datakit 双进程拓扑）。
-> 相关文档：`DEPLOY.md`（部署）、`DATA_OPS.md`（数据运维）、根 `README.md`（回测）。
+> 相关文档：`DEPLOY.md`（部署）、`DATA_OPS.md`（数据运维）、`OPS_MANUAL.md`（配置与运维手册）、根 `README.md`（策略全貌）。
 
 ---
 
@@ -313,6 +313,7 @@ riskmon:
 | hots_fail / hots_partial | 主力更新双源（sina+tqsdk）都失败 / 部分品种无持仓数据 | 每次 |
 | contracts_fail | contracts 定时同步失败（CTP 断连/超时/产出异常） | 每次 |
 | hotdaily_fail | HOT 日线续接 DSB 重建失败（16 天冻结事故同款检测点） | 每次 |
+| hotdaily_restart | HOT 日线续接完成并已重启交易进程（每日 20:40 正常留痕，异常即未重启） | 每次 |
 | trigger_drop | 触发决策因 N 缺失被丢弃（不应发生，发生即 bug） | 300s |
 
 启用方式：turtle_config.yaml `notify.enabled: true` + 填入企业微信/钉钉

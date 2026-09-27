@@ -6,6 +6,26 @@
 相关性组单位限制）、**双系统 S1+S2 并行**（各半 units 共享品种预算）、经典加仓金字塔、
 m5 盘中止损与 walk-forward 滚动寻优。
 
+## 系统架构
+
+```
+TurtleEngine (纯逻辑零依赖)   信号状态机: 武装-触发/加仓金字塔/S1过滤+fail-safe/2N止损
+     ▲
+StraTurtle (框架壳)           生命周期/图表/执行/持久化/对账/盘中止损/武装-触发接线
+     │
+├─ filters/                   可插拔信号过滤链 (方向闸/ADX/波动率带/流动性, 只读不改引擎)
+├─ helpers/RiskManager        下单前最后闸门: 单品种/组合预算+相关性组+保证金+共享账户资金闸
+├─ helpers/LiveTruth          交易通道真值 (rtdata.json 真实持仓/资金 + trades.csv 逐笔成交)
+├─ helpers/PositionSizer      VaR 反算手数
+├─ helpers/BarJournal         K线旁路日志 (宕机窗口幂等回补 storage/csv)
+└─ helpers/DataChecker        数据预检 (hots键/数据健康/暖机深度/时效断言)
+```
+
+运行时三层防御：**python RiskManager**（缩量优先）→ **真值链检测**（ghost_fill/
+对账/mismatch）→ **C++ SimpleRiskMon**（账户级回撤熔断）。实盘 tick 驱动触发，
+状态随触发事件落快照，重启逐字节恢复；每日 20:40 hotdaily 重建 HOT 日线 DSB
+并重启交易进程（reader 缓存无失效 API），顺带重置执行单元 + 复活真值查询链。
+
 ## 策略逻辑
 
 | 组件 | 规则 |
@@ -192,12 +212,13 @@ instruments:
 ## 测试
 
 ```bash
-python3 -m pytest tests/ -q    # 326 passed
+python3 -m pytest tests/ -q    # 383 passed (38 个测试文件)
 ruff check . --config ruff_cta_turtle.toml    # lint
 ```
 
 CI (`.github/workflows/cta_turtle.yml`)：无 C++ 动态库环境自动注入 wtpy 桩，
-纯逻辑层全量执行、运行时级测试（monitor db）自动跳过。
+纯逻辑层全量执行、运行时级测试（monitor db）自动跳过；pytest-cov 门槛 70%
+（helpers+filters+scripts）。
 
 覆盖：ATR/Donchian/ADX 等价性（对照朴素循环）、S1/S2 入场出场边沿、2N 止损、
 加仓层数/步长、S1 盈利跳过/fail-safe/sim 单推进、过滤链（方向闸/ADX/波动率带/
@@ -218,32 +239,52 @@ S1 过滤器**（两段式第一阶段）、**双系统 re-anchor/账本口径**
 journal turnover 旁路、`--weights` 之外的矩阵串行模式提醒、**陈旧真值闸门**
 （过期 rtdata.json 不得触发对账重建/资金闸门；实测污染回测基线 335%→76%）。
 
+## 文档索引
+
+| 文档 | 内容 |
+|---|---|
+| `docs/GUIDE.md` | 使用指南：监控页面/策略业务逻辑/全配置参数/告警清单 |
+| `docs/OPS_MANUAL.md` | **策略配置与运维手册**：配置管理 SOP/巡检/告警处置/应急/变更清单 |
+| `docs/DATA_OPS.md` | 历史K线运维体系 + 事故档案(§10) + 残余风险与不变量(§11) |
+| `docs/DEPLOY.md` | 生产部署手册 (WatchDog + WtMonSvr 双进程拓扑) |
+
 ## 文件结构
 
 ```
-StraTurtle.py            # 策略壳: 生命周期/图表/执行/持久化/对账/盘中止损 (框架对接层)
+StraTurtle.py            # 策略壳: 生命周期/图表/执行/持久化/对账/盘中止损/武装触发
 filters/
   base.py                # SignalFilterBase 协议 + FilterContext + 注册表
   builtins.py            # DirectionGate/AdxTrend/VolatilityBand/LiquidityFloor
-docs/
-  DEPLOY.md              # 生产部署手册 (WatchDog + WtMonSvr)
-  DATA_OPS.md            # 历史K线运维: 初始化加载/宕机重启/完整性保障
 helpers/
   indicators.py          # Wilder ATR/ADX (lfilter) + Donchian (sliding_window_view)
   TurtleEngine.py        # 信号状态机 (纯逻辑, 无框架依赖)
   PositionSizer.py       # VaR 反算
-  RiskManager.py         # 组合风险预算闸门 + 在途持仓记账 (支持子系统份额)
+  RiskManager.py         # 组合风险预算闸门 + 在途持仓记账 (支持子系统份额/账户资金闸)
+  LiveTruth.py           # 交易通道真值 (rtdata.json 持仓/资金 + trades.csv 逐笔成交)
   BarJournal.py          # K线旁路日志 (宕机窗口兜底, journal→csv 幂等回补)
   notifier.py            # webhook 推送 (企业微信/钉钉/通用, 冷却去重)
   DataChecker.py         # 数据可用性预检 (零崩溃降级)
   portfolio.py           # 组合权益合成/指标/贡献分解 (纯函数)
-  ConfigLoader.py        # yaml 加载校验 (base/risk/instruments+filters)
-schemas.py               # 配置 dataclass (含 RiskConfig/FilterConfig/NotifyConfig)
+  ConfigLoader.py        # yaml 加载校验 (base/risk/instruments+filters, 未知键拒绝)
+schemas.py               # 配置 dataclass (唯一权威定义)
 runBT.py / run_matrix.py / runLive.py / run_slippage_sens.py / run_walkforward.py
-scripts/prepare_data.py     # 数据一键预检管道 (--fix-hots)
-scripts/fetch_data_tqsdk.py # TqSdk 数据适配器 (K线→storage/csv; --fix-hots 写真实主力码)
-scripts/wf_report.py        # walk-forward HTML 面板 (汇总/参数稳定性/热力图/窗明细)
+runMonSvr.py             # 监控服务 (WtMonSvr + 内置 WatchDog, token 鉴权)
+scripts/
+  prepare_data.py        # 数据一键预检管道 (--fix-hots / --repair-journal)
+  fetch_data_sina.py     # 新浪主力连续日线拉取 (幂等合并进 storage/csv)
+  fetch_data_tqsdk.py    # TqSdk 数据适配器 (分钟/日线, --fix-hots)
+  update_contracts.py    # 合约信息每日更新 (CTPLoader 子进程隔离, 过期剔除)
+  update_hots.py         # hots.json 主力映射每日更新 (sina 持仓量, tqsdk 兜底)
+  update_hot_daily.py    # HOT 日线每日续接 (真实合约→主力连续, 重建后重启交易进程)
+  convert_csv_to_dsb.py  # csv → DSB (当日分区过滤, WtDataLoader 绕行方案之一)
+  pick_hot_sina.py       # 主力判定纯逻辑 (update_hots 复用)
+  wf_report.py           # walk-forward HTML 分析面板
+  slippage_report.py     # 滑点敏感性报告
+  timer_notify.py        # 定时器失败告警共享 helper
+  init_monitor_db.py     # 监控库初始化 (双进程调度)
+  ctp_loader/            # CTPLoader 配置 (map_future.ini session 覆盖)
+deploy_tpl/              # 生产部署模板 (run.py/runDt.py/dtcfg/解析器/systemd units)
 configbt.yaml            # 回测引擎配置
 config.yaml + tdparsers/tdtraders/executers/actpolicy/filters/logcfg  # 实盘模板
-tests/                   # 220 个单测
+tests/                   # 38 个测试文件 / 383 例
 ```
