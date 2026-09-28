@@ -371,3 +371,15 @@ README 测试数/日期区间漂移；加仓阈值用当根 N 无平滑选项；
   防御、文档索引；修正过时数据：测试 326→383、"220 单测"→38 文件、
   文件结构补 6 个新脚本与 LiveTruth.py）；`GUIDE.md` 告警表补
   `hotdaily_restart`。配置权威源=schemas.py 口径已在手册固化。
+- [x] **周一晨柜台连接失败事故处置 + 盘前定时重启（2026-09-28）**：
+  ①**事故**：中秋休市(09-25)~周末后周一 08:41，交易通道早晨重连撞上 SimNow
+  交易前置启动窗口（"用户未初始化"→"前置不活跃"），自动重试两次放弃 → 通道
+  永久挂起，人工 08:50:58 重启后 08:51:10 登录成功，开盘前恢复零交易影响；
+  **根治**：新增 `wt-turtle-premarket.timer`（Mon-Fri 08:47 pkill run.py，
+  WatchDog 拉起重登，pkill 用锚定正则防 self-match），入库 deploy_tpl +
+  install_units；②**监控"获取不到日志"排查为误报**：链路全程健康（WS 7 接入、
+  IPC 08:50:58 已重订阅），空白系 08:51:14→09:00 开盘前无 tick 的策略日志
+  静默窗；③**附带修复**：`CFFEX.IF.HOT_m5.csv`/`SSE.ETF.510300_m5.csv` 为
+  2 月遗留 MetaTrader 格式头（`<Date>`），每次启动 IF m5 预载 KeyError
+  （走 stderr 故 Runner 日志不可见，09-22 起 4 次）；IF m5 实际走 DSB/rt
+  正常路径（09-23 synth=yes 实证），坏文件移 .bak 根治噪音。

@@ -154,6 +154,7 @@ tar czf ~/bak/wt_turtle_$(date +%Y%m%d_%H%M).tgz \
 | datakit | 全市场 tick 订阅 → min1/min5/d1 合成 | 僵尸合约已由 contracts 每日剔除根治 |
 | Logs | ~80M 累计，日增 ~5M | 暂无 logrotate，磁盘 47% 健康 |
 | 20:40 重启全程 | hotdaily 3s + WatchDog 拉起 ~9s | 重启窗口内无行情（15:00 收盘后），零交易影响 |
+| 08:47 盘前重启 | pkill 1s + 拉起 ~9s + 登录 ~5s | 距 09:00 开盘余 ~10 分钟；快照恢复武装位，开盘即用 |
 
 ---
 

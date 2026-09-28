@@ -20,6 +20,6 @@ for f in "$DIR"/*.service "$DIR"/*.timer; do
 done
 systemctl daemon-reload
 systemctl enable wt-turtle-monitor.service wt-turtle-contracts.timer \
-    wt-turtle-hots.timer wt-turtle-hotdaily.timer
+    wt-turtle-hots.timer wt-turtle-hotdaily.timer wt-turtle-premarket.timer
 echo "enabled. 启动: systemctl start wt-turtle-monitor.service"
 echo "注意: 重启 monitor 会级联重启 datakit+交易进程 (同 cgroup), 避免盘中操作"

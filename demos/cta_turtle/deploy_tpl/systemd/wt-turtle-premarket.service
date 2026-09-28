@@ -1,0 +1,12 @@
+[Unit]
+Description=cta_turtle pre-market restart of trading process (fresh CTP login after front warmup)
+# 背景 (2026-09-28 事故): SimNow 交易前置每日/长假后启动窗口 (~08:30-08:50) 晚于
+# 策略进程的早晨重连 — 08:41 自动重连撞 "用户未初始化"/"前置不活跃", 重试两次
+# 放弃后交易通道永久挂起, 需人工重启。盘前 08:47 定时重启 (WatchDog span=10s
+# 拉起, ~08:48 恢复), 距 09:00 开盘留够登录+快照恢复时间。
+
+[Service]
+Type=oneshot
+User=ubuntu
+# 锚定正则 ^...$: 匹配 run.py 进程自身但不含本 sh 的命令行 (pgrep -f 非锚定会自匹配)
+ExecStart=/bin/sh -c "pkill -f '^@PREFIX@/venv/bin/python run.py$'; true"

@@ -1,0 +1,9 @@
+[Unit]
+Description=cta_turtle pre-market restart timer (Mon-Fri 08:47, before 09:00 open)
+
+[Timer]
+OnCalendar=Mon-Fri 08:47:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
