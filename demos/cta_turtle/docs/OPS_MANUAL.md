@@ -14,6 +14,7 @@
    CTP 行情 ──▶ │ datakit (runDt.py)                         │   wt-turtle-contracts.timer 20:30
    (mdparsers)  │  ParserCTP → K线合成 → UDP 3997/9001 广播    │   wt-turtle-hots.timer     20:35
                  └───────┬───────────────────────┬────────────┘   wt-turtle-hotdaily.timer 20:40
+                         │ UDP                    │ m5/d1 DSB      wt-turtle-premarket.timer 08:47
                          │ UDP                    │ m5/d1 DSB
                  ┌───────▼──────────┐   ┌─────────▼─────────────┐
    CTP 交易 ──▶ │ run.py (交易进程)  │   │ storage/ (his/rt/csv)  │
@@ -26,7 +27,7 @@
                      │
         WtMonSvr (runMonSvr.py :8081, 内嵌 WatchDog span=10s)
                      │
-        systemd: wt-turtle-monitor.service (+ 3 个 timer)
+        systemd: wt-turtle-monitor.service (+ 4 个 timer)
 ```
 
 三条守护闭环：
