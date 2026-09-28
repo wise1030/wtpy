@@ -217,6 +217,7 @@ cp $D/generated/stradata/turtle_CZCE_CF_HOT.json{,.bak}
 | 页面全空白 | venv 缺 websockets（`pip install websockets` + 重启监控；GUIDE §1.3） |
 | 商品策略整日零活动 | 看 09:0x 首 tick 有无 `catchup eval` / `eval window` 日志；查 hotdaily 昨晚是否 `已重启` |
 | 某品种触发无响应 | grep `trigger_drop` / `No lastest tick data`（执行单元卡死 → exec_recover） |
+| 商品策略整日零活动 | 看 fund_live 有无盘中行 + `stra_get_price` 是否 0：datakit 侧 `QuoteFact` 日志"N ticks received from exchange"在收而策略无 tick = 广播/session 错乱（2026-09-28 商品所事故同款）→ 重启 datakit；his/day 与 his/min5 的 mtime 按所对比可定位 |
 | 止损没触发 | 查 `_last_n` 同步日志（重启后 NaN 静默丢触发，9/5 已修，出现即回归） |
 | 数据看起来陈旧 | `eval window: N 根 [首~末]` 日志直接给出窗口日期，与当日比对 |
 | 20:40 后进程没起来 | `systemctl status wt-turtle-monitor`（WatchDog 载体）；`journalctl -u wt-turtle-hotdaily` 看 kill 是否执行 |

@@ -289,7 +289,7 @@ riskmon:
 
 | 定时任务 | 时间 | 职责 |
 |---|---|---|
-| wt-turtle-premarket.timer | 周一~五 08:47 | **盘前重启交易进程**（pkill run.py，WatchDog 拉起重登）——SimNow 前置每日/长假后启动窗口 (~08:30-08:50) 晚于策略自动重连，两次失败即永久挂起（2026-09-28 周一事故根治） |
+| wt-turtle-premarket.timer | 周一~五 08:47 | **盘前双进程重启**（datakit+run.py，WatchDog 拉起重登）——SimNow 前置每日/长假后启动窗口 (~08:30-08:50) 双故障：①交易通道重连两次失败永久挂起；②datakit 同窗口重连致**商品所 session 错乱**（tick 被 K线管道判 invalid 丢弃 → 商品策略全天零 tick、止损失效，CFFEX 免疫）——08:47 全新登录双病同治（2026-09-28 事故根治） |
 | wt-turtle-contracts.timer | 周一~五 20:30 | contracts.json 全量更新（CTPLoader，过期合约剔除） |
 | wt-turtle-hots.timer | 周一~五 20:35 | hots.json 主力映射更新（新浪持仓量判定，**tqsdk 兜底**：sina 不可达时自动切换 TQ_USER/TQ_PASS 查询）；**有变更才写盘+重启 datakit/run.py**（WatchDog 拉起）并 webhook 告警；双源失败推送 `hots_fail` |
 | wt-turtle-hotdaily.timer | 每日 20:40 | **主力连续日线续接**（`scripts/update_hot_daily.py`）：按 hots 映射把真实合约当日日线去重后并入 HOT csv 并重建 HOT DSB（否则策略 N/通道用陈旧窗口）；DSB 重建失败推送 `hotdaily_fail` |

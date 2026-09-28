@@ -383,3 +383,18 @@ README 测试数/日期区间漂移；加仓阈值用当根 N 无平滑选项；
   2 月遗留 MetaTrader 格式头（`<Date>`），每次启动 IF m5 预载 KeyError
   （走 stderr 故 Runner 日志不可见，09-22 起 4 次）；IF m5 实际走 DSB/rt
   正常路径（09-23 synth=yes 实证），坏文件移 .bak 根治噪音。
+- [x] **商品行情全天中断事故 + 盈亏审计（2026-09-28）**：中秋后周一，datakit 行情
+  通道在 08:41/08:42 前置启动窗口断线重连 → **商品所 session 状态错乱**（K线管道
+  判 invalid timestamp 丢弃）——datakit ingest 计数正常（SHFE 300万 tick）但
+  his/rt/UDP广播只落 CFFEX，**11 个商品策略全天零 tick**（fund_live 无盘中行 +
+  `stra_get_price`=0 双实证；IF/CFFEX 免疫），止损/加仓全天失效（当日侥幸未触及
+  armed 位）；dynprofit 冻结 → funds.csv 09-28 行=09-24 行 → **监控"今日盈亏"
+  显示不准的直接原因**（盈亏公式本身正确：dynbalance=closeprofit+dynprofit−fees；
+  次要口径差：信号 vs 真实成交 ≤0.5N 回写窗、共享账户柜台数含别家策略）。
+  对照实证：9/23、9/24（晚间启动次日）商品 fund_live 全天 39~310 行正常。
+  **处置**：盘后重启 datakit（18:07，MD ESTAB 30011 恢复）+ 20:40 hotdaily
+  例行重启 run.py → 夜盘 21:00 商品 tick 全恢复（p 21:02 触发加仓 -60→-72 实证）；
+  **premarket timer 扩展为双进程重启**（datakit+run.py，根治假期后早晨双故障）。
+  数据缺口：周一商品 K 线未落盘（his/day 停 09-25）→ 明日通道窗口缺周一，
+  周二 20:40 自愈；遗留建议：策略侧 tick 静默检测（session 内 N 分钟无
+  on_tick → alert），当前全靠人工从盈亏异常发现。

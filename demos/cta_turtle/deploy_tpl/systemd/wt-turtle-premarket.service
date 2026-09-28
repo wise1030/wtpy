@@ -1,12 +1,17 @@
 [Unit]
-Description=cta_turtle pre-market restart of trading process (fresh CTP login after front warmup)
-# 背景 (2026-09-28 事故): SimNow 交易前置每日/长假后启动窗口 (~08:30-08:50) 晚于
-# 策略进程的早晨重连 — 08:41 自动重连撞 "用户未初始化"/"前置不活跃", 重试两次
-# 放弃后交易通道永久挂起, 需人工重启。盘前 08:47 定时重启 (WatchDog span=10s
-# 拉起, ~08:48 恢复), 距 09:00 开盘留够登录+快照恢复时间。
+Description=cta_turtle pre-market restart of datakit + trading process (fresh CTP login after front warmup)
+# 背景 (2026-09-28 事故): SimNow 前置每日/长假后启动窗口 (~08:30-08:50) 带来两类故障:
+# ①交易通道早晨重连撞 "用户未初始化"/"前置不活跃", 两次放弃后永久挂起;
+# ②datakit 行情通道在同一窗口断线重连 → 商品所 session 状态错乱
+#   (tick 被 K线管道判 invalid timestamp 丢弃: datakit 收得到 3M SHFE tick
+#   但 his/rt/UDP广播 全部只落 CFFEX, 商品策略全天零 tick — 止损/加仓失效),
+#   CFFEX 免疫。盘前 08:47 重启双进程 (WatchDog span=10s 拉起, ~08:48 恢复),
+# 在前置完全就绪后拿到全新登录, 距 09:00 开盘留够启动+快照恢复时间。
 
 [Service]
 Type=oneshot
 User=ubuntu
-# 锚定正则 ^...$: 匹配 run.py 进程自身但不含本 sh 的命令行 (pgrep -f 非锚定会自匹配)
+# 锚定正则 ^...$: 匹配目标进程自身但不含本 sh 的命令行 (pgrep -f 非锚定会自匹配)
+# 先 datakit 后交易进程; 08:47 盘前无在途数据, 重启零损失
+ExecStart=/bin/sh -c "pkill -f '^@PREFIX@/venv/bin/python runDt.py$'; true"
 ExecStart=/bin/sh -c "pkill -f '^@PREFIX@/venv/bin/python run.py$'; true"
