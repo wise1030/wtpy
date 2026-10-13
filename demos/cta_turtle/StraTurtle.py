@@ -122,6 +122,8 @@ class StraTurtle(BaseCtaStrategy):
         # 价格恢复移动即清除; 置位期间 veto 加仓 (出场/止损不受影响)
         self._limit_lock = {}
         self._pin_price = None      # [price, first_ts] 价格钉住检测
+        self._ghost_trim_date = 0   # ghost trim 发生当日 (yyyymmdd), 当日
+        #                           # 禁止 enter/add 再触发 (循环修复)
         self._fund_live_ts = 0.0    # fund_live.csv 写入节流
         # K线旁路日志 (数据完整性: 崩溃窗口兜底, helpers/BarJournal)
         self._journal = None        # 惰性创建 BarJournal
@@ -701,7 +703,8 @@ class StraTurtle(BaseCtaStrategy):
                 code, dirn, tot_lots, wsum / tot_lots,
                 n0 or 1.0, self._volscale or 1.0,
                 p.stop_atr_mult, self._inst.group,
-                risk=risk0 if risk0 > 0 else None)
+                risk=risk0 if risk0 > 0 else None,
+                sid=self.name())
             context.stra_log_text(
                 f"{self.name()} risk book restored: dir={dirn} "
                 f"lots={tot_lots} avg={wsum / tot_lots:.2f} "
@@ -1440,6 +1443,18 @@ class StraTurtle(BaseCtaStrategy):
     # ------------------------------------------------------------------
     # 执行
     # ------------------------------------------------------------------
+    def _ghost_blocked(self, context) -> bool:
+        """ghost trim 当日禁止再触发 (enter/add 共用, 2026-10-09 循环修复)。"""
+        if not self._ghost_trim_date:
+            return False
+        get_date = getattr(context, "stra_get_date", None)
+        if get_date is None:
+            return False               # 测试桩无日期 → 不阻断
+        try:
+            return int(get_date()) == self._ghost_trim_date
+        except Exception:
+            return False
+
     def _size_and_cap(self, context: CtaContext, kind: str, n: float,
                       price: float, tag: str):
         """入场/加仓共用的 定手数+风控闸门 段 (P1-8: 合并原 ENTER/ADD
@@ -1450,6 +1465,12 @@ class StraTurtle(BaseCtaStrategy):
         返回 (final_lots, reasons); final_lots<=0 时已打印否决日志并
         reject_pending, 调用方直接返回。
         """
+        if self._ghost_blocked(context):
+            self._veto_log(context, f"ghost{tag}",
+                           f"veto {kind} @{price:.2f}: 本日 ghost trim "
+                           f"后禁止再触发 (订单链路易再次幽灵)")
+            self._reject_trigger(self._engine)
+            return 0, []
         lots = self._sizer.layer_lots(n, self._volscale, self._inst.units)
         if lots <= 0:
             if kind == "enter":
@@ -1469,7 +1490,7 @@ class StraTurtle(BaseCtaStrategy):
             code, lots=lots, n=n, volscale=self._volscale,
             price=price, stop_mult=self._base.stop_atr_mult,
             equity=equity, group=self._inst.group,
-            avail=self._account_available())
+            avail=self._account_available(), sid=self.name())
         rkey = f"risk{tag}" if kind == "enter" else f"addrisk{tag}"
         self._log_account_gate(context, rkey, reasons, lots, final_lots)
         if final_lots <= 0:
@@ -1700,7 +1721,7 @@ class StraTurtle(BaseCtaStrategy):
             self._risk.on_rebuilt(code, d, abs(pos_i), avgpx,
                                   n if n > 0 else 1.0, self._volscale or 1.0,
                                   self._base.stop_atr_mult, self._inst.group,
-                                  risk=risk)
+                                  risk=risk, sid=self.name())
         self._recon_miss = 0
 
     # ------------------------------------------------------------------
@@ -1784,6 +1805,12 @@ class StraTurtle(BaseCtaStrategy):
         """入场三道闸: 过滤链 → VaR 手数 → 组合风控。返回最终手数(0=否决)"""
         code = self._inst.code
         tag = f"[{sub['name']}]"
+        if self._ghost_blocked(context):
+            self._veto_log(context, f"ghost{d}",
+                           f"{tag} veto enter {d}@{dec['price']:.2f}: "
+                           f"本日 ghost trim 后禁止再触发")
+            self._reject_trigger(sub["engine"])
+            return 0
         if not dec.get("prefiltered") and \
                 not self._run_filter_chain(context, d, dec, fctx):
             return 0
@@ -1799,7 +1826,8 @@ class StraTurtle(BaseCtaStrategy):
             code, lots=lots, n=n, volscale=self._volscale,
             price=dec["price"], stop_mult=self._base.stop_atr_mult,
             equity=equity, group=self._inst.group,
-            share=self._sub_share(sub), avail=self._account_available())
+            share=self._sub_share(sub), avail=self._account_available(),
+            sid=self.name())
         self._log_account_gate(context, f"{tag}enter", reasons, lots,
                                final_lots)
         if final_lots <= 0:
@@ -1819,6 +1847,12 @@ class StraTurtle(BaseCtaStrategy):
                          dec: dict, n: float) -> int:
         e = sub["engine"]
         tag = f"[{sub['name']}]"
+        if self._ghost_blocked(context):
+            self._veto_log(context, f"ghost{len(e.layers)}",
+                           f"{tag} veto add @{dec['price']:.2f}: 本日 "
+                           f"ghost trim 后禁止再触发")
+            self._reject_trigger(e)
+            return 0
         lots = self._sizer.layer_lots(n, self._volscale, sub["units"])
         if lots <= 0:
             self._veto_log(context, f"add{len(e.layers)}",
@@ -1829,7 +1863,8 @@ class StraTurtle(BaseCtaStrategy):
             self._inst.code, lots=lots, n=n, volscale=self._volscale,
             price=dec["price"], stop_mult=self._base.stop_atr_mult,
             equity=equity, group=self._inst.group,
-            share=self._sub_share(sub), avail=self._account_available())
+            share=self._sub_share(sub), avail=self._account_available(),
+            sid=self.name())
         self._log_account_gate(context, f"{tag}add{len(e.layers)}",
                                reasons, lots, final_lots)
         if final_lots <= 0:
@@ -1879,7 +1914,8 @@ class StraTurtle(BaseCtaStrategy):
         self._risk.sync_position(
             code, dirn, tot_l, price,
             n if n and n > 0 else 1.0, self._volscale or 1.0,
-            self._base.stop_atr_mult, self._inst.group, risk=risk)
+            self._base.stop_atr_mult, self._inst.group, risk=risk,
+            sid=self.name())
 
     def _reject_trigger(self, engine):
         """trigger 模式: 策略层否决已触发决策 → 引擎解除当日武装"""
@@ -2029,9 +2065,9 @@ class StraTurtle(BaseCtaStrategy):
             return
         broker_net = float(broker_net)
         tot = self._combined_target()
-        if tot == 0 or broker_net == 0:
-            return                     # 无持仓/券商口径为零 → 不动作
-        if (tot > 0) != (broker_net > 0):
+        if tot == 0:
+            return                     # 无信号持仓 → 不动作
+        if broker_net != 0 and (tot > 0) != (broker_net > 0):
             return                     # 方向相反 → 不动作 (告警已发)
         target = abs(int(round(broker_net)))
         cur = abs(tot)
@@ -2059,6 +2095,15 @@ class StraTurtle(BaseCtaStrategy):
         if trimmed <= 0:
             return
         self._fill_pending.pop(key, None)     # 被裁层无需再等待回写
+        # 当日禁止该层再触发: trim 后引擎层数回落, 武装位仍在, 若不消费
+        # 会在价格条件仍满足时同秒 re-trigger → ghost 死循环
+        # (2026-10-09 IF 每 ~10min trim→re-add 循环事故)
+        get_date = getattr(context, "stra_get_date", None)
+        if get_date is not None:
+            try:
+                self._ghost_trim_date = int(get_date())
+            except Exception:
+                pass
         new_target = self._combined_target()
         context.stra_set_position(code, new_target, "GhostTrim")
         self._sync_risk_book(self._last_n)

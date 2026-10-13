@@ -85,12 +85,14 @@ def test_direction_gate_allows_long():
            "n": 30.0, "failsafe": False}
     stra._execute(ctx, dec, n=30.0)
     # sizer: floor(400000/(30*10))=1333; 风控单品种预算:
-    # floor(5e6×0.02/(30×10×2))=166 (FakeCtx 无资金接口 → 回退 500 万)
-    assert ctx.orders == [("SHFE.rb.HOT", 166, "Enter")]
+    # per_market floor(15e6×0.02/(30×10×2))=500 (FakeCtx 无资金接口
+    # → 回退 1500 万, 2026-10-08 5M→15M); 保证金闸 15e6×0.10/(3500×10
+    # ×0.12)=357 → 缩量到 357 (方案B+10% 保证金上限生效路径)
+    assert ctx.orders == [("SHFE.rb.HOT", 357, "Enter")]
     assert stra._engine.direction == 1
-    assert stra._engine.layers == [[166, 3500.0]]
+    assert stra._engine.layers == [[357, 3500.0]]
     assert stra._risk.has_position("SHFE.rb.HOT")   # 风控账本已记
-    assert stra._risk.open_risk() == 166 * 30 * 10 * 2.0
+    assert stra._risk.open_risk() == 357 * 30 * 10 * 2.0
 
 
 def test_insufficient_lots_veto():

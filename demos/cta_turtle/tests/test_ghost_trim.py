@@ -85,6 +85,10 @@ class _Ctx:
         self.logs = []
         self.positions = {}
         self.target = 0
+        self.date = 20261009
+
+    def stra_get_date(self):
+        return self.date
 
     def stra_log_text(self, txt, level=1):
         self.logs.append((level, txt))
@@ -140,6 +144,35 @@ class TestGhostTrim:
         stra._maybe_ghost_trim(ctx, "S1", stra._fill_pending["S1"], -65.0)
         assert stra._combined_target() == -99
 
+    def test_trim_full_ghost_broker_zero(self):
+        """全幽灵 (broker=0, 2026-10-09 pp 116 手悬空事故):
+        旧实现 broker_net==0 直接 return → 信号仓永久悬空;
+        现应整体 trim 到 0 并置当日阻断。"""
+        stra = _make_stra()
+        self._stra_with_pos(stra)
+        ctx = _Ctx(broker_net=0.0)
+        stra._maybe_ghost_trim(ctx, "S1", stra._fill_pending["S1"], 0.0)
+        assert stra._combined_target() == 0
+        assert ctx.positions.get("CZCE.CF.HOT") == 0
+        assert stra._fill_pending.get("S1") is None
+        assert stra._ghost_trim_date == 20261009
+
+    def test_no_retrigger_same_day_after_trim(self):
+        """trim 当日 enter/add 再触发一律否决并拒武装 (IF 循环修复)。"""
+        stra = _make_stra()
+        self._stra_with_pos(stra)
+        stra._volscale = 5
+        ctx = _Ctx(broker_net=0.0)
+        stra._maybe_ghost_trim(ctx, "S1", stra._fill_pending["S1"], 0.0)
+        # 同日: 触发入场 → 否决 + pending 被拒
+        lots, _ = stra._size_and_cap(ctx, "enter", 100.0, 16100.0, "L")
+        assert lots == 0
+        assert any("ghost" in t and "veto enter" in t for _, t in ctx.logs)
+        # 次日: 阻断解除, 正常放行
+        ctx.date = 20261010
+        lots, _ = stra._size_and_cap(ctx, "enter", 100.0, 16100.0, "L")
+        assert lots > 0
+
     def test_trim_to_zero_flattens_and_zeroes_position(self):
         stra = _make_stra()
         self._stra_with_pos(stra, lots=45)
@@ -150,6 +183,10 @@ class TestGhostTrim:
         stra2._fill_pending["S1"] = {"engine": e, "ts": 0, "lots": 45,
                                      "fees0": None, "cursor": None,
                                      "truth0": None}
-        ctx = _Ctx(broker_net=0.0)   # 券商为零 → 不动作 (避免误平)
+        ctx = _Ctx(broker_net=0.0)
+        # 2026-10-09 pp 事故后改进口径: 走完 ghost_fill 证据链且券商为零
+        # = 全幽灵, 信号仓必须整体归零 (旧"不动作防误平"会留悬空信号仓,
+        # 触发出场时反向真实建仓; 误平风险由上游 600s 超时+真值时效闸兜住)
         stra2._maybe_ghost_trim(ctx, "S1", stra2._fill_pending["S1"], 0.0)
-        assert stra2._combined_target() == -45   # 未动
+        assert stra2._combined_target() == 0
+        assert ctx.positions.get("CZCE.CF.HOT") == 0

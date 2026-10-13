@@ -91,12 +91,12 @@ def test_account_gate_ample_funds_no_reason():
 def test_equity_dynamic_and_fallback():
     # stra_get_fund_data(0) = 净盈亏 (不含本金), equity = 基准 + 净盈亏
     rm = RiskManager()
-    assert rm.equity(CtxWithFund(-800000)) == 4200000.0
+    assert rm.equity(CtxWithFund(-800000)) == 14200000.0
     assert rm.last_equity_source == "dynamic"
-    assert rm.equity(CtxNoFund()) == 5000000.0
+    assert rm.equity(CtxNoFund()) == 15000000.0
     assert rm.last_equity_source == "fallback"
-    assert rm.equity(CtxWithFund(-5)) == 5000000.0 - 5  # 负盈亏有效不回退
-    assert rm.equity(CtxWithFund(float("nan"))) == 5000000.0  # NaN 回退
+    assert rm.equity(CtxWithFund(-5)) == 15000000.0 - 5  # 负盈亏有效不回退
+    assert rm.equity(CtxWithFund(float("nan"))) == 15000000.0  # NaN 回退
 
 
 def test_equity_exception_falls_back():
@@ -104,7 +104,7 @@ def test_equity_exception_falls_back():
         def stra_get_fund_data(self, flag=0):
             raise RuntimeError("x")
     rm = RiskManager()
-    assert rm.equity(Boom()) == 5000000.0
+    assert rm.equity(Boom()) == 15000000.0
 
 
 # ---------- 缩量/否决 ----------
@@ -142,6 +142,38 @@ def test_margin_cap_triggers():
                                  price=4000, stop_mult=2.0,
                                  equity=5_000_000)
     assert lots == 104 and any("margin" in r for r in reasons)
+
+
+def test_margin_scoped_per_strategy_planB():
+    """方案B (2026-10-08): 保证金扣减按 sid 收窄 — 他策略重仓不再
+    占满本策略保证金预算 (旧全局口径实盘事故: CF 159 手满仓后全体
+    12 策略 margin cap 恒 ≈0-2, al/MA/TA 入场被误杀、rb 661->2)。"""
+    cfg = RiskConfig(max_margin_usage=0.10, max_units_total=0,
+                     max_units_per_group=0)
+    rm = RiskManager(cfg)
+    # 策略 A (CF): 159 手 @16047.45 volscale=5 → 预估保证金 ≈153.1 万
+    # > 15M×10%=150 万 → A 自身再加仓 margin cap=0 (自身额度用尽是正确行为)
+    rm.on_rebuilt("CZCE.CF.HOT", -1, 159, 16047.45, 100.0, 5.0, 2.0,
+                  sid="strat_A")
+    assert rm._book["CZCE.CF.HOT"]["sid"] == "strat_A"
+    lots, reasons = rm.cap_entry("CZCE.CF.HOT", lots=10, n=100, volscale=5,
+                                 price=16000, stop_mult=2.0, equity=15e6,
+                                 sid="strat_A")
+    assert lots == 0 and any(r.startswith("margin(cap=0)") for r in reasons)
+    # 策略 B (rb, 空仓): 单手保证金 3071*10*0.12=3685.2 → margin cap=407;
+    # per_market 15M*2%/604.8=496。旧全局口径下 A 的 153 万会把 B 压到 0。
+    lots, reasons = rm.cap_entry("SHFE.rb.HOT", lots=661, n=30.24,
+                                 volscale=10, price=3071, stop_mult=2.0,
+                                 equity=15e6, sid="strat_B")
+    assert lots == 407
+    assert any(r.startswith("margin(cap=407)") for r in reasons)
+    # 组合总敞口仍是全局口径: A 的 risk 记账 (159*100*5*2=159000)
+    # 计入 B 的 total_risk 扣减 (预算 900000, 剩余 741000 非约束)
+    assert not any(r.startswith("total_risk") for r in reasons)
+    # sync_position 的 sid 透传
+    rm.sync_position("SHFE.rb.HOT", -1, 2, 3072.0, 30.24, 10.0, 2.0,
+                     risk=1209.6, sid="strat_B")
+    assert rm._book["SHFE.rb.HOT"]["sid"] == "strat_B"
 
 
 def test_no_veto_when_within_budget():

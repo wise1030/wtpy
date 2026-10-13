@@ -3,7 +3,10 @@
 在 PositionSizer(VaR 反算)之后做最后缩量/否决:
 1. 单品种风险预算: 本笔持仓 2N 止损潜亏 ≤ equity × max_risk_per_mkt
 2. 组合总敞口预算: 全部在途持仓 2N 总潜亏 ≤ equity × max_total_risk_frac
-3. 保证金占用预估: Σ(lots×price×volscale×margin_rate) ≤ equity × max_margin_usage
+3. 保证金占用预估: 本策略 Σ(lots×price×volscale×margin_rate)
+   ≤ equity × max_margin_usage (2026-10-08 方案B: 按策略 sid 收窄,
+   只扣减本策略自身持仓的预估保证金; 旧组合全局口径曾因
+   "单策略预算基数 vs 全组合扣减" 错配把全体品种的保证金预算占满)
 4. 市场单位限制 (经典海龟): 同相关性组同时持仓品种数 ≤ max_units_per_group,
    全组合 ≤ max_units_total; 单位限制只作用于新开仓(加仓不改变单位数)
 
@@ -61,7 +64,7 @@ class RiskManager:
     def cap_entry(self, code: str, *, lots: int, n: float, volscale: float,
                   price: float, stop_mult: float, equity: float,
                   group: str = "", share: float = 1.0,
-                  avail: float = None) -> tuple:
+                  avail: float = None, sid: str = "") -> tuple:
         """对本次入场/加仓手数做缩量或否决。
 
         Args:
@@ -70,6 +73,9 @@ class RiskManager:
                 仅缩放"单品种风险预算"与"保证金预算"的权益基数,
                 使双系统公平共享品种额度而不互相挤占;
                 组合总敞口仍为全局口径。
+            sid: 发起策略标识 (方案B)。保证金扣减只计本策略自身持仓
+                (账本按 sid 分组), 其他策略的保证金占用不影响本策略的
+                保证金预算; 组合总敞口/单位限制仍为全局口径不变。
             avail: 券商口径**账户可用资金** (交易通道真值源提供, 共享
                  账户下含其他策略占用)。按 account_gate_mode 处理:
                  off 忽略 / warn 只记录原因 / veto 缩量优先、归零否决。
@@ -98,11 +104,12 @@ class RiskManager:
         tot_cap = int(max(0.0, equity * self.cfg.max_total_risk_frac - used)
                       // rpl)
 
-        # 3. 保证金占用预估 (预算基数按份额缩放, 扣减全局已占)
+        # 3. 保证金占用预估 (预算基数按份额缩放; 扣减按策略 sid 收窄)
         per_lot_margin = price * volscale * self.cfg.margin_rate
         cur_margin = sum(e["lots"] * e["price"] * e["volscale"]
                          * self.cfg.margin_rate
-                         for e in self._book.values())
+                         for e in self._book.values()
+                         if e.get("sid", "") == sid)
         mar_cap = int(max(0.0, equity * share * self.cfg.max_margin_usage
                           - cur_margin * share) // per_lot_margin)
 
@@ -153,7 +160,7 @@ class RiskManager:
     # ------------------------------------------------------------------
     def on_filled(self, code: str, direction: int, lots_added: int,
                   price: float, n: float, volscale: float,
-                  stop_mult: float, group: str = ""):
+                  stop_mult: float, group: str = "", sid: str = ""):
         if code in self._book and \
                 self._book[code]["dir"] == direction:
             e = self._book[code]
@@ -162,12 +169,13 @@ class RiskManager:
                           + price * lots_added) / tot
             e["lots"] = tot
             e["n"] = n
+            e["sid"] = sid           # 归属策略 (方案B 分组键)
             e["risk"] += lots_added * n * volscale * stop_mult
         else:
             self._book[code] = {
                 "dir": direction, "lots": lots_added, "price": price,
                 "n": n, "volscale": volscale, "stop_mult": stop_mult,
-                "group": group or "",
+                "group": group or "", "sid": sid,
                 "risk": lots_added * n * volscale * stop_mult}
 
     def on_closed(self, code: str):
@@ -175,28 +183,30 @@ class RiskManager:
 
     def on_rebuilt(self, code: str, direction: int, lots: int,
                    price: float, n: float, volscale: float,
-                   stop_mult: float, group: str = "", risk: float = None):
+                   stop_mult: float, group: str = "", risk: float = None,
+                   sid: str = ""):
         """对账重建: 以实际持仓覆盖式重记账。
 
         risk: 显式 2N 潜亏记账值。多子系统持仓 (S1+S2) 或恢复的分层持仓
         应按各层冻结 N 汇总后传入 — 缺省才用 lots×n×volscale×stop_mult,
         否则账面风险会随当根 N 漂移 (B6)。
+        sid: 持仓归属策略 (方案B 保证金分组键)。
         """
         self.on_closed(code)
         if lots > 0 and direction != 0:
             self.on_filled(code, direction, lots, price, n,
-                           volscale, stop_mult, group)
+                           volscale, stop_mult, group, sid=sid)
             if risk is not None:
                 self._book[code]["risk"] = float(risk)
 
     def sync_position(self, code: str, direction: int, lots: int,
                       price: float, n: float, volscale: float,
                       stop_mult: float, group: str = "",
-                      risk: float = None):
+                      risk: float = None, sid: str = ""):
         """批量执行后按合并目标仓位同步账本 (S1+S2 双系统:
         两子系统共享同一 code 记账 — 单位限制/总敞口按市场口径)"""
         self.on_rebuilt(code, direction, lots, price, n,
-                        volscale, stop_mult, group, risk=risk)
+                        volscale, stop_mult, group, risk=risk, sid=sid)
 
     # ------------------------------------------------------------------
     # 观测

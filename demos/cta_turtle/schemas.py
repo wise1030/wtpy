@@ -29,11 +29,11 @@ class RiskConfig:
     """组合级风险预算 (TurtleConfig.risk)"""
     max_risk_per_mkt: float = 0.02     # 单品种本笔 2N 潜亏/权益上限
     max_total_risk_frac: float = 0.06  # 组合在途 2N 总潜亏/权益上限
-    max_margin_usage: float = 0.60     # 预估保证金占用/权益上限
+    max_margin_usage: float = 0.10     # 本策略保证金占用/自身权益上限 (方案B按策略收窄)
     margin_rate: float = 0.12          # 保证金率预估
     max_units_per_group: int = 2       # 相关性组同时持仓单位数上限(0=不限)
     max_units_total: int = 4           # 全组合同时持仓单位数上限(0=不限)
-    fallback_capital: float = 5000000.0
+    fallback_capital: float = 15000000.0  # 动态权益无效时的回退基准资金
     # 共享账户可用资金闸门 (P1, 需交易通道真值源):
     # 9/9 实盘事故: 账户被多策略共用, 策略侧只能看到自己的权益,
     # 资金耗尽后 p 追单 3357 次全被拒。真值源 rtdata.json 的 funds.available
