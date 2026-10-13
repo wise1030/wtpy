@@ -410,3 +410,46 @@ README 测试数/日期区间漂移；加仓阈值用当根 N 无平滑选项；
   连续性+现价交叉验证无此问题；通用 SOP：事故日若紧邻换月须先比对
   sina 与本地末日收盘再合并。该路径已固化为数据缺口的官方回补方案
   （优于 tqsdk：免额外凭据/依赖，生产 venv 无 akshare 在本地拉取后回传）。
+- [x] **保证金闸口径 bug 修复（方案B落地，2026-10-08）**——
+  `RiskManager.cap_entry` 第 3 项保证金预算 = `单策略 equity×share×max_margin_usage`
+  （≈3M） 减去 **组合全局账本 cur_margin**（CF+p+IF 三仓即 ≈3M 预估保证金）→
+  CF 159 手满仓后（约 9/23 起）全体 12 策略的 margin cap 恒 ≈0-2 手，组合事实冻结：
+  10-08 国庆后首日 al/MA/TA 三笔触发入场全被 margin(cap=0) 否决、rb 661 手申请
+  被压到 2 手（数值回放复现：同参数空账本=165 手；带账本=2 手，与实盘逐字一致）。
+  **修复（用户拍板方案B）**：①账本条目新增 `sid` 分组键（on_filled/on_rebuilt/
+  sync_position 全链路透传，StraTurtle 6 处调用点传 `sid=self.name()`），
+  `cur_margin` 只扣减本策略自身持仓——他策略重仓不再占满本策略保证金预算，
+  组合总敞口/单位限制保持全局口径不变；②`fallback_capital` 5M→**15M**；
+  ③`max_margin_usage` 0.60→**0.10**（每品种保证金≤自身权益10%；CF 159 手
+  自身恰好顶满 150 万额度，自身加仓被正确拦截，他品种不受影响）。
+  新增单测 `test_margin_scoped_per_strategy_planB`（含 10-08 事故场景回放：
+  A 满仓 margin=0、B 空仓 cap=407 不再被压 0、total_risk 仍全局）；
+  测试 383→**384** 全绿+ruff 通过；20:40 hotdaily 重启无缝加载（rb -2 手/
+  risk=1209 正确恢复，0 error），夜盘起新口径生效。
+  注：total_risk 仍是"单策略 equity×10% − 组合全局 used"口径（与 margin 旧 bug
+  同构但 15M 基数下余量充足：used≈45 万 vs 预算 150 万），留作后续观察项。
+- [x] **10-09 执行链路事故处置完成（2026-10-09 夜盘前）**——新风控口径首日
+  验证通过（MA 194→145 / pp 155→116 per_market 缩量、IF margin cap=5 按策略
+  口径精确生效），但执行层连环故障：①09:10:30 run.py 静默崩溃（无 error 日志，
+  疑似 C++ 段错误，WatchDog 6s 拉起）消耗当日 exec recover 额度；②执行单元
+  tick 断供（24 次 No lastest tick）→ pp 116 手入场单零派发（Trader 日志零
+  记录，pp 当时快速拉涨午后封涨停加剧未成交）、IF 加仓零派发、MA 平仓零派发；
+  ③ghost trim 对 broker=0 全幽灵不生效（pp 信号悬空至 233 手）；④trim 后
+  同秒 re-add 死循环（IF 每 ~10min 一轮）；⑤MA 柜台裸多 95 手（vwap 3298.89）
+  引擎已归零 = 无止损真实持仓。**修复落地**（测试 384→386 全绿）：`_maybe_
+  ghost_trim` 支持 broker=0 全幽灵 → 整体 flatten；trim 当日经 `_ghost_blocked`
+  封锁 enter/add 再触发（`_size_and_cap`+双系统两 gate 四出口，含
+  `_reject_trigger` 拒武装）；旧测试"broker=0 不动作防误平"口径反转并注释
+  理由。**快照手术**：MA 收养 95 手@3298.89（ud_ 引擎态 direction/layers/
+  layer_ns/stop 3083.58/add 3406.55/armed + stradata 信号账双向一致）；
+  pp/IF 交由新代码自愈（IF armed.long 持仓期=null 无再触发风险）。19:54:43
+  kill -9 重启加载（MA risk book 95/204549 正确恢复，12 单元 init 期预创建
+  执行单元 F1 生效，0 error）。**三个操作教训**：⑴pkill 模式必须匹配真实
+  cmdline——WatchDog 拉起的是 `venv/bin/python run.py`（cwd=deploy 目录，
+  cmdline 无 cta_turtle 路径），`pkill -f "cta_turtle/[r]un.py"` 静默不匹配
+  → 本次用 `kill -9 <pid>`；⑵run.py 运行时**不会周期性回写** stradata/ud_ 快照
+  （内存态为准，落盘在退出/特定事件时）——改完快照必须重启才生效，且重启要用
+  SIGKILL 防旧进程退出时覆写；⑶订单零派发的第一判定=Trader 日志有无记录。
+  待观察：pp 全幽灵 trim + 当日封锁将在 21:00 夜盘首 tick 后对账触发（届时
+  fund_live position 应 233→0）；exec 单元断供根因（wtpy C++ 层）未修，
+  F1 预创建+自愈重启仍是对策。
