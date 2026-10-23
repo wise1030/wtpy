@@ -25,15 +25,15 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-for _p in (HERE, os.path.join(HERE, 'helpers')):
+for _p in (HERE, os.path.join(HERE, 'core')):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
 from wtpy import WtEngine, EngineType
 
 from StraTurtle import StraTurtle
-from helpers.ConfigLoader import ConfigLoader
-from helpers.CsvDataLoader import CsvDataLoader
+from core.ConfigLoader import ConfigLoader
+from core.CsvDataLoader import CsvDataLoader
 
 
 def _storage_csv_dir() -> str:
@@ -47,7 +47,7 @@ def _storage_csv_dir() -> str:
 def _auto_repair(cfg, csv_dir: str):
     """journal → storage/csv 增量回补 (幂等; 兜底宕机丢失的会话内K线)"""
     try:
-        from helpers.BarJournal import BarJournal
+        from core.BarJournal import BarJournal
         jdir = getattr(cfg.base, 'journal_dir', '')
         if not jdir or not os.path.isdir(jdir):
             print(f"[turtle] journal off/absent: {jdir}")
@@ -77,7 +77,7 @@ def _preflight(cfg, csv_dir: str):
     if mode not in ('warn', 'strict'):
         return
     try:
-        from helpers import DataChecker
+        from core import DataChecker
         common = _common_dir()
         storage = os.path.abspath(os.path.join(csv_dir, '..'))
         issues = DataChecker.check_config(cfg, common, storage,
@@ -173,12 +173,12 @@ def main():
     engine.init(HERE, os.path.join(HERE, 'config.yaml'))
 
     # 组合级共享: 风控账本 + webhook 推送 (多品种协同必需)
-    from helpers.RiskManager import RiskManager
+    from core.RiskManager import RiskManager
     risk_mgr = RiskManager(cfg.risk)
     notifier = None
     if getattr(cfg, 'notify', None) and cfg.notify.enabled:
         try:
-            from helpers.notifier import WebhookNotifier
+            from core.notifier import WebhookNotifier
             notifier = WebhookNotifier(urls=cfg.notify.urls,
                                        wtype=cfg.notify.type,
                                        cooldown=cfg.notify.cooldown)

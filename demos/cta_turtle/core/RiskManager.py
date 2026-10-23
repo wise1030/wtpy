@@ -30,18 +30,33 @@ class RiskManager:
         #          "group","risk"}  risk=该笔 2N 潜亏记账
         self._book = {}
         self.last_equity_source = ""   # 观测用: dynamic|fallback
+        self._sid_capital = {}   # sid → 分配资金基数 (S1 资金分配)
 
     # ------------------------------------------------------------------
     # 权益
     # ------------------------------------------------------------------
-    def equity(self, context) -> float:
+
+    def set_sid_capital(self, sid: str, capital: float):
+        """注册策略分配资金基数 (共享账本 × 每策略独立权益口径)。
+
+        2026-10-22 S1: runLive 全组合共享一个 RiskManager 账本, 但
+        portfolio_capital 分配后每策略的权益基数不同 —— 单位/总敞口闸
+        共享, 风险/保证金比例闸按各自分配额。未注册的 sid 回退
+        cfg.fallback_capital。"""
+        if capital > 0:
+            self._sid_capital[sid] = float(capital)
+
+    def capital_base(self, sid: str = None) -> float:
+        return self._sid_capital.get(sid, float(self.cfg.fallback_capital))
+
+    def equity(self, context, sid: str = None) -> float:
         """动态权益 = 基准资金 + 净盈亏; 接口不可用时退回基准资金。
 
         口径注意: stra_get_fund_data(0) 在 bt (CtaMocker.cpp:1883) 与
         实盘 (CtaStraBaseCtx.cpp:1711) 都是 profit-fees+dynprofit, 即
         **相对初始资金的净盈亏, 不含本金** — 因此权益 = 基准资金
-        (fallback_capital, 与回测 capital/实盘初始权益对齐) + 净盈亏。
-        旧口径曾把它误当含本金权益直接返回: bt 下首笔盈利后
+        (分配额/fallback_capital, 与回测 capital/实盘初始权益对齐)
+        + 净盈亏。旧口径曾把它误当含本金权益直接返回: bt 下首笔盈利后
         equity 塌缩为净盈亏值, 后续入场被预算闸全部否决
         (2026-09-02 cu 多品种回测暴露)。
         """
@@ -51,7 +66,7 @@ class RiskManager:
             fd = None
         except Exception:
             fd = None
-        base = float(self.cfg.fallback_capital)
+        base = self.capital_base(sid)
         if isinstance(fd, (int, float)) and fd == fd:  # 排除 NaN
             self.last_equity_source = "dynamic"
             return base + float(fd)
@@ -97,7 +112,16 @@ class RiskManager:
         new_unit = code not in self._book
 
         # 1. 单品种风险预算 (按份额缩放)
-        mkt_cap = int(equity * share * self.cfg.max_risk_per_mkt // rpl)
+        #    1a. 本笔上限 (max_risk_per_mkt)
+        #    1b. 品种累计上限 (max_risk_per_market) — 扣该 code 已占风险。
+        #        旧实现只有 1a, 4 层各 2% 可做到 8%, 与"单品种 2%"的
+        #        命名/直觉不符 (2026-10-20 复核)。
+        order_cap = int(equity * share * self.cfg.max_risk_per_mkt // rpl)
+        used_mkt = float(self._book.get(code, {}).get("risk", 0.0))
+        cum_cap = int(max(
+            0.0,
+            equity * share * self.cfg.max_risk_per_market - used_mkt) // rpl)
+        mkt_cap = min(order_cap, cum_cap)
 
         # 2. 组合总敞口预算 (存量记账 + 本次按申请量计)
         used = sum(e["risk"] for e in self._book.values())
@@ -115,7 +139,11 @@ class RiskManager:
 
         final = min(lots, mkt_cap, tot_cap, mar_cap)
         if mkt_cap < lots:
-            reasons.append(f"per_market_risk(cap={mkt_cap})")
+            if cum_cap < order_cap:
+                reasons.append(
+                    f"per_market_cum(cap={cum_cap},used={used_mkt:.0f})")
+            else:
+                reasons.append(f"per_market_risk(cap={mkt_cap})")
         if tot_cap < lots:
             reasons.append(f"total_risk(cap={tot_cap})")
         if mar_cap < lots:
@@ -137,16 +165,16 @@ class RiskManager:
         # 4. 市场单位限制 (只约束新开仓)
         if new_unit and lots > 0:
             grp = group or ""
-            total_units = len(self._book)
+            total_units = self.open_units
             grp_units = self.units_in_group(grp)
             grp_veto = None
             if grp and self.cfg.max_units_per_group > 0 \
                     and grp_units >= self.cfg.max_units_per_group:
-                grp_veto = (f"group_units({grp}={grp_units}"
+                grp_veto = (f"group_units({grp}={grp_units:g}"
                             f">={self.cfg.max_units_per_group})")
             elif self.cfg.max_units_total > 0 \
                     and total_units >= self.cfg.max_units_total:
-                grp_veto = (f"total_units({total_units}"
+                grp_veto = (f"total_units({total_units:g}"
                             f">={self.cfg.max_units_total})")
             if grp_veto:
                 return 0, reasons + [grp_veto]
@@ -160,7 +188,14 @@ class RiskManager:
     # ------------------------------------------------------------------
     def on_filled(self, code: str, direction: int, lots_added: int,
                   price: float, n: float, volscale: float,
-                  stop_mult: float, group: str = "", sid: str = ""):
+                  stop_mult: float, group: str = "", sid: str = "",
+                  units: float = 1.0):
+        """成交记账; units = 该市场占用的经典海龟单位数 (2026-10-20)。
+
+        旧实现 `open_units` 只数 code 数, units=2/双系统/多速度时
+        一个品种实际占 2 个单位却只计 1, 单位上限被绕过。
+        """
+        u = max(0.0, float(units))
         if code in self._book and \
                 self._book[code]["dir"] == direction:
             e = self._book[code]
@@ -170,12 +205,13 @@ class RiskManager:
             e["lots"] = tot
             e["n"] = n
             e["sid"] = sid           # 归属策略 (方案B 分组键)
+            e["units"] = u
             e["risk"] += lots_added * n * volscale * stop_mult
         else:
             self._book[code] = {
                 "dir": direction, "lots": lots_added, "price": price,
                 "n": n, "volscale": volscale, "stop_mult": stop_mult,
-                "group": group or "", "sid": sid,
+                "group": group or "", "sid": sid, "units": u,
                 "risk": lots_added * n * volscale * stop_mult}
 
     def on_closed(self, code: str):
@@ -184,7 +220,7 @@ class RiskManager:
     def on_rebuilt(self, code: str, direction: int, lots: int,
                    price: float, n: float, volscale: float,
                    stop_mult: float, group: str = "", risk: float = None,
-                   sid: str = ""):
+                   sid: str = "", units: float = 1.0):
         """对账重建: 以实际持仓覆盖式重记账。
 
         risk: 显式 2N 潜亏记账值。多子系统持仓 (S1+S2) 或恢复的分层持仓
@@ -195,18 +231,20 @@ class RiskManager:
         self.on_closed(code)
         if lots > 0 and direction != 0:
             self.on_filled(code, direction, lots, price, n,
-                           volscale, stop_mult, group, sid=sid)
+                           volscale, stop_mult, group, sid=sid, units=units)
             if risk is not None:
                 self._book[code]["risk"] = float(risk)
 
     def sync_position(self, code: str, direction: int, lots: int,
                       price: float, n: float, volscale: float,
                       stop_mult: float, group: str = "",
-                      risk: float = None, sid: str = ""):
+                      risk: float = None, sid: str = "",
+                      units: float = 1.0):
         """批量执行后按合并目标仓位同步账本 (S1+S2 双系统:
         两子系统共享同一 code 记账 — 单位限制/总敞口按市场口径)"""
         self.on_rebuilt(code, direction, lots, price, n,
-                        volscale, stop_mult, group, risk=risk, sid=sid)
+                        volscale, stop_mult, group, risk=risk, sid=sid,
+                        units=units)
 
     # ------------------------------------------------------------------
     # 观测
@@ -216,13 +254,15 @@ class RiskManager:
         return sum(e["risk"] for e in self._book.values())
 
     @property
-    def open_units(self) -> int:
-        return len(self._book)
+    def open_units(self) -> float:
+        """全组合占用单位数 (按 book['units'] 累计, 不再是 code 数)"""
+        return sum(float(e.get("units", 1.0)) for e in self._book.values())
 
-    def units_in_group(self, group: str) -> int:
+    def units_in_group(self, group: str) -> float:
         if not group:
-            return 0
-        return sum(1 for e in self._book.values() if e["group"] == group)
+            return 0.0
+        return sum(float(e.get("units", 1.0)) for e in self._book.values()
+                   if e["group"] == group)
 
     def has_position(self, code: str) -> bool:
         return code in self._book

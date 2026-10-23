@@ -28,7 +28,7 @@ def notify(event: str, text: str, cfg_path: str = ""):
             if not os.path.exists(cfg_path):
                 cfg_path = os.path.join(_PKG, "turtle_config.yaml")
         sys.path.insert(0, _PKG)
-        from helpers.notifier import WebhookNotifier
+        from core.notifier import WebhookNotifier
         with open(cfg_path, encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
         n = cfg.get("notify") or {}

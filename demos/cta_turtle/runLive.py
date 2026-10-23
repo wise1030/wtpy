@@ -19,8 +19,8 @@ from wtpy import WtEngine, EngineType
 from wtpy.monitor import WtMonSvr
 
 from StraTurtle import StraTurtle
-from helpers.ConfigLoader import ConfigLoader
-from helpers.RiskManager import RiskManager
+from core.ConfigLoader import ConfigLoader
+from core.RiskManager import RiskManager
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -30,7 +30,7 @@ def _build_notifier(cfg):
     if not getattr(cfg, "notify", None) or not cfg.notify.enabled:
         return None
     try:
-        from helpers.notifier import WebhookNotifier
+        from core.notifier import WebhookNotifier
         return WebhookNotifier(urls=cfg.notify.urls,
                                wtype=cfg.notify.type,
                                cooldown=cfg.notify.cooldown)
@@ -49,7 +49,7 @@ def _preflight(cfg, mode: str = "warn", cfg_path: str = ""):
     if mode not in ("warn", "strict"):
         return
     try:
-        from helpers import DataChecker
+        from core import DataChecker
         common = os.path.abspath(os.path.join(HERE, "..", "common"))
         storage = os.path.abspath(os.path.join(HERE, "..", "storage"))
         # 自动回补: journal 尾部合并到 storage/csv (WT_AUTO_REPAIR=1)
@@ -110,6 +110,16 @@ def main():
 
     # 组合级风险预算: 多品种共享同一实例 (单位限制/总敞口跨品种生效)
     risk_mgr = RiskManager(cfg.risk)
+    if cfg.risk.portfolio_capital > 0:
+        from core.ConfigLoader import allocated_capital
+        codes = [i.code for i in cfg.instruments]
+        print(f"[runLive] 资金分配: portfolio_capital="
+              f"{cfg.risk.portfolio_capital:,.0f} → 每策略权益基数")
+        for i in cfg.instruments:
+            name0 = f"turtle_{i.code.replace('.', '_')}"
+            alloc = allocated_capital(cfg.risk, i.code, codes)
+            risk_mgr.set_sid_capital(name0, alloc)
+            print(f"[runLive]   {i.code}: {alloc:,.0f}")
     notifier = _build_notifier(cfg)
     if notifier is not None:
         print(f"[runLive] notify: {cfg.notify.type} "

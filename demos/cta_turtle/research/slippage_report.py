@@ -12,7 +12,7 @@
   batch_ticks 同一决策批次内 (相邻成交间隔<120s) 的 (最高价-最低价) 中位数
               —— 直接量化"1 手顺序追单"的成本 (MA 53 手曾跨 50 分钟)
 
-用法: python3 scripts/slippage_report.py --deploy-dir . --date 2026-09-16 \
+用法: python3 research/slippage_report.py --deploy-dir . --date 2026-09-16 \
         [--pricetick SHFE.rb=1.0,...] [--json out.json]
 """
 import argparse

@@ -9,8 +9,8 @@ import os
 from conftest import *  # noqa: F401,F403
 import pytest
 
-from helpers.BarJournal import BarJournal
-from helpers import DataChecker as dc
+from core.BarJournal import BarJournal
+from core import DataChecker as dc
 
 
 # ---------- BarJournal 基础 ----------
@@ -189,7 +189,7 @@ def test_journal_time_roundtrip_format():
 def _mk_cfg(tmp, text):
     cfgp = tmp / "cfg.yaml"
     cfgp.write_text(text, encoding="utf-8")
-    from helpers.ConfigLoader import ConfigLoader
+    from core.ConfigLoader import ConfigLoader
     return ConfigLoader.load(str(cfgp))
 
 
@@ -226,6 +226,26 @@ def test_check_depth_ok_when_enough_rows(tmp_path):
     issues = dc.check_depth(TurtleBaseConfig(), "SHFE.rb.HOT", "d1",
                             str(storage))
     assert any(i.level == "info" and "深度 OK" in i.msg for i in issues)
+
+
+def test_has_bars_recognizes_csv_and_dsb(tmp_path):
+    """runBT 的 bt_no_simtick 不能只看 storage/csv (2026-10-20):
+    DSB 存储也要识别, 否则有 m5 的品种被误判无 m5。"""
+    storage = tmp_path / "storage"
+    assert not dc.has_bars("SHFE.rb.HOT", "m5", str(storage))
+
+    csv_dir = storage / "csv"
+    csv_dir.mkdir(parents=True)
+    (csv_dir / "SHFE.rb.HOT_m5.csv").write_text("date,open,high,low,close\n",
+                                                 encoding="utf-8")
+    assert dc.has_bars("SHFE.rb.HOT", "m5", str(storage))
+
+    # 删 CSV, 只留 DSB → 仍应识别
+    (csv_dir / "SHFE.rb.HOT_m5.csv").unlink()
+    dsb_dir = storage / "his" / "min5" / "SHFE"
+    dsb_dir.mkdir(parents=True)
+    (dsb_dir / "SHFE.rb_HOT.dsb").write_bytes(b"x")
+    assert dc.has_bars("SHFE.rb.HOT", "m5", str(storage))
 
 
 # ---------- 策略旁路日志链路 ----------

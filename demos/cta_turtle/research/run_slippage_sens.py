@@ -16,7 +16,8 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SENS_DIR = os.path.join(HERE, "outputs_bt", "sens")
+ROOT = os.path.dirname(HERE)   # 项目根 (本文件在 research/ 下)
+SENS_DIR = os.path.join(ROOT, "outputs_bt", "sens")
 
 METRICS = ("total_return", "annual_return", "max_falldown",
            "sharpe_ratio", "win_rate")
@@ -25,16 +26,20 @@ METRICS = ("total_return", "annual_return", "max_falldown",
 def run_one(code: str, slip: int, args) -> str:
     """跑单档滑点回测并把产出归档到 sens 目录; 返回归档目录"""
     stra_name = f"turtle_{code.replace('.', '_')}"
-    cmd = [sys.executable, os.path.join(HERE, "runBT.py"),
+    src = os.path.join(ROOT, "outputs_bt", stra_name)
+    summary = os.path.join(src, "summary.json")
+    if os.path.exists(summary):
+        os.remove(summary)              # 防失败时收集旧产出
+    cmd = [sys.executable, os.path.join(ROOT, "runBT.py"),
            "--code", code, "--config", args.config,
            "--start", str(args.start), "--end", str(args.end),
            "--capital", str(args.capital),
            "--slippage", str(slip)]
-    r = subprocess.run(cmd, cwd=HERE, capture_output=True, text=True)
-    src = os.path.join(HERE, "outputs_bt", stra_name)
-    if not os.path.isdir(src):
+    r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    if r.returncode != 0 or not os.path.exists(summary):
         raise RuntimeError(
-            f"{code} slip={slip}: 无产出 ({r.stdout[-500:]}\n{r.stderr[-500:]})")
+            f"{code} slip={slip}: 回测失败 rc={r.returncode} "
+            f"({r.stdout[-500:]}\n{r.stderr[-500:]})")
     dst = os.path.join(SENS_DIR, f"{code.replace('.', '_')}_slip{slip}")
     if os.path.exists(dst):
         shutil.rmtree(dst)
@@ -47,7 +52,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--code", type=str, required=True)
     ap.add_argument("--config", type=str,
-                    default=os.path.join(HERE, "config", "turtle_config.yaml"))
+                    default=os.path.join(ROOT, "config", "turtle_config.yaml"))
     ap.add_argument("--start", type=int, default=202001010900)
     ap.add_argument("--end", type=int, default=202510151500)
     ap.add_argument("--capital", type=float, default=5000000)
@@ -71,6 +76,9 @@ def main():
             s = json.load(f)
         row = {"code": args.code, "slippage_ticks": slip}
         row.update({k: s.get(k) for k in METRICS})
+        # P2-3: 标记 WtBtAnalyst 失败时的 funds.csv 兜底 summary
+        # (win_rate=0 即该口径不可比; 正常 analyst 产出无此键)
+        row["fallback"] = bool(s.get("fallback", False))
         rows.append(row)
 
     if not rows:

@@ -34,9 +34,9 @@ jobs:
       - name: Ruff lint
         run: ruff check . --config ruff_cta_turtle.toml
       - name: Pytest (pure-logic layer + coverage gate)
-        # 门槛 70% (helpers+filters+scripts 合计, 2026-09-20 实测 75%+):
-        # 防"新代码零测试"回归; 逐步抬升, 目标 helpers ≥85%
+        # 门槛 70% (core+filters+scripts 合计, 2026-09-20 实测 75%+):
+        # 防"新代码零测试"回归; 逐步抬升, 目标 core ≥85%
         run: >-
           python -m pytest tests/ -q
-          --cov=helpers --cov=filters --cov=scripts
+          --cov=core --cov=filters --cov=scripts
           --cov-report=term --cov-fail-under=70

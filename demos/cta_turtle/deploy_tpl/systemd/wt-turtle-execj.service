@@ -1,0 +1,18 @@
+[Unit]
+Description=cta_turtle exec journal sidecar (TRD_ORDER/TRADE -> JSONL)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=@PREFIX@/deploy/cta_turtle
+# 交易进程启动后再订总线, 避免开局空转
+ExecStartPre=/bin/sleep 5
+ExecStart=@PREFIX@/venv/bin/python scripts/exec_journal.py --mq ipc:///tmp/wt_turtle.ipc --out @PREFIX@/deploy/cta_turtle/generated/exec_journal
+Restart=always
+RestartSec=10
+# 旁路观测进程, 资源从宽但不放任
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

@@ -10,7 +10,7 @@ wf_results/wf_grid.csv (全网格 IS 成绩), 生成单文件 HTML 报告:
 
 纯 stdlib, 无第三方依赖; 纯函数可单测。
 
-用法: python3 scripts/wf_report.py [--dir ./wf_results] [--out report.html]
+用法: python3 research/wf_report.py [--dir ./wf_results] [--out report.html]
 """
 import argparse
 import csv

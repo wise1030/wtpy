@@ -11,9 +11,9 @@ import sys
 import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "helpers"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "core"))
 
-from helpers.TurtleEngine import (TurtleEngine, DEC_ENTER, DEC_ADD,
+from core.TurtleEngine import (TurtleEngine, DEC_ENTER, DEC_ADD,
                                   DEC_EXIT, DEC_SKIP, DEC_ARM)
 
 
@@ -22,6 +22,7 @@ def _ch(eu=110.0, el=90.0, xu=105.0, xl=95.0, fu=120.0, fl=80.0):
             "exit_upper": xu, "exit_lower": xl,
             "fs_upper": fu, "fs_lower": fl,
             "prev_entry_upper": eu, "prev_entry_lower": el,
+            "prev_exit_upper": xu, "prev_exit_lower": xl,
             "prev_fs_upper": fu, "prev_fs_lower": fl}
 
 

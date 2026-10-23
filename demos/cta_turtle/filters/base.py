@@ -48,6 +48,14 @@ class SignalFilterBase:
 
     def __init__(self, params: dict = None):
         p = dict(params or {})
+        # 异常策略 (2026-10-20): 过滤器抛异常时 allow=放行(旧行为) /
+        # deny=否决。辅助过滤器可保持 allow; 风险类过滤器应显式 deny,
+        # 避免"过滤器自身 bug 反而放行"。
+        self.on_error = str(p.pop("on_error", "allow")).lower()
+        if self.on_error not in ("allow", "deny"):
+            raise ValueError(
+                f"filter {self.name} on_error 非法 '{self.on_error}', "
+                f"仅支持 allow|deny")
         self._setup(p)
         if p:
             raise ValueError(

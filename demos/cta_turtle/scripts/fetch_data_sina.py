@@ -86,42 +86,48 @@ def main():
     if args.codes:
         codes = args.codes
     else:
-        from helpers.ConfigLoader import ConfigLoader
+        from core.ConfigLoader import ConfigLoader
         cfg = ConfigLoader.load(args.config)
         codes = [inst.code for inst in cfg.instruments]
 
-    from helpers.BarJournal import BarJournal
+    from core.BarJournal import BarJournal
+    import shutil
     import tempfile
-    # merge_rows 不读写 journal 目录, 给个临时目录满足构造即可
-    bj = BarJournal(tempfile.mkdtemp(prefix="sina_fetch_"))
+    # merge_rows 不读写 journal 目录, 给个临时目录满足构造即可;
+    # P2-1: finally 清理 (旧 mkdtemp 永久泄漏 /tmp)
+    tmpdir = tempfile.mkdtemp(prefix="sina_fetch_")
+    bj = BarJournal(tmpdir)
     csv_dir = os.path.join(args.storage, "csv")
     os.makedirs(csv_dir, exist_ok=True)
 
     n_fail = 0
-    for code in codes:
-        symbol = SINA_SYMBOL.get(code)
-        if not symbol:
-            print(f"[sina] {code}: 无新浪代码映射, 跳过 "
-                  f"(在 SINA_SYMBOL 中补充)")
-            n_fail += 1
-            continue
-        rows = None
-        for attempt in range(1 + args.retry):
-            try:
-                rows = fetch_daily(symbol, args.start, args.end)
-                break
-            except Exception as e:
-                print(f"[sina] {code}({symbol}) 拉取失败 "
-                      f"[{attempt + 1}/{1 + args.retry}]: {e}")
-                time.sleep(2)
-        if rows is None:
-            n_fail += 1
-            continue
-        csv_path = os.path.join(csv_dir, f"{code}_d.csv")
-        n = bj.merge_rows(rows, "d1", csv_path)
-        print(f"[sina] {code}({symbol}): 拉取 {len(rows)} 行, "
-              f"合并 +{n} → {csv_path}")
-        time.sleep(0.5)  # 防新浪限流
+    try:
+        for code in codes:
+            symbol = SINA_SYMBOL.get(code)
+            if not symbol:
+                print(f"[sina] {code}: 无新浪代码映射, 跳过 "
+                      f"(在 SINA_SYMBOL 中补充)")
+                n_fail += 1
+                continue
+            rows = None
+            for attempt in range(1 + args.retry):
+                try:
+                    rows = fetch_daily(symbol, args.start, args.end)
+                    break
+                except Exception as e:
+                    print(f"[sina] {code}({symbol}) 拉取失败 "
+                          f"[{attempt + 1}/{1 + args.retry}]: {e}")
+                    time.sleep(2)
+            if rows is None:
+                n_fail += 1
+                continue
+            csv_path = os.path.join(csv_dir, f"{code}_d.csv")
+            n = bj.merge_rows(rows, "d1", csv_path)
+            print(f"[sina] {code}({symbol}): 拉取 {len(rows)} 行, "
+                  f"合并 +{n} → {csv_path}")
+            time.sleep(0.5)  # 防新浪限流
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
     print(f"[sina] done: {len(codes) - n_fail}/{len(codes)} 成功")
     sys.exit(1 if n_fail else 0)

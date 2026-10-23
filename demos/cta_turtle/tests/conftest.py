@@ -12,7 +12,7 @@ import types
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-for sub in ("", "helpers"):
+for sub in ("", "core", "research"):
     p = ROOT / sub if sub else ROOT
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))

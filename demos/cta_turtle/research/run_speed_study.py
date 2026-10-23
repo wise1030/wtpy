@@ -30,10 +30,11 @@ import sys
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+ROOT = os.path.dirname(HERE)   # 项目根 (本文件在 research/ 下)
+sys.path.insert(0, ROOT)
 
-from helpers.indicators import wilder_atr, donchian      # noqa: E402
-from helpers.TurtleEngine import TurtleEngine            # noqa: E402
+from core.indicators import wilder_atr, donchian      # noqa: E402
+from core.TurtleEngine import TurtleEngine            # noqa: E402
 
 SPEEDS = [(10, 5), (20, 10), (40, 20), (55, 20), (80, 40),
           (120, 60), (250, 125)]
@@ -78,11 +79,16 @@ def sim_speed(dates, highs, lows, closes, atr, entry, exit_,
               "fs_upper": float(f_up[i]), "fs_lower": float(f_lo[i]),
               "prev_entry_upper": float(e_up[i - 1]),
               "prev_entry_lower": float(e_lo[i - 1]),
+              "prev_exit_upper": float(x_up[i - 1]),
+              "prev_exit_lower": float(x_lo[i - 1]),
               "prev_fs_upper": float(f_up[i - 1]),
               "prev_fs_lower": float(f_lo[i - 1])}
         decs = e.on_bar(float(highs[i]), float(lows[i]), float(closes[i]),
                         float(closes[i - 1]), n, ch)
         dir_before = e.direction      # 本根收盘前的持仓方向
+        # 决策前的手数 (含金字塔层): 当日 PnL 必须按实际持仓规模计算,
+        # 旧实现固定 1 个单位, 4 层金字塔的收益被低估 4 倍 (2026-10-20)
+        lots_before = sum(l for l, _ in e.layers) if dir_before != 0 else 0.0
         for dec in decs:
             k, px = dec["decision"], float(dec["price"])
             dn = e.direction or dec.get("direction", 0)
@@ -96,10 +102,11 @@ def sim_speed(dates, highs, lows, closes, atr, entry, exit_,
             elif k == "exit":
                 e.confirm_exit(px)
                 trades += 1
-        # 当日收益用**决策前**的方向 (本根收盘才建/平的仓不享有本根涨跌,
-        # 否则会有前视偏差 — 初版即因此把快速度夏普抬到 6+)
-        if dir_before != 0 and n > 0:
-            pnl[i] = dir_before * (closes[i] - closes[i - 1]) / n * UNIT_VAR
+        # 当日收益用**决策前**的方向与层数 (本根收盘才建/平/加的仓不享有
+        # 本根涨跌, 否则会有前视偏差 — 初版即因此把快速度夏普抬到 6+)
+        if dir_before != 0 and lots_before > 0 and n > 0:
+            pnl[i] = dir_before * lots_before * \
+                (closes[i] - closes[i - 1])
     from scipy.stats import skew
     return {"pnl": pnl, "trades": trades, "bars": n_bars,
             "years": n_bars / DAYS,
@@ -144,20 +151,21 @@ def mean_corr(series: dict) -> tuple:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv-dir", default=os.path.abspath(
-        os.path.join(HERE, "..", "storage", "csv")))
+        os.path.join(ROOT, "..", "storage", "csv")))
     ap.add_argument("--config", default=os.path.join(
-        HERE, "config", "turtle_config.yaml"))
-    ap.add_argument("--out", default=os.path.join(HERE,
+        ROOT, "config", "turtle_config.yaml"))
+    ap.add_argument("--out", default=os.path.join(ROOT,
                                                   "speed_study.json"))
     args = ap.parse_args()
 
-    from helpers.ConfigLoader import ConfigLoader
+    from core.ConfigLoader import ConfigLoader
     cfg = ConfigLoader.load(args.config)
     codes = [i.code for i in cfg.instruments]
     names = ["%d/%d" % s for s in SPEEDS]
     per_speed_pnl = {nm: {} for nm in names}
     per_instr = {}
     turnover = {nm: [] for nm in names}
+    trades_all = {nm: {} for nm in names}   # nm -> code -> 笔数 (免二次重跑)
     for code in codes:
         path = os.path.join(args.csv_dir, f"{code}_d.csv")
         if not os.path.exists(path):
@@ -173,6 +181,7 @@ def main():
             per_speed_pnl[nm][code] = r["pnl"]
             per_instr[code][nm] = r["pnl"]
             turnover[nm].append(r["trades"] / max(r["years"], 1e-9))
+            trades_all[nm][code] = r["trades"]
             print(f"[speed] {code:16s} {nm:>8s} "
                   f"{metrics(r['pnl'], UNIT_VAR)} "
                   f"trades={r['trades']} ({r['trades']/max(r['years'],1e-9):.1f}/年)")
@@ -230,22 +239,11 @@ def main():
         m = metrics(blend_series(sel), UNIT_VAR)
         tr = float(np.mean(turnover[nm]))
         # 每笔平均盈亏 (R) = 组合总R / 组合总笔数
-        n_trd = 0
-        for code in per_instr:
-            r = sim_speed(*load_d1(os.path.join(args.csv_dir,
-                                                f"{code}_d.csv")),
-                          None, 0, 0) if False else None
-        # 直接用已存 trades: 重算一次每速度总笔数与总R
-        n_trd = 0
-        tot_r = 0.0
-        for code in per_instr:
-            path = os.path.join(args.csv_dir, f"{code}_d.csv")
-            d2, h2, l2, c2 = load_d1(path)
-            atr2 = wilder_atr(h2, l2, c2, 20)
-            spec = SPEEDS[names.index(nm)]
-            rr = sim_speed(d2, h2, l2, c2, atr2, spec[0], spec[1])
-            n_trd += rr["trades"]
-            tot_r += rr["pnl"].sum() / UNIT_VAR
+        # (2026-10-20 修复: 首遍缓存笔数复用; 旧实现含死代码且全量重跑
+        #  一遍模拟, 结果与首遍逐位一致但耗时翻倍)
+        n_trd = sum(trades_all[nm].values())
+        tot_r = sum(float(per_speed_pnl[nm][c].sum()) / UNIT_VAR
+                    for c in per_instr if c in per_speed_pnl[nm])
         per_trade = tot_r / n_trd if n_trd else 0.0
         print("%-9s %8.3f %8.1f %8.2f %8.2f %9.1f %10.4f" % (
             nm, m["sharpe"], m["max_dd_R"], m["skew"], m["worst_day_R"],
@@ -260,13 +258,22 @@ def main():
         m = metrics(blend_series(sel), UNIT_VAR)
         sat[k] = {"set": sel, **m}
         print(f"  K={k}: {sel} {m}")
+    import time as _time
     with open(args.out, "w", encoding="utf-8") as f:
-        json.dump({"speeds": names, "corr": {f"{a}|{b}": v
-                                             for (a, b), v in corr.items()},
-                   "blends": blend_m, "saturation": sat,
-                   "turnover": {nm: round(float(np.mean(v)), 1)
-                                for nm, v in turnover.items()}},
-                  f, ensure_ascii=False, indent=2)
+        json.dump({
+            "meta": {
+                "generated": _time.strftime("%Y-%m-%d"),
+                "caliber": "日PnL=决策前方向×层数×Δclose(含金字塔层数,"
+                           "2026-10-20 修复); 风险归一化 unit=100000/N",
+                "stale_note": "2026-09-16 版 speed_study.json 为固定 1 单位"
+                              "口径, total_R/夏普被低估约金字塔倍数, 勿比",
+            },
+            "speeds": names, "corr": {f"{a}|{b}": v
+                                      for (a, b), v in corr.items()},
+            "blends": blend_m, "saturation": sat,
+            "turnover": {nm: round(float(np.mean(v)), 1)
+                         for nm, v in turnover.items()}},
+            f, ensure_ascii=False, indent=2)
     print(f"\n[speed] 结果 → {args.out}")
 
 

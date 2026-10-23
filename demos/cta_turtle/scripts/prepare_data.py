@@ -5,7 +5,7 @@
 1. hots.json 键检查 (--fix-hots 自动补空键, 空列表=不换月)
 2. 信号周期 (d1/h1) 与盘中周期 (intrabar_stop 时) K 线存在性/健康/深度检查
 3. 输出健康报告; 存在 error 时退出码 1 (--gate 语义, 可作启动门禁)
-4. --repair-journal: 将运行时旁路日志 (helpers/BarJournal) 尾部
+4. --repair-journal: 将运行时旁路日志 (core/BarJournal) 尾部
    增量合并回 storage/csv, 兜底宕机丢失的会话内K线
 
 数据获取不在本脚本范围 (需外部数据源凭据), 缺失时会给出
@@ -24,13 +24,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 
-from helpers.ConfigLoader import ConfigLoader          # noqa: E402
-from helpers import DataChecker                        # noqa: E402
+from core.ConfigLoader import ConfigLoader          # noqa: E402
+from core import DataChecker                        # noqa: E402
 
 
 def repair_journals(cfg, journal_dir: str, storage_dir: str) -> int:
     """全部品种 × 相关周期执行 journal→csv 回补, 返回追加总行数"""
-    from helpers.BarJournal import BarJournal
+    from core.BarJournal import BarJournal
     bj = BarJournal(journal_dir)
     total = 0
     for inst in cfg.instruments:

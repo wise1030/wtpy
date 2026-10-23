@@ -14,17 +14,27 @@
 注意: 网格×窗数 = 回测次数, 注意耗时; 纯逻辑函数可独立单测。
 """
 import argparse
+import atexit
 import csv
 import itertools
 import json
 import os
 import subprocess
 import sys
-import tempfile
 
 import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)   # 项目根 (本文件在 research/ 下)
+
+
+def _cleanup(path: str):
+    """atexit 钩子: 清理网格组合临时配置 (P2-1)"""
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------
@@ -130,12 +140,17 @@ def run_backtest(code: str, cfg_path: str, start: int, end: int,
                  capital: float, slippage: int) -> dict:
     """跑一次回测并读取 summary.json (复用 runBT 输出目录)"""
     stra_name = f"turtle_{code.replace('.', '_')}"
-    cmd = [sys.executable, os.path.join(HERE, "runBT.py"),
+    summary = os.path.join(ROOT, "outputs_bt", stra_name, "summary.json")
+    if os.path.exists(summary):
+        os.remove(summary)              # 防失败时读旧产出
+    cmd = [sys.executable, os.path.join(ROOT, "runBT.py"),
            "--code", code, "--config", cfg_path,
            "--start", str(start), "--end", str(end),
            "--capital", str(capital), "--slippage", str(slippage)]
-    r = subprocess.run(cmd, cwd=HERE, capture_output=True, text=True)
-    summary = os.path.join(HERE, "outputs_bt", stra_name, "summary.json")
+    r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"回测失败(rc={r.returncode}): {code} "
+                           f"{r.stdout[-300:]}\n{r.stderr[-300:]}")
     if not os.path.exists(summary):
         raise RuntimeError(f"回测无产出: {code} "
                            f"{r.stdout[-300:]}\n{r.stderr[-300:]}")
@@ -151,7 +166,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--code", type=str, required=True)
     ap.add_argument("--config", type=str,
-                    default=os.path.join(HERE, "config",
+                    default=os.path.join(ROOT, "config",
                                          "turtle_config.yaml"))
     ap.add_argument("--grid", type=str, required=True,
                     help="JSON 字符串或 .json 文件路径: "
@@ -182,11 +197,13 @@ def main():
     print(f"[wf] {len(windows)} 窗 x ({len(combos)} 组合+1 OOS) "
           f"≈ {total_bt} 次回测")
 
-    out_dir = os.path.join(HERE, "wf_results")
+    out_dir = os.path.join(ROOT, "wf_results")
     os.makedirs(out_dir, exist_ok=True)
     rows = []
     grid_rows = []          # 全网格 IS 成绩 (wf_report.py 热力图数据源)
-    tmp_cfg = os.path.join(tempfile.mkdtemp(prefix="wfcfg_"), "combo.yaml")
+    # P2-1: 网格组合配置放 out_dir 内并退出时清理 (旧 mkdtemp 永久泄漏 /tmp)
+    tmp_cfg = os.path.join(out_dir, "_wf_combo_tmp.yaml")
+    atexit.register(_cleanup, tmp_cfg)
 
     for i, w in enumerate(windows):
         tr_s, tr_e = w["train"]

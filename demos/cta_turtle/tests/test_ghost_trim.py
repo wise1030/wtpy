@@ -9,7 +9,7 @@
 import numpy as np
 import pytest
 
-from helpers.TurtleEngine import TurtleEngine
+from core.TurtleEngine import TurtleEngine
 from schemas import (InstrumentConfig, RiskConfig, TurtleBaseConfig)
 from StraTurtle import StraTurtle
 

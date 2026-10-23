@@ -63,7 +63,11 @@ class TurtleEngine:
                  pyramid_step_atr: float = 0.5,
                  enable_s1_filter: bool = True,
                  entry_mode: str = "close",
-                 stop_n_mode: str = "ratchet"):
+                 stop_n_mode: str = "ratchet",
+                 trigger_envelope: bool = True,
+                 allow_same_bar_reversal: bool = True,
+                 gap_stop: bool = True,
+                 arm_exclude_signal: bool = True):
         assert system in ("S1", "S2")
         assert entry_mode in ("close", "trigger")
         assert stop_n_mode in ("entry", "current", "ratchet")
@@ -80,6 +84,31 @@ class TurtleEngine:
         #            加仓位单调向有利方向): 保留 N 收缩时的动态收紧,
         #            同时保证单层最大亏损不超过首次锚定的 2N
         self.stop_n_mode = stop_n_mode
+        # S4-1 (2026-10-24): trigger 武装位口径。
+        #   True (默认, 旧行为) = 包络: max(通道, 当根 high/low), 即
+        #     "含当根"的 N 日通道 — 已突破日的次日挂在今日极值;
+        #   False = channel_only: 纯突破前 N 日通道 (经典海龟语义)。
+        #   两者差异集中在趋势初段的入场质量, 用 run_caliber_ab 量化。
+        self.trigger_envelope = bool(trigger_envelope)
+        # S4-2: 同 bar 反转。close 模式本 bar 决策出场后是否继续评估
+        # 入场 (旧行为=True); trigger 模式结构性不允许 (check_bar 路径
+        # 未知, 防乐观偏差), 该配置仅作用于 close。配置化的目的不是
+        # 收益而是口径收敛: close/trigger 成绩差里混着这个自由度。
+        self.allow_same_bar_reversal = bool(allow_same_bar_reversal)
+        # S4-3: close 模式引擎层跳空止损。on_bar 收到 open 且开盘越过
+        # 止损位时, 按开盘价成交 (旧行为=按止损价, 低估跳空亏损;
+        # 组合回测 sim 层早按 min(open,stop) 处理, 引擎层补齐后
+        # close 基线才诚实地差于 trigger)。None/未传 = 旧行为。
+        self.gap_stop = bool(gap_stop)
+        # S4-1b (2026-10-24, 实证见 matrix_results/caliber_ab.json):
+        # trigger 武装位的通道归属。True (默认, 2026-10-24 用户拍板
+        #   启用) = 严格经典: 用 prev_* 通道 (突破前 N 日高低点, 完全
+        #   排除信号 bar) —— A/B 实证 +53.9pp 收益/+0.124 Sharpe
+        #   (12 品种组合 trigger, 2019-2026), 入场更少而优 (避免追涨
+        #   已自我延伸通道的入场); False = 旧行为, 通道含信号 bar
+        #   (chan[i] 不含 bar i, 但武装用 bar T-1 恰在窗口内 →
+        #   trigger_envelope 的"包络"实为恒等操作)。
+        self.arm_exclude_signal = bool(arm_exclude_signal)
         # 当前有效止损/加仓位 (ratchet 模式的棘轮棘齿; 其余模式=当次算值)
         self._stop_level = None
         self._add_level = None
@@ -111,7 +140,8 @@ class TurtleEngine:
     # 主入口
     # ------------------------------------------------------------------
     def on_bar(self, high: float, low: float, close: float,
-               prev_close: float, n: float, channels: dict) -> list:
+               prev_close: float, n: float, channels: dict,
+               open: float = None) -> list:
         """评估单 bar, 返回决策列表 (按执行顺序)。
 
         channels: {entry_upper, entry_lower, exit_upper, exit_lower,
@@ -119,6 +149,7 @@ class TurtleEngine:
                    prev_entry_upper, prev_entry_lower,
                    prev_fs_upper, prev_fs_lower}
         通道值不含当前 bar; prev_* 为上一 bar 的通道值 (边沿判定用)。
+        open: 当根开盘价 (S4-3 跳空止损用; None=不处理跳空, 旧行为)。
         """
         if n is None or n != n or n <= 0:
             return []
@@ -144,12 +175,19 @@ class TurtleEngine:
             exit_price = None
             if self.direction > 0:
                 if low <= stop_price:
-                    exit_reason, exit_price = "stop", stop_price
+                    exit_reason = "stop"
+                    # S4-3: 开盘已越过止损 → 跳空按 open 成交 (诚实口径)
+                    exit_price = min(stop_price, open) \
+                        if (self.gap_stop and open is not None
+                            and open < stop_price) else stop_price
                 elif close < channels['exit_lower']:
                     exit_reason, exit_price = "channel", close
             else:
                 if high >= stop_price:
-                    exit_reason, exit_price = "stop", stop_price
+                    exit_reason = "stop"
+                    exit_price = max(stop_price, open) \
+                        if (self.gap_stop and open is not None
+                            and open > stop_price) else stop_price
                 elif close > channels['exit_upper']:
                     exit_reason, exit_price = "channel", close
 
@@ -179,7 +217,10 @@ class TurtleEngine:
         self._advance_sim(high, low, close, channels)
 
         # === 入场评估 (当前空仓或本 bar 已决策出场, 边沿触发) ===
-        if self.direction == 0 or exited_this_bar:
+        # S4-2: 同 bar 反转开关 (close 模式; trigger 结构性不允许)
+        can_enter = self.direction == 0 or (
+            exited_this_bar and self.allow_same_bar_reversal)
+        if can_enter:
             sig_dir = 0
             if close > channels['entry_upper'] and \
                     prev_close <= channels['prev_entry_upper']:
@@ -586,16 +627,29 @@ class TurtleEngine:
                    channels: dict) -> list:
         """日线评估: 刷新 N/通道并武装次日触发价位。
 
-        触发位口径: Donchian 通道(不含当根) 与当根 high/low 取包络,
-        即"含当根"的 N 日通道 — 与经典海龟次日挂单突破位一致。
+        触发位口径 (S4-1, 可配置): trigger_envelope=True (默认) 时
+        Donchian 通道(不含当根) 与当根 high/low 取包络 —— 注意当前
+        管线传入的 channels 窗口已含武装用 bar, 该包络实为恒等操作
+        (实证: 与 channel_only 逐位相同, 见 caliber_ab.json); 真正的
+        经典语义 ("次日挂突破前 N 日高点") 由 arm_exclude_signal=True
+        提供 (用 prev_* 通道, 完全排除信号 bar, A/B 显著更优)。
         """
         self._n = n
-        self._entry_ch = (max(channels['entry_upper'], high),
-                          min(channels['entry_lower'], low))
-        self._exit_ch = (max(channels['exit_upper'], high),
-                         min(channels['exit_lower'], low))
-        self._fs_ch = (max(channels['fs_upper'], high),
-                       min(channels['fs_lower'], low))
+        # 通道源: arm_exclude_signal → prev_* (突破前 N 日, 严格经典);
+        # 否则当根通道 (旧行为; envelope 包络在窗口已含信号 bar 时
+        # 恒等, 保留开关仅为口径显式)
+        p = "prev_" if self.arm_exclude_signal else ""
+        eu, el = channels[p + 'entry_upper'], channels[p + 'entry_lower']
+        xu, xl = channels[p + 'exit_upper'], channels[p + 'exit_lower']
+        fu, fl = channels[p + 'fs_upper'], channels[p + 'fs_lower']
+        if self.trigger_envelope:
+            self._entry_ch = (max(eu, high), min(el, low))
+            self._exit_ch = (max(xu, high), min(xl, low))
+            self._fs_ch = (max(fu, high), min(fl, low))
+        else:
+            self._entry_ch = (eu, el)
+            self._exit_ch = (xu, xl)
+            self._fs_ch = (fu, fl)
         self._rearm()
         return [{"decision": DEC_ARM, "plan": dict(self._armed), "n": n}]
 

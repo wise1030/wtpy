@@ -93,3 +93,15 @@ def test_merge_base_config(tmp_path):
     assert raw["base"]["unit_var"] == 200000          # 未覆盖项保留
     assert [i["code"] for i in raw["instruments"]] == \
         ["SHFE.rb.HOT"]                               # 单品种聚焦
+
+
+# ---------- P2-1: 临时配置清理 ----------
+
+def test_cleanup_tmp_cfg(tmp_path):
+    """网格组合临时配置退出时删除 (P2-1, atexit 钩子本体)"""
+    from run_walkforward import _cleanup
+    p = tmp_path / "_wf_combo_tmp.yaml"
+    p.write_text("base: {}", encoding="utf-8")
+    _cleanup(str(p))
+    assert not p.exists()
+    _cleanup(str(tmp_path / "not_exists.yaml"))   # 幂等, 不抛

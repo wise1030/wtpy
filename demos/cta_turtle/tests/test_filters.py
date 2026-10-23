@@ -14,7 +14,7 @@ from filters.base import (FilterContext, get_filter_class,
 from filters.builtins import (DirectionGateFilter, AdxTrendFilter,
                               VolatilityBandFilter, LiquidityFloorFilter)
 from filters import build_chain
-from helpers.indicators import wilder_adx
+from core.indicators import wilder_adx
 
 
 def _ctx(sig_dir=1, nbars=120, trend=True, **kw):
@@ -58,6 +58,22 @@ def test_base_setup_not_implemented():
         name = "F"
     with pytest.raises(NotImplementedError):
         F({})
+
+
+def test_on_error_policy_parsed_and_validated():
+    class F(SignalFilterBase):
+        name = "F"
+
+        def _setup(self, p):
+            pass
+
+        def allow_entry(self, ctx):
+            return True, ""
+
+    assert F({"on_error": "deny"}).on_error == "deny"
+    assert F({}).on_error == "allow"
+    with pytest.raises(ValueError, match="on_error"):
+        F({"on_error": "nope"})
 
 
 # ---------- DirectionGate ----------

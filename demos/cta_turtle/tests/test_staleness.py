@@ -6,7 +6,7 @@
 """
 import os
 
-from helpers.DataChecker import (check_staleness, expected_trade_date,
+from core.DataChecker import (check_staleness, expected_trade_date,
                                  load_holidays)
 from schemas import TurtleConfig, InstrumentConfig
 

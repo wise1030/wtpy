@@ -1,6 +1,6 @@
 """Webhook 推送适配器测试 (打桩 _post, 不发真实请求)"""
-import helpers.notifier as nf
-from helpers.notifier import WebhookNotifier, NullNotifier
+import core.notifier as nf
+from core.notifier import WebhookNotifier, NullNotifier
 
 
 def test_disabled_noop():

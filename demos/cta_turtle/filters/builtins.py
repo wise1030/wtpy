@@ -11,7 +11,7 @@ import numpy as np
 
 from filters.base import (SignalFilterBase, register_filter,
                           FilterContext, _finite)
-from helpers.indicators import wilder_adx
+from core.indicators import wilder_adx
 
 
 @register_filter

@@ -15,7 +15,7 @@ import os
 import subprocess
 import sys
 
-from helpers.ConfigLoader import ConfigLoader
+from core.ConfigLoader import ConfigLoader
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -75,7 +75,7 @@ def resolve_weights(codes, wmap: dict) -> dict:
 
 def synthesize_portfolio(codes, args, out_dir, wmap: dict = None) -> dict:
     """组合层权益合成 + 贡献分解 (P1-4); 失败返回 {} 不阻断"""
-    from helpers import portfolio as pf
+    from core import portfolio as pf
     curves = {}
     for c in codes:
         path = os.path.join(HERE, "outputs_bt", stra_name(c), "funds.csv")
@@ -151,11 +151,17 @@ def run_serial(codes, args):
           "后状态不完全复位); 如结果异常请改用 --mode subprocess")
     for code in codes:
         print(f"[matrix] serial backtest {code}")
-        m5_csv = os.path.join(HERE, "..", "storage", "csv",
-                              f"{code}_m5.csv")
+        # 2026-10-20: 认 DSB/CSV; --capital 同时作为风控权益基数
+        from core import DataChecker
+        storage = os.path.abspath(os.path.join(HERE, "..", "storage"))
+        summary = os.path.join(HERE, "outputs_bt", stra_name(code),
+                               "summary.json")
+        if os.path.exists(summary):
+            os.remove(summary)          # 防失败时收集旧产出
         stra = StraTurtle.from_config(
             name=stra_name(code), code=code, config_path=args.config,
-            bt_no_simtick=not os.path.exists(m5_csv))
+            bt_no_simtick=not DataChecker.has_bars(code, "m5", storage),
+            capital=args.capital)
         engine = WtBtEngine(EngineType.ET_CTA)
         engine.init('../common/', "configbt.yaml")
         engine.configBacktest(args.start, args.end)
@@ -167,21 +173,41 @@ def run_serial(codes, args):
         analyst.add_strategy(stra.name(), folder="./outputs_bt/",
                              init_capital=args.capital, rf=0.02,
                              annual_trading_days=240)
-        analyst.run_new()
+        try:
+            analyst.run_new()
+        except Exception as e:
+            print(f"[matrix] {code} analyst failed: {e}; fallback summary")
+            from runBT import _fallback_summary
+            _fallback_summary(stra.name(), args.capital,
+                              folder=os.path.join(HERE, "outputs_bt",
+                                                  stra_name(code)))
         engine.release_backtest()
+        if not os.path.exists(summary):
+            raise RuntimeError(f"{code}: serial 回测无 summary 产出")
 
 
 def run_subprocess(codes, args):
+    failures = []
     for code in codes:
         print(f"[matrix] subprocess backtest {code}")
+        folder = os.path.join(HERE, "outputs_bt", stra_name(code))
+        summary = os.path.join(folder, "summary.json")
+        if os.path.exists(summary):
+            os.remove(summary)          # 防失败时收集旧产出
         cmd = [sys.executable, os.path.join(HERE, "runBT.py"),
                "--code", code, "--config", args.config,
                "--start", str(args.start), "--end", str(args.end),
                "--capital", str(args.capital),
                "--slippage", str(args.slippage)]
         r = subprocess.run(cmd, cwd=HERE, capture_output=True, text=True)
-        if r.returncode != 0:
-            print(f"[matrix] {code} FAILED:\n{r.stdout[-2000:]}\n{r.stderr[-2000:]}")
+        if r.returncode != 0 or not os.path.exists(summary):
+            failures.append(code)
+            print(f"[matrix] {code} FAILED (rc={r.returncode}):\n"
+                  f"{r.stdout[-2000:]}\n{r.stderr[-2000:]}")
+    if failures:
+        raise SystemExit(
+            f"[matrix] {len(failures)} 个品种失败, 已中止收集 (避免旧产出"
+            f"污染): {failures}")
 
 
 def main():

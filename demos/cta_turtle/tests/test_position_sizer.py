@@ -1,6 +1,6 @@
 """PositionSizer VaR 反算测试"""
 from conftest import *  # noqa: F401,F403
-from helpers.PositionSizer import PositionSizer
+from core.PositionSizer import PositionSizer
 
 
 def test_layer_lots_basic():

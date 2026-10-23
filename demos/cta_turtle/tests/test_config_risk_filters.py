@@ -5,7 +5,7 @@ import tempfile
 import pytest
 
 from conftest import *  # noqa: F401,F403
-from helpers.ConfigLoader import ConfigLoader
+from core.ConfigLoader import ConfigLoader
 from filters.builtins import AdxTrendFilter, VolatilityBandFilter
 
 

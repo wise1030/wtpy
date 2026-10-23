@@ -82,6 +82,9 @@ class MultiCtx:
     def stra_prepare_bars(self, code, period, cnt, isMain=False):
         self.prepared = (code, period, cnt, isMain)
 
+    def stra_sub_ticks(self, code):
+        self.subscribed = code
+
     def stra_get_bars(self, code, period, cnt, isMain=False):
         return self.klines.get(period)
 
@@ -174,7 +177,7 @@ def test_config_rejects_bad_subperiod():
     import os
     import tempfile
 
-    from helpers.ConfigLoader import ConfigLoader
+    from core.ConfigLoader import ConfigLoader
     bad = """
 base:
   intrabar_period: m3

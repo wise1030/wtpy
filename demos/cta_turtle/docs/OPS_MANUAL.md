@@ -91,8 +91,11 @@
 | `base.truth_max_age` | 1800 | **86400** | d1 主K不闭合时无成交 rtdata 长时间不刷新但**内容仍准**；24h 用于区分"无成交"与"链路死" |
 | `base.truth_rebuild_mode` | alert | alert | 券商持仓是账户级，共享账户无法归属（实测 TA 112 vs 64），禁止按真值重建 |
 | `base.ghost_auto_trim` | true | true | CF 34 手幽灵仓事故后默认自动裁剪 |
+| `risk.max_risk_per_market` | 0.08 | 0.08 | 单品种**累计** 2N 潜亏上限（2026-10-20 新增；旧实现只有本笔 2%） |
 | `risk.max_total_risk_frac` | 0.06 | **0.10** | 12 品种组合预算；按"当前实际止损位"记账后 2N 虚高问题已修，10% 仍在紧平衡（p 加仓常被缩到个位数） |
 | `risk.max_units_total` | 4 | **6** | 12 品种 6 组，组内 2 |
+| `risk.daily_loss_stop_frac` | 0.0 | 0.0 | 日损停止新开/加仓（0=关闭；开启前先定单策略分配资金） |
+| `risk.fallback_capital` | 1500万 | 1500万 | 回测 `--capital` 会覆盖；风险mon base_amount 已对齐 |
 | `risk.account_gate_mode` | warn | warn（未写入 yaml=默认） | 共享账户资金协议未最终定案；升级 veto 前回看日志无误杀 |
 | `notify.enabled` | false | **false（待配）** | P0-2：配 webhook 后启用，所有 S 级检测才有声 |
 | 12 × `units` | — | 1 | 每层 20 万 VaR；units=1 且 pyramid_layers=4 → **会加仓**（非 1 才不加） |

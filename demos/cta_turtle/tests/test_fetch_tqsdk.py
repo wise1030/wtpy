@@ -11,11 +11,11 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "helpers"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "core"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 import fetch_data_tqsdk as fq  # noqa: E402
-from helpers.BarJournal import BarJournal  # noqa: E402
+from core.BarJournal import BarJournal  # noqa: E402
 
 
 # ------------------------------------------------------------------

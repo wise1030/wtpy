@@ -7,7 +7,7 @@ import pytest
 
 from conftest import *  # noqa: F401,F403
 from schemas import RiskConfig
-from helpers.RiskManager import RiskManager
+from core.RiskManager import RiskManager
 
 
 class CtxWithFund:
@@ -247,6 +247,40 @@ def test_on_filled_direction_flip_replaces_entry():
     assert e["dir"] == -1 and e["lots"] == 50   # 反向视为新开替换
 
 
+def test_per_market_cumulative_cap_blocks_adds():
+    """单品种累计上限: 已有风险 300k > 4%×5M=200k → 加仓 cap=0。"""
+    cfg = RiskConfig(max_units_total=0, max_units_per_group=0,
+                     max_risk_per_market=0.04)
+    rm = RiskManager(cfg)
+    rm.on_filled("A", 1, 300, 3400, n=50, volscale=10, stop_mult=2)
+    assert rm._book["A"]["risk"] == 300_000
+    lots, reasons = rm.cap_entry("A", lots=10, n=50, volscale=10,
+                                 price=3400, stop_mult=2.0,
+                                 equity=5_000_000)
+    assert lots == 0
+    assert any("per_market_cum" in r for r in reasons)
+
+
+def test_per_market_cumulative_allows_four_layers():
+    """8% 累计预算下, 每层 2% → 4 层后剩余 0, 第 5 层被累计闸拦截。"""
+    cfg = RiskConfig(max_units_total=0, max_units_per_group=0,
+                     max_risk_per_market=0.08, max_margin_usage=0.50,
+                     max_total_risk_frac=0.20)
+    rm = RiskManager(cfg)
+    for i in range(4):
+        lots, reasons = rm.cap_entry("A", lots=100, n=50, volscale=10,
+                                     price=3400, stop_mult=2.0,
+                                     equity=5_000_000)
+        assert lots == 100, (i, reasons)
+        rm.on_filled("A", 1, 100, 3400, n=50, volscale=10, stop_mult=2)
+    assert rm._book["A"]["risk"] == 400_000
+    lots, reasons = rm.cap_entry("A", lots=100, n=50, volscale=10,
+                                 price=3400, stop_mult=2.0,
+                                 equity=5_000_000)
+    assert lots == 0
+    assert any("per_market_cum" in r for r in reasons)
+
+
 def test_on_rebuilt_overwrites_book():
     rm = RiskManager()
     rm.on_filled("X", 1, 500, 3400, n=30, volscale=10, stop_mult=2)
@@ -264,3 +298,32 @@ def test_open_units_observers():
     assert rm.open_units == 2
     assert rm.units_in_group("g1") == 1
     assert rm.units_in_group("") == 0
+
+
+def test_units_count_is_not_code_count():
+    """经典单位上限按 units 累计, 不是按 code 数 (2026-10-20)。"""
+    cfg = RiskConfig(max_units_total=2, max_units_per_group=0,
+                     max_total_risk_frac=1.0, max_margin_usage=1.0)
+    rm = RiskManager(cfg)
+    rm.on_filled("A", 1, 1, 1.0, n=1, volscale=1, stop_mult=1,
+                 units=2.0)
+    assert rm.open_units == 2.0
+    lots, reasons = rm.cap_entry("B", lots=1, n=1, volscale=1,
+                                 price=1.0, stop_mult=1,
+                                 equity=10_000_000)
+    assert lots == 0
+    assert any("total_units(2>=2)" in r for r in reasons)
+
+
+def test_group_units_count_units():
+    cfg = RiskConfig(max_units_per_group=2, max_units_total=0,
+                     max_total_risk_frac=1.0, max_margin_usage=1.0)
+    rm = RiskManager(cfg)
+    rm.on_filled("A", 1, 1, 1.0, n=1, volscale=1, stop_mult=1,
+                 group="g", units=2.0)
+    assert rm.units_in_group("g") == 2.0
+    lots, reasons = rm.cap_entry("B", lots=1, n=1, volscale=1,
+                                 price=1.0, stop_mult=1,
+                                 equity=10_000_000, group="g")
+    assert lots == 0
+    assert any("group_units(g=2>=2)" in r for r in reasons)

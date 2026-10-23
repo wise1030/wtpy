@@ -9,10 +9,10 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "helpers"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "core"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
-from helpers.CsvDataLoader import (  # noqa: E402
+from core.CsvDataLoader import (  # noqa: E402
     CsvDataLoader, _parse_hhmm, parse_csv_rows)
 import convert_csv_to_dsb as conv  # noqa: E402
 

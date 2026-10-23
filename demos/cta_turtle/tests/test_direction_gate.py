@@ -11,7 +11,7 @@ from unittest.mock import MagicMock
 
 from conftest import *  # noqa: F401,F403
 from schemas import InstrumentConfig, TurtleBaseConfig
-from helpers.TurtleEngine import DEC_ENTER, DEC_EXIT, DEC_ADD
+from core.TurtleEngine import DEC_ENTER, DEC_EXIT, DEC_ADD
 
 
 class FakeCtx:
@@ -197,6 +197,31 @@ def test_no_reanchor_when_position_mismatch():
     ctx = FakeCtx(pos=50, avgpx=3600.0)   # 量不符
     stra._reanchor_on_roll(ctx)
     assert stra._engine.layers[0][1] == 3400.0
+
+
+def test_filter_exception_policy_allow_or_deny():
+    """过滤器异常策略: allow=旧行为放行; deny=否决并写 veto 日志。"""
+    from filters.base import SignalFilterBase
+
+    class Broken(SignalFilterBase):
+        name = "Broken"
+
+        def _setup(self, p):
+            pass
+
+        def allow_entry(self, ctx):
+            raise RuntimeError("boom")
+
+    stra = _make_stra()
+    ctx = FakeCtx()
+    dec = {"price": 3500.0, "direction": 1}
+
+    stra._chain = [Broken({"on_error": "allow"})]
+    assert stra._run_filter_chain(ctx, 1, dec) is True
+
+    stra._chain = [Broken({"on_error": "deny"})]
+    assert stra._run_filter_chain(ctx, 1, dec) is False
+    assert any("-> deny" in t for _, t in ctx.logs)
 
 
 def test_exit_executes_and_records_result():

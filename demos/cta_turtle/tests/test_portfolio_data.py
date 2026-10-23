@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 
 from conftest import *  # noqa: F401,F403
-from helpers import portfolio as pf
-from helpers import DataChecker as dc
+from core import portfolio as pf
+from core import DataChecker as dc
 
 
 # ---------- funds 读取 ----------
@@ -97,7 +97,7 @@ def test_contribution_uses_final_not_sum():
 def _mk_cfg(tmp, text):
     cfgp = tmp / "cfg.yaml"
     cfgp.write_text(text, encoding="utf-8")
-    from helpers.ConfigLoader import ConfigLoader
+    from core.ConfigLoader import ConfigLoader
     return ConfigLoader.load(str(cfgp))
 
 

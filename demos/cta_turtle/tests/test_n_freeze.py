@@ -11,8 +11,8 @@
 from conftest import *  # noqa: F401,F403
 import pytest
 
-from helpers.TurtleEngine import TurtleEngine
-from helpers.RiskManager import RiskManager
+from core.TurtleEngine import TurtleEngine
+from core.RiskManager import RiskManager
 from schemas import RiskConfig
 
 

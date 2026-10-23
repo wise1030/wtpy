@@ -5,7 +5,7 @@ import tempfile
 import pytest
 
 from conftest import *  # noqa: F401,F403
-from helpers.ConfigLoader import ConfigLoader
+from core.ConfigLoader import ConfigLoader
 
 VALID_YAML = """
 base:
@@ -20,7 +20,7 @@ instruments:
     units: 2
     direction: both
   - code: DCE.i.HOT
-    period: h1
+    period: d1
     system: S2
     units: 1
     direction: long
@@ -41,7 +41,16 @@ def test_load_valid():
     assert len(cfg.instruments) == 2
     rb, i = cfg.instruments
     assert rb.code == "SHFE.rb.HOT" and rb.units == 2
-    assert i.period == "h1" and i.system == "S2" and i.direction == "long"
+    assert i.period == "d1" and i.system == "S2" and i.direction == "long"
+
+
+def test_unit_risk_incoherence_warns(tmp_path, capsys):
+    """unit_var×stop_mult > fallback×max_risk 时必须 WARN,
+    提示实际只能下 <1 个名义单位 (2026-10-20 口径校验)。"""
+    ConfigLoader.load(_write(str(tmp_path), VALID_YAML))
+    err = capsys.readouterr().err
+    assert "unit_var×stop_atr_mult" in err
+    assert "max_risk_per_mkt" in err
 
 
 def test_defaults_applied():
@@ -61,7 +70,7 @@ def test_invalid_direction_rejected():
 
 
 def test_invalid_period_rejected():
-    bad = VALID_YAML.replace("period: h1", "period: m5")
+    bad = VALID_YAML.replace("period: d1", "period: m5", 1)
     with tempfile.TemporaryDirectory() as tmp:
         with pytest.raises(ValueError, match="period"):
             ConfigLoader.load(_write(tmp, bad))
@@ -257,3 +266,13 @@ def test_non_mapping_top_rejected():
     with tempfile.TemporaryDirectory() as tmp:
         with pytest.raises(ValueError, match="映射"):
             ConfigLoader.load(_write(tmp, "- just\n- a\n- list\n"))
+
+
+def test_h1_period_accepted(tmp_path):
+    """h1 一期 (2026-10-21) 起 load 放行; 非法周期 (m5) 仍拒绝"""
+    ok = VALID_YAML.replace("period: d1", "period: h1")
+    cfg = ConfigLoader.load(_write(str(tmp_path), ok))
+    assert cfg.instruments[0].period == "h1"
+    bad = VALID_YAML.replace("period: d1", "period: m5")
+    with pytest.raises(ValueError, match="period"):
+        ConfigLoader.load(_write(str(tmp_path), bad))

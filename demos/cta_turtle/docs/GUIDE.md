@@ -29,7 +29,7 @@ GUI 或按同口径直改 data.db，**改 db 后必须重启监控服务**（用
   可能存在 ≤0.5N 的回写窗口差（见 2.6）。
 - **成交**：逐笔成交记录（时间/方向/开平/价格/数量/标签）。
 - **资金曲线**：动态权益曲线（dynbalance 为**净盈亏**口径，不含本金；
-  真实权益 = 500万基准 + 净盈亏）。
+  真实权益 = 1500万基准 + 净盈亏；回测时基准被 `--capital` 覆盖）。
 - **日志**：策略运行日志实时滚动（`stra_log_text` 输出，含武装/触发/
   风控缩量/对账事件）。
 
@@ -138,18 +138,24 @@ S1 盈利跳过保留在引擎内（与 sim 单推进深度耦合），可用
 ### 2.5 双层风控
 
 **python RiskManager（下单前最后闸门，缩量优先于否决）**：
-- 单品种预算：本笔 2N 潜亏 ≤ 权益 × `max_risk_per_mkt`(2%)
+- 单品种本笔预算：本笔 2N 潜亏 ≤ 权益 × `max_risk_per_mkt`(2%)
+- 单品种累计预算：该品种 Σ在途 2N 潜亏 ≤ 权益 × `max_risk_per_market`(8%，
+  2026-10-20 新增；旧实现只有“本笔”，4 层可做到 8% 却看起来像 2% 上限)
 - 组合总敞口：Σ在途 2N 潜亏 ≤ 权益 × `max_total_risk_frac`(10%)
 - 相关性组/全组合单位数上限（`max_units_per_group`/`max_units_total`）
-- 保证金预估：占用 ≤ 权益 × `max_margin_usage`(60%)
-- **权益口径 = fallback_capital(500万) + `stra_get_fund_data(0)` 净盈亏**
-  （该接口在 bt/实盘均不含本金，动态权益；接口失效退回 500 万）
+- 保证金预估：占用 ≤ 权益 × `max_margin_usage`(10%，方案B按策略 sid 收窄)
+- **权益口径 = fallback_capital(1500万) + `stra_get_fund_data(0)` 净盈亏**
+  （该接口在 bt/实盘均不含本金，动态权益；接口失效退回 1500 万）
+- **日损闸**（2026-10-20，默认关闭）：`daily_loss_stop_frac` 停止新开/加仓，
+  `daily_loss_flatten_frac` 全平；开启前先确定单策略分配资金。
 
 **C++ SimpleRiskMon（账户级熔断，config.yaml riskmon 段）**：
 - 口径：当日**盈利部分**从高点回撤 ≥20% 且高点在 30 分钟窗口内
-  → `setVolScale` 全局缩量。注意是**账户级**（SimNow 共享账户，含其他
-  策略盈亏），且慢速阴跌不触发（出窗）——定位为极端闪崩兜底，
+  → `setVolScale(risk_scale)` 全局缩量。注意是**账户级**（SimNow 共享账户，
+  含其他策略盈亏），且慢速阴跌不触发（出窗）——定位为极端闪崩兜底，
   常规风险控制靠 python 层。
+- 2026-10-20：`base_amount` 对齐 1500 万、`risk_scale` 1.0→0.5；
+  旧值 1.0 = “降到 100%”，熔断只写日志不降仓。
 
 ### 2.6 执行与记账
 
@@ -231,13 +237,16 @@ S1 盈利跳过保留在引擎内（与 sim 单推进深度耦合），可用
 
 | 参数 | 默认 | 生产值 | 说明 |
 |---|---|---|---|
-| `max_risk_per_mkt` | 0.02 | 0.02 | 单品种本笔 2N 潜亏/权益 |
+| `max_risk_per_mkt` | 0.02 | 0.02 | 单品种**本笔** 2N 潜亏/权益 |
+| `max_risk_per_market` | 0.08 | 0.08 | 单品种**累计** 2N 潜亏/权益（2026-10-20 新增） |
 | `max_total_risk_frac` | 0.06 | **0.10** | 组合在途 2N 总潜亏/权益 |
-| `max_margin_usage` | 0.60 | 0.60 | 保证金占用/权益上限 |
+| `max_margin_usage` | 0.10 | 0.10 | 保证金占用/权益上限（按策略 sid） |
 | `margin_rate` | 0.12 | 0.12 | 保证金率预估 |
 | `max_units_per_group` | 2 | 2 | 相关性组单位数上限（0=不限） |
 | `max_units_total` | 4 | **6** | 全组合单位数上限（0=不限） |
-| `fallback_capital` | 500万 | 500万 | 权益基准/接口失效回退 |
+| `fallback_capital` | 1500万 | 1500万 | 权益基准/接口失效回退；回测 `--capital` 会覆盖 |
+| `daily_loss_stop_frac` | 0.0 | 0.0 | 日损停止新开/加仓（0=关闭） |
+| `daily_loss_flatten_frac` | 0.0 | 0.0 | 日损全平（0=关闭，应 >= stop） |
 | `account_gate_mode` | warn | warn | 共享账户可用资金闸门（需真值源）：`off`=不检查 / `warn`=只告警 / `veto`=缩量优先、归零否决 |
 | `account_reserve_frac` | 0.20 | 0.20 | 保留的可用资金比例（安全垫） |
 
@@ -256,14 +265,15 @@ riskmon:
     active: true
     module: WtRiskMonFact
     name: SimpleRiskMon
-    base_amount: 5000000      # 组合基础资金
+    base_amount: 15000000     # 组合基础资金 (2026-10-20 与 fallback 对齐)
     basic_ratio: 101          # 当日权益须创新高 101% 才启动跟踪
     calc_span: 5              # 检查间隔(s)
     inner_day_active: true    # 日内熔断开关
     inner_day_fd: 20.0        # 日内盈利回撤阈值(%, 数字不带%)
     multi_day_active: false   # 多日熔断(关闭, python层已覆盖)
     multi_day_fd: 60.0
-    risk_scale: 1.0           # 触发后目标仓位缩放
+    risk_scale: 0.5           # 触发后目标仓位缩放 (2026-10-20: 1.0→0.5,
+                              # 旧值 = 降到 100% 空转)
     risk_span: 30             # 高点有效窗口(min)
 ```
 

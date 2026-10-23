@@ -20,14 +20,19 @@ env:
         active: true
         module: WtRiskMonFact
         name: SimpleRiskMon
-        base_amount: 5000000    #组合基础资金(增量+基础=动态权益)
+        base_amount: 15000000   #组合基础资金(增量+基础=动态权益)
+                                # 2026-10-20: 与 risk.fallback_capital 对齐
+                                # (旧 5M 与策略 15M 两套基数)
         basic_ratio: 101        #日内高点百分比阈值
         calc_span: 5            #计算间隔(s)
         inner_day_active: true  #日内跟踪止损: 收益从高点回撤 20% 熔断
         inner_day_fd: 20.0
         multi_day_active: false #多日跟踪止损关闭 (策略层 RiskManager 已做预算)
         multi_day_fd: 60.0
-        risk_scale: 1.0         #目标仓位缩放 (1.0=不缩放; 缩量由 RiskManager 负责)
+        risk_scale: 0.5         #目标仓位缩放: 日内回撤触发时减半
+                                # 2026-10-20: 旧值 1.0 = "降到 100%" 空转,
+                                # 熔断只写日志不降仓; 0.5 才是真熔断。
+                                # 若触发后需人工复核, 先看 Logs 的 risk 日志。
         risk_span: 30           #风控日志间隔(s)
 executers: executers.yaml                       #执行单元配置
 parsers: tdparsers.yaml                         #行情通道配置

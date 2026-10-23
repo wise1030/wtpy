@@ -144,6 +144,21 @@ def check_bars(code: str, period: str, storage_dir: str) -> list:
     return issues
 
 
+def has_bars(code: str, period: str, storage_dir: str) -> bool:
+    """该周期是否已有可用数据 (DSB 或 CSV)。
+
+    runBT 的 bt_no_simtick 判定不能只看 storage/csv: 生产/回测常用
+    DSB 存储, 只看 CSV 会把有 m5 DSB 的品种误判为"无 m5", 退化为
+    bar 收盘撮合 (2026-10-20)。
+    """
+    dsb = _dsb_path(code, period, storage_dir)
+    if dsb and os.path.exists(dsb):
+        return True
+    suffix = _PERIOD_SUFFIX.get(period, "")
+    return any(os.path.exists(p) for p in
+               _csv_candidates(code, suffix, storage_dir))
+
+
 def check_hots(code: str, common_dir: str, live: bool = False):
     """hots.json 键检查; 返回 (是否可用, hots路径, 规则数)
 

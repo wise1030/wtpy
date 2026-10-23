@@ -35,7 +35,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 
-from helpers.BarJournal import BarJournal          # noqa: E402
+from core.BarJournal import BarJournal          # noqa: E402
 from timer_notify import notify                    # noqa: E402  (P1-4)
 
 
@@ -285,7 +285,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    from helpers.ConfigLoader import ConfigLoader
+    from core.ConfigLoader import ConfigLoader
     cfg = ConfigLoader.load(args.config)
     codes = [i.code for i in cfg.instruments]
     if args.codes:

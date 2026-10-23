@@ -10,7 +10,7 @@ import numpy as np
 from conftest import *  # noqa: F401,F403
 from StraTurtle import StraTurtle
 from schemas import InstrumentConfig, TurtleBaseConfig
-from helpers.TurtleEngine import DEC_ENTER, DEC_EXIT
+from core.TurtleEngine import DEC_ENTER, DEC_EXIT
 
 
 class MiniCtx:
@@ -59,7 +59,7 @@ def _mk_dual(units=2):
 def test_config_accepts_dual():
     import os
     import tempfile
-    from helpers.ConfigLoader import ConfigLoader
+    from core.ConfigLoader import ConfigLoader
     yml = """
 instruments:
   - code: SHFE.rb.HOT
@@ -308,7 +308,7 @@ def test_dual_risk_book_uses_layer_n_not_current():
 
 def test_engine_booked_risk_per_layer():
     """engine.booked_risk(): 逐层按各自冻结 N (缺 N 的层跳过)"""
-    from helpers.TurtleEngine import TurtleEngine
+    from core.TurtleEngine import TurtleEngine
     e = TurtleEngine("S1", stop_atr_mult=2.0, pyramid_layers=4)
     e.confirm_enter(1, 10, 3000.0, n=60.0)
     e.confirm_add(5, 3030.0, n=80.0)
@@ -319,7 +319,7 @@ def test_engine_booked_risk_per_layer():
 
 def test_risk_manager_explicit_risk_override():
     """on_rebuilt/sync_position 支持显式风险值 (多子系统汇总口径)"""
-    from helpers.RiskManager import RiskManager
+    from core.RiskManager import RiskManager
     rm = RiskManager()
     rm.on_rebuilt("SHFE.rb.HOT", 1, 15, 3410.0, 200.0, 10.0, 2.0,
                   "black", risk=1234.0)

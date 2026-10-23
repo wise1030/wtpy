@@ -13,7 +13,7 @@ import sys
 import numpy as np  # noqa: E402
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "helpers"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "core"))
 sys.path.insert(0, os.path.dirname(__file__))
 
 from test_intrabar import MultiCtx, _fill_daily  # noqa: E402
@@ -251,8 +251,15 @@ def test_catchup_eval_idempotent_same_day():
 
 def test_catchup_eval_skipped_in_bt():
     """bt 语义保护: is_backtest=True 时不自愈 (bt 走 on_bar 闭合评估)"""
-    stra, ctx, d1 = _setup()
+    # A2 (2026-10-22): is_backtest 在 on_init 单点采样进 StrategyMode
+    # (与 WtBtEngine 行为一致 — 真实 bt context 从启动即 True),
+    # 故须在 on_init 前置位; 旧测试在 init 后翻转, 依赖 live 重读
+    stra = _make_trig()
+    ctx = TrigCtx()
     ctx.is_backtest = True
+    d1 = ctx.add_store("d1")
+    _fill_daily(d1, 90)
+    stra.on_init(ctx)
     ctx.tdate = 20230090
     ctx.px = 3395.0
     stra.on_tick(ctx, "SHFE.rb.HOT", None)
@@ -342,7 +349,7 @@ def test_fill_reanchor_waits_for_partial_fill():
 
 def test_fill_reanchor_add_layer_only_fixes_last():
     """加仓回写只修最后一层, 首层价格保持 (增量成本归因)"""
-    from helpers.RiskManager import RiskManager
+    from core.RiskManager import RiskManager
     from schemas import RiskConfig
     stra, ctx, d1 = _setup()
     stra._risk = RiskManager(RiskConfig(max_margin_usage=0.95))  # 留加仓空间
@@ -371,6 +378,46 @@ def test_fill_reanchor_add_layer_only_fixes_last():
     assert e.layers[0][1] == lv                  # 首层不动
     assert abs(e.layers[-1][1] - (add_px + 2.0)) < 1e-9   # 仅最后一层修正
     assert abs(e.armed["stop"] - (add_px + 2.0 - 2.0 * n)) < 1e-9
+
+
+def test_fill_reanchor_runs_before_roll_shift():
+    """日评估必须先精确修末层, 再做 roll/漂移的全层平移 (2026-10-20)。
+
+    旧顺序: roll 按净均价差把所有层平移 → 末层再修一次 → 首层被污染。
+    新顺序: 末层精确回写 → 净均价已对齐 → roll 不再动。
+    """
+    from core.RiskManager import RiskManager
+    from schemas import RiskConfig
+    stra, ctx, d1 = _setup()
+    stra._risk = RiskManager(RiskConfig(max_margin_usage=0.95))
+    lv = _trigger_enter_with_pending_avgpx(stra, ctx)
+    e = stra._engine
+    # 首层按真实成交价结清
+    ctx.avgpx = lv
+    ctx.px = lv - 1.0
+    stra.on_tick(ctx, "SHFE.rb.HOT", None)
+    assert not stra._fill_pending
+    lots1 = e.layers[0][0]
+    # 加仓: confirm 时 avgpx 不可用 → 记账=触发价, 挂待回写
+    ctx.px = e.armed["add"]
+    add_px = ctx.px
+    orig = ctx.stra_get_position_avgpx
+    ctx.stra_get_position_avgpx = lambda code: 0.0
+    stra.on_tick(ctx, "SHFE.rb.HOT", None)
+    ctx.stra_get_position_avgpx = orig
+    assert len(e.layers) == 2
+    lots2 = e.layers[1][0]
+    # 执行层实际加仓价高 2 元
+    ctx.avgpx = (lv * lots1 + (add_px + 2.0) * lots2) / (lots1 + lots2)
+    ctx.pos = int(round(stra._combined_target()))
+    # 新日 K 触发 session_end 日评估 (走 _eval_core: fill 先于 roll)
+    d1.append(20230090, 1500, add_px, add_px + 1, add_px - 1, add_px)
+    stra._d1_date = 20230089
+    ctx.px = add_px
+    stra.on_session_end(ctx, 20230090)
+    assert e.layers[0][1] == lv                       # 首层未被摊薄
+    assert abs(e.layers[-1][1] - (add_px + 2.0)) < 1e-9
+    assert not stra._fill_pending
 
 
 def test_catchup_eval_reanchors_stale_fill():
@@ -544,6 +591,38 @@ def test_orphan_pending_dropped_on_restart():
     assert any("veto add" in t for _, t in ctx2.logs)
     assert e2._pending is None                      # reject 清挂起
     assert e2.armed["add"] is None                  # 当日撤武装防刷屏
+
+
+def test_n_missing_trigger_drop_clears_pending():
+    """N 缺失丢弃触发决策时必须同步清 pending (2026-10-20):
+    否则 pending 会经快照永久挂起, 吞掉后续全部触发 (含止损)。"""
+    stra, ctx, d1 = _setup()
+    e = stra._engine
+    e._pending = {"kind": "enter", "dir": 1}
+    stra._last_n = float("nan")
+    stra._exec_trigger_decs(
+        ctx, stra._subs[0],
+        [{"decision": "enter", "direction": 1, "price": 3500.0}])
+    assert e._pending is None
+    assert any("trigger decisions dropped" in t for _, t in ctx.logs)
+    assert any("clear pending on N-missing drop" in t for _, t in ctx.logs)
+
+
+def test_session_eval_passes_oi_context():
+    """session_end 合成日 K 评估必须把 his 的 volume/OI 传入过滤链,
+    否则 LiquidityFloor 在 live 主路径会 fail-open (2026-10-20)。"""
+    stra, ctx, d1 = _setup()
+    seen = {}
+
+    def fake(*a, **kw):
+        seen.update(kw)
+        return None, None, None
+
+    stra._eval_core = fake
+    stra._d1_date = None
+    stra.on_session_end(ctx, 20230091)
+    assert seen.get("with_oi") is True
+    assert seen.get("synth", "missing") is None
 
 
 def test_stale_pending_dropped_on_daily_eval():

@@ -26,7 +26,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
-sys.path.insert(0, os.path.join(ROOT, "helpers"))
+sys.path.insert(0, os.path.join(ROOT, "core"))
 
 
 # ------------------------------------------------------------------
@@ -144,7 +144,7 @@ def _auth(user: str, password: str):
 def fetch_bars(user: str, password: str, codes: list, periods: list,
                csv_dir: str, start: int = None, end: int = None):
     """dmpBars 回调 → BarJournal.merge_rows → storage/csv (幂等)"""
-    from helpers.BarJournal import BarJournal
+    from core.BarJournal import BarJournal
     from wtpy.WtCoreDefs import WTSBarStruct  # noqa: F401 (类型锚定)
     from wtpy.apps.datahelper.DHFactory import DHFactory
 
@@ -234,7 +234,7 @@ def main():
 
     codes = args.codes
     if not codes:
-        from helpers.ConfigLoader import ConfigLoader
+        from core.ConfigLoader import ConfigLoader
         cfg = ConfigLoader.load(args.config)
         codes = [i.code for i in cfg.instruments]
     print(f"[fetch] codes={codes} periods={args.periods}")

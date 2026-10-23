@@ -28,8 +28,8 @@ def test_deploy_structure_complete():
         assert os.path.isfile(os.path.join(grp, "runDt.py"))   # datakit 进程
         assert os.path.isfile(os.path.join(grp, "StraTurtle.py"))
         assert os.path.isfile(os.path.join(grp, "schemas.py"))
-        assert os.path.isfile(os.path.join(grp, "helpers", "TurtleEngine.py"))
-        assert os.path.isfile(os.path.join(grp, "helpers", "ConfigLoader.py"))
+        assert os.path.isfile(os.path.join(grp, "core", "TurtleEngine.py"))
+        assert os.path.isfile(os.path.join(grp, "core", "ConfigLoader.py"))
         assert os.path.isfile(os.path.join(grp, "config", "turtle_config.yaml"))
         for y in ("config.yaml", "executers.yaml", "actpolicy.yaml",
                   "filters.yaml", "logcfg.yaml",
@@ -37,7 +37,7 @@ def test_deploy_structure_complete():
                   "dtcfg.yaml", "mdparsers.yaml", "logcfgdt.yaml"):
             assert os.path.isfile(os.path.join(grp, y)), y
         # __pycache__ 不应被同步
-        assert not os.path.exists(os.path.join(grp, "helpers", "__pycache__"))
+        assert not os.path.exists(os.path.join(grp, "core", "__pycache__"))
 
 
 def test_config_paths_rewritten_absolute():

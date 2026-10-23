@@ -16,6 +16,9 @@ base:
   enable_s1_filter: true  # S1 盈利跳过过滤 (false=裸20/10突破)
   entry_mode: trigger     # close=收盘确认(旧口径) | trigger=盘中触发(方案C,
                           # 经典海龟原生: tick穿越通道即触发, 止损/加仓同理)
+  arm_exclude_signal: true  # S4-1b (2026-10-24 启用): trigger 武装位=突破前
+                          # N 日通道 (严格经典, 排除信号 bar); A/B +53.9pp/
+                          # +0.124 Sharpe (matrix_results/caliber_ab.json)
   stop_n_mode: ratchet    # 止损/加仓步长的 N 口径 (P0-2):
                           # ratchet=当根 N 但只收紧不放宽 (默认: 风险口径唯一
                           #   自洽 — 记账 2N == 实际止损亏损; 12 品种
@@ -56,13 +59,30 @@ base:
                            #   StraTurtle._detect_limit_lock)
 
 risk:                     # 组合级风险预算 (helpers/RiskManager, 下单前最后闸门)
-  max_risk_per_mkt: 0.02  # 单品种本笔 2N 止损潜亏 <= equity×2%
+  max_risk_per_mkt: 0.02  # 单品种**本笔** 2N 止损潜亏 <= equity×2%
+  max_risk_per_market: 0.08  # 单品种**累计** 2N 潜亏 <= equity×8%
+                          # (2026-10-20: 经典 4 层×2% ≈ 8%; 旧实现只有
+                          #  本笔检查, 4 层可做到 8% 却看起来像 2% 上限)
   max_total_risk_frac: 0.10  # 组合在途 2N 总潜亏 <= equity×10% (多品种组合口径)
   max_margin_usage: 0.10  # 本策略保证金占用 <= 自身权益×10% (方案B按策略收窄)
   margin_rate: 0.12       # 保证金率预估 (框架无保证金数据)
   max_units_per_group: 2  # 同相关性组同时持仓品种数 (0=不限)
   max_units_total: 6      # 全组合同时持仓品种数 (0=不限)
   fallback_capital: 15000000  # 动态权益无效时回退资金 (2026-10-08 5M->15M)
+                          # 注意: runBT --capital 会覆盖此值 (2026-10-20),
+                          # 回测报告分母与风控基数必须一致
+  # 资金分配 (2026-10-22; 0=关闭): 共享账户下组合可支配总资金。
+  # 启用后每策略权益基数 = portfolio_capital × weight/Σweight,
+  # fallback_capital 退化为深度兜底。开启前必须先确定组合真实
+  # 可用资金 (12 策略×15M=180M vs 账户 ~24M 的虚高口径即由此消解)。
+  portfolio_capital: 0
+  # alloc_weights: {SHFE.rb.HOT: 2.0}  # 按 code 加权, 缺省等权
+
+  # 策略层日损闸 (2026-10-20; 0=关闭): 相对当日首笔权益的回撤。
+  # 开启前先确定"单策略分配资金" — 15M×3% = 45 万/策略, 12 个策略
+  # 同时触发会远超共享账户承受力。建议分配资金落地后再设 0.03/0.05。
+  daily_loss_stop_frac: 0.0     # 停止新开/加仓
+  daily_loss_flatten_frac: 0.0  # 全平 (应 >= stop)
 
 notify:                   # webhook 事件推送 (helpers/notifier.py)
   # ⚠️ 生产必须启用: 2026-09-17 裸露持仓两天无人知晓的事故根因就是

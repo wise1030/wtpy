@@ -7,7 +7,7 @@
       # 校验远端目录与本地源一致 (manifest sha256 比对, 发现漂移)
 
 行为:
-- 复制: run.py / runDt.py / StraTurtle.py / schemas.py / helpers/ / config/
+- 复制: run.py / runDt.py / StraTurtle.py / schemas.py / core/ / config/
   + live yaml + datakit yaml (dtcfg/logcfgdt/mdparsers)
 - 重写 config.yaml 与 dtcfg.yaml: ../common/ ../storage/ → 绝对路径
   (CWD 无关化, WtEngine.init 的 folder 参数不传文件名时被忽略,
@@ -28,7 +28,7 @@ import shutil
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 CODE_FILES = ["StraTurtle.py", "schemas.py"]
-CODE_DIRS = ["helpers", "filters"]
+CODE_DIRS = ["core", "filters", "execution"]
 CFG_FILES = ["config/turtle_config.yaml"]
 LIVE_YAMLS = ["executers.yaml", "actpolicy.yaml", "filters.yaml",
               "logcfg.yaml", "tdparsers.yaml"]
@@ -46,6 +46,7 @@ TPL_FILES = {"deploy_tpl/run.py": "run.py",
               "scripts/convert_csv_to_dsb.py":
                   "scripts/convert_csv_to_dsb.py",
               "scripts/timer_notify.py": "scripts/timer_notify.py",
+              "scripts/exec_journal.py": "scripts/exec_journal.py",
               "scripts/ctp_loader/map_future.ini":
                   "scripts/ctp_loader/map_future.ini"}
 SECRET_TPL = {"deploy_tpl/mdparsers.yaml": "mdparsers.yaml"}
@@ -73,6 +74,12 @@ def make_deploy(target_root: str, common: str, storage: str,
 
     for rel, dst_rel in TPL_FILES.items():
         sync_file(os.path.join(HERE, rel), os.path.join(grp, dst_rel))
+    # systemd unit 模板整目录同步 (服务器上由 install_units.sh 渲染安装)
+    sd_src = os.path.join(HERE, "deploy_tpl", "systemd")
+    sd_dst = os.path.join(grp, "systemd_tpl")
+    if os.path.isdir(sd_dst):
+        shutil.rmtree(sd_dst)
+    shutil.copytree(sd_src, sd_dst)
     for fname in CODE_FILES:
         sync_file(os.path.join(HERE, fname), os.path.join(grp, fname))
     for d in CODE_DIRS:

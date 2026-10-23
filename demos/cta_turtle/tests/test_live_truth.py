@@ -8,11 +8,11 @@ import json
 import os
 import time
 
-from helpers.LiveTruth import (ChannelTruth, resolve_truth_path, load_rtdata,
+from core.LiveTruth import (ChannelTruth, resolve_truth_path, load_rtdata,
                                net_position, account_funds, trader_ids,
                                TradeJournal)
 from schemas import InstrumentConfig, TurtleBaseConfig, RiskConfig
-from helpers.RiskManager import RiskManager
+from core.RiskManager import RiskManager
 from StraTurtle import StraTurtle
 
 
@@ -254,6 +254,26 @@ def test_reconcile_truth_stale_falls_back_to_framework(tmp_path):
     for _ in range(3):
         stra._reconcile(ctx, _closes())
     assert stra._recon_miss == 0                     # 框架口径一致 → 无失配
+    assert stra._engine.layers == [[100, 3450.0]]
+
+
+def test_backtest_disables_truth_source(tmp_path):
+    """回测隔离 (2026-10-20): 即使 rtdata.json 新鲜, 回测也不得读取 —
+    否则同机实盘账户会参与回测的成交确认/ghost trim。"""
+    p = _write(tmp_path, data={"positions": [_rt_pos(lots=60.0)]})
+    stra = _mk_stra(p)
+    stra._is_backtest = True
+    assert stra._truth_source() is None
+    assert stra._truth_net("SHFE.rb.HOT") is None
+    assert stra._truth_position(TruthCtx(sig_pos=0),
+                                "SHFE.rb.HOT") == (0.0, "framework")
+    assert stra._account_available() is None
+    # 对账也不得按真值重建
+    stra._engine.confirm_enter(1, 100, 3450.0, n=30.0)
+    ctx = TruthCtx(sig_pos=100, avgpx=3450.0)
+    for _ in range(3):
+        stra._reconcile(ctx, _closes())
+    assert stra._recon_miss == 0
     assert stra._engine.layers == [[100, 3450.0]]
 
 
@@ -595,7 +615,9 @@ def test_alerts_persisted_to_local_file(tmp_path, monkeypatch):
     stra = _mk_stra(os.path.join(str(tmp_path), "rtdata.json"))
     logs = tmp_path / "Logs"
     import StraTurtle as stmod
+    import execution.telemetry as telem   # A1-2: 落盘路径移到可观测层
     monkeypatch.setattr(stmod, "_GROUP_DIR", str(tmp_path))
+    monkeypatch.setattr(telem, "_GROUP_DIR", str(tmp_path))
     stra._alert("unit_test", "hello")
     body = (logs / "alerts.log").read_text(encoding="utf-8")
     assert "unit_test" in body and "hello" in body

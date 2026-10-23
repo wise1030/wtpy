@@ -1,4 +1,5 @@
 """turtle_config.yaml → TurtleConfig 加载与校验"""
+import dataclasses
 import sys
 
 import yaml
@@ -17,9 +18,42 @@ _INST_KEYS = {"code", "period", "system", "units", "direction", "group",
               "filters", "intrabar_stop", "speeds"}
 
 
+def allocated_capital(risk, code: str, codes: list) -> float:
+    """资金分配启用时 (risk.portfolio_capital>0) 该 code 的权益基数 (元);
+    未启用返回 fallback_capital (2026-10-22 S1)。"""
+    if float(risk.portfolio_capital) <= 0:
+        return float(risk.fallback_capital)
+    w = risk.alloc_weights or {}
+    tot = sum(float(w.get(c, 1.0)) for c in codes)
+    if tot <= 0:
+        return float(risk.fallback_capital)
+    return float(risk.portfolio_capital) * float(w.get(code, 1.0)) / tot
+
+
+def risk_coherence_warning(base, risk, capital: float = None) -> str:
+    """单位风险 vs 单笔风险上限的一致性提示 (2026-10-20)。
+
+    capital: 有效权益基数 (资金分配启用时应传 allocated_capital,
+    否则按 fallback_capital 评估会与实际闸门不一致)。"""
+    if capital is not None:
+        risk = dataclasses.replace(risk, fallback_capital=float(capital))
+    unit_2n = float(base.unit_var) * float(base.stop_atr_mult)
+    order_cap = float(risk.fallback_capital) * float(risk.max_risk_per_mkt)
+    if unit_2n > order_cap > 0:
+        return (
+            f"[ConfigLoader] WARN: unit_var×stop_atr_mult="
+            f"{unit_2n:,.0f} > fallback_capital×max_risk_per_mkt="
+            f"{order_cap:,.0f} → 每笔最多只能下 "
+            f"{order_cap / unit_2n:.1%} 个名义单位 "
+            f"(建议 unit_var={order_cap / float(base.stop_atr_mult):,.0f} "
+            f"或 max_risk_per_mkt={unit_2n / float(risk.fallback_capital):.4f})")
+    return ""
+
+
 class ConfigLoader:
     @staticmethod
-    def load(path: str) -> TurtleConfig:
+    def load(path: str, warn: bool = True) -> TurtleConfig:
+        """加载配置; warn=False 时抑制风险口径 WARN (调用方自行覆盖后打印)。"""
         with open(path, encoding='utf-8') as f:
             raw = yaml.safe_load(f) or {}
         if not isinstance(raw, dict):
@@ -79,6 +113,11 @@ class ConfigLoader:
             raise ValueError("base.ghost_auto_trim 需为 bool")
         if int(base.limit_lock_secs) < 0:
             raise ValueError("base.limit_lock_secs 不能为负 (0=关闭)")
+        # S4 信号口径开关 (2026-10-24): 均为 bool
+        for name in ("trigger_envelope", "allow_same_bar_reversal",
+                     "gap_stop", "arm_exclude_signal"):
+            if not isinstance(getattr(base, name), bool):
+                raise ValueError(f"base.{name} 需为 bool")
 
         risk_raw = raw.get('risk', {}) or {}
         known_risk = {k for k in RiskConfig.__dataclass_fields__}
@@ -87,6 +126,19 @@ class ConfigLoader:
             raise ValueError(f"risk 配置含未知字段: {unknown}")
         risk = RiskConfig(**risk_raw)
         risk.validate()
+        # 单位风险 vs 单笔风险上限一致性 (2026-10-20):
+        # 1 个名义单位 2N 风险 = unit_var * stop_atr_mult;
+        # 单笔上限 = fallback_capital * max_risk_per_mkt。
+        # 前者更大时 cap_entry 会把每一笔都缩到 <1 单位 (当前配置
+        # 400k vs 300k → 75%), 文档里的 "1 unit = unit_var" 不成立。
+        # 这里只 WARN 不阻断, 避免旧配置无法启动; 新部署应调整
+        # unit_var 或 max_risk_per_mkt 使比例=1。
+        msg = risk_coherence_warning(base, risk)
+        if warn and msg:
+            print(msg, file=sys.stderr)
+        if risk.portfolio_capital > 0:
+            print(f"[ConfigLoader] 资金分配启用: portfolio_capital="
+                  f"{risk.portfolio_capital:,.0f}", file=sys.stderr)
 
         notify_raw = raw.get('notify', {}) or {}
         known_notify = {k for k in NotifyConfig.__dataclass_fields__}
@@ -116,6 +168,10 @@ class ConfigLoader:
             direction = item.get('direction', 'both')
             if period not in VALID_PERIODS:
                 raise ValueError(f"{code}: period 非法 '{period}', 仅支持 {VALID_PERIODS}")
+            # h1 一期 (2026-10-21): 策略层 m5→h1 聚合 (core/aggregate),
+            # 主K=m5; 数据前提=m5 存在, 由 runBT 预检/runLive 暖机兜底
+            if False:
+                pass
             if system not in VALID_SYSTEMS:
                 raise ValueError(f"{code}: system 非法 '{system}'")
             if direction not in VALID_DIRECTIONS:
@@ -138,6 +194,13 @@ class ConfigLoader:
 
         if not instruments:
             raise ValueError("instruments 为空")
+        if risk.alloc_weights:
+            codes = {i.code for i in instruments}
+            unknown_w = set(risk.alloc_weights) - codes
+            if unknown_w:
+                raise ValueError(
+                    f"risk.alloc_weights 含未知 code: {sorted(unknown_w)} "
+                    f"(不在 instruments 中)")
         cfg = TurtleConfig(base=base, instruments=instruments, risk=risk,
                            notify=notify)
         # 敏感行为口径显式打印 (P1-6): 默认值变更会静默改变风险行为
@@ -178,9 +241,16 @@ class ConfigLoader:
             fsp = int(sp.get("fs", 55))
             if fsp < 2:
                 raise ValueError(f"{code}: speeds[{j}] fs 需 >= 2")
+            # 引擎语义与展示名解耦 (2026-10-20): name 可为 fast/slow,
+            # system 必须是 S1/S2 (TurtleEngine 的过滤器语义)。
+            system = str(sp.get("system", "S1"))
+            if system not in ("S1", "S2"):
+                raise ValueError(
+                    f"{code}: speeds[{j}].system 非法 '{system}', "
+                    f"仅支持 S1|S2")
             total += share
             out.append(SpeedConfig(name=name, entry=entry, exit=exit_,
-                                   share=share, fs=fsp))
+                                   share=share, fs=fsp, system=system))
         if abs(total - 1.0) > 1e-6:
             raise ValueError(f"{code}: speeds share 之和需为 1 (当前 {total})")
         return out

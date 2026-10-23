@@ -4,7 +4,7 @@
 S1 盈利跳过过滤, fail-safe, sim 单推进, 持久化, 换月 re-anchor。
 """
 from conftest import *  # noqa: F401,F403
-from helpers.TurtleEngine import TurtleEngine
+from core.TurtleEngine import TurtleEngine
 
 
 def _ch(entry=100.0, exit_=90.0, fs=110.0, prev_entry=None,
@@ -16,6 +16,8 @@ def _ch(entry=100.0, exit_=90.0, fs=110.0, prev_entry=None,
         'fs_upper': fs, 'fs_lower': -fs,
         'prev_entry_upper': prev_entry if prev_entry is not None else entry,
         'prev_entry_lower': -(prev_entry if prev_entry is not None else entry),
+        'prev_exit_upper': -(prev_exit if prev_exit is not None else exit_),
+        'prev_exit_lower': prev_exit if prev_exit is not None else exit_,
         'prev_fs_upper': prev_fs if prev_fs is not None else fs,
         'prev_fs_lower': -(prev_fs if prev_fs is not None else fs),
     }
