@@ -7,7 +7,8 @@
 > 范围：`demos/cta_turtle` 全部源码、配置、测试、回测产物与仓库内生产快照。
 > 方法：核心文件逐行精读 + 386 例测试复跑 + 配置数值回放 + 回测交易/持仓重建 +
 > C++ 源码核对（`wondertrader/src/WtCore`、`WtRiskMonFact`）。
-> 说明：仓库已有一份 `docs/REVIEW_2026-10-18.md`（工程向）。本报告不重复其结论，
+> 说明：本报告不重复早前工程向审阅（REVIEW_2026-10-18，已被本报告 §10
+> 对账取代，文件随目录治理移除）的结论，
 > 重点回答四个问题：**架构是否可持续、业务功能是否闭环、策略/资金口径是否自洽、
 > 代码优化从哪里下手**；并给出按投入产出排序的路线图。
 
@@ -488,7 +489,7 @@ def on_init(self, context):
 - `run_matrix` 每个品种独立进程，`RiskManager` 私有，组合约束不生效（见 2.2）；
 - `run_matrix` 的 `--capital` 只影响 `WtBtAnalyst` 与组合分母，不影响手数；
 - `run_walkforward` 用 `summary.json` 是否存在判断成功，不检查 returncode/mtime，
-  失败窗口会拿上一次的旧结果（`REVIEW_2026-10-18` 已列 P0）；
+  失败窗口会拿上一次的旧结果（早前工程向审阅已列 P0，10-21 已修）；
 - `run_speed_study` 的 `pnl[i]` 只按 **1 个单位**计算：
   `dir_before * Δclose / n * UNIT_VAR`（`:101-102`），
   虽然引擎执行了 `confirm_add`，但 PnL 没有乘层数。

@@ -427,7 +427,11 @@ core/
   DataChecker.py         # 数据可用性预检 (零崩溃降级)
   portfolio.py           # 组合权益合成/指标/贡献分解 (纯函数)
   ConfigLoader.py        # yaml 加载校验 (base/risk/instruments+filters, 未知键拒绝)
+  CsvDataLoader.py       # csv 数据源加载 (当日分区过滤, DSB 绕行方案之一)
+  aggregate.py           # m5→h1 聚合 (起始钟点桶+夜盘日历映射, bt/live 同源)
 schemas.py               # 配置 dataclass (唯一权威定义)
+make_deploy.py           # 部署包构建 (代码/模板/清单哈希/漂移校验)
+golden/                  # 黄金回测基线 (端到端哈希, 口径变更需 --update 声明)
 runBT.py / run_matrix.py / runLive.py    # 核心工作流入口
 runMonSvr.py             # 监控服务 (WtMonSvr + 内置 WatchDog, token 鉴权)
 research/                # 研究/回测分析工具 (独立可执行, 不入生产路径)
