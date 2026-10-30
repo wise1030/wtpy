@@ -68,10 +68,10 @@ class StraTurtle(BaseCtaStrategy):
                                           False, bt_no_simtick)
 
         # === 子系统装配 ===
-        # system/speeds 由 core.profiles 唯一解析：S1/S2 是引擎语义和
-        # base 窗口预设，S1+S2 是 legacy 双 profile 组合。legacy 的
-        # ceil/floor units、顺序和快照 name 全部保留，不能机械翻成 50/50。
-        # 各 profile 只独立通道/引擎状态；ATR、过滤链、执行和风控仍共享。
+        # profiles/system/speeds 由 core.profiles 唯一展开为 ProfileSpec:
+        # profiles 是唯一推荐入口 (preset=窗口+filter 预设简写);
+        # system/speeds 是 deprecated 别名, 展开结果逐字等价。各 profile
+        # 只独立通道/引擎状态；ATR、过滤链、执行和风控仍共享。
         self._profiles = resolve_profiles(inst_cfg, base_cfg)
         self._subs = []
         for spec in self._profiles:
@@ -84,7 +84,7 @@ class StraTurtle(BaseCtaStrategy):
                     stop_atr_mult=base_cfg.stop_atr_mult,
                     pyramid_layers=base_cfg.pyramid_layers,
                     pyramid_step_atr=base_cfg.pyramid_step_atr,
-                    enable_s1_filter=base_cfg.enable_s1_filter,
+                    enable_s1_filter=spec.filter,
                     entry_mode=base_cfg.entry_mode,
                     stop_n_mode=base_cfg.stop_n_mode,
                     trigger_envelope=base_cfg.trigger_envelope,

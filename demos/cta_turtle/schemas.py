@@ -196,19 +196,46 @@ class SpeedConfig:
 
 
 @dataclass
+class ProfileConfig:
+    """instruments[].profiles[] 项: 统一的信号 profile 入口
+    (2026-10-30 配置统一, docs/PROFILE_CONFIG_UNIFICATION.md)。
+
+    语义上 profile 只有三个正交维度: 窗口(entry/exit/fs) × filter
+    (S1 入场状态机) × share(品种预算份额)。`preset: S1|S2` 只是这三组
+    维度的预设简写 —— S1 = base.s1_entry/s1_exit + filter(缺省跟随
+    base.enable_s1_filter); S2 = base.s2_entry/s2_exit + filter=off。
+    显式字段永远覆盖预设缺省值, 因此 "S2 语义 + 自定义窗口"、
+    "S1 窗口 + 关过滤器" 等组合都可表达。
+
+    多档必须显式 name (快照/日志身份); 单档 name 可缺省 (键=预设名)。
+    与 system/speeds 互斥 —— 后两者是 deprecated 别名, 由
+    core.profiles.resolve_profiles 展开为同一 ProfileSpec 序列。
+    """
+    name: str = ""                   # 快照/日志键; 多档必填且唯一
+    preset: str = ""                 # S1 | S2; 空 = 窗口全显式自定义
+    entry: int = None                # 入场通道窗口 (None=预设缺省)
+    exit: int = None                 # 出场通道窗口 (None=预设缺省)
+    fs: int = None                   # fail-safe 通道 (None=base.s2_entry)
+    filter: bool = None              # S1 过滤器语义; None=预设缺省
+    share: float = None              # 品种风险/保证金预算份额 (单档缺省 1.0)
+
+
+@dataclass
 class InstrumentConfig:
     """单品种配置"""
     code: str                        # e.g. SHFE.rb.HOT
     period: str = "d1"               # d1 | h1
-    system: str = SYSTEM_S1          # S1 | S2 | S1+S2 (双系统 ceil/floor units)
+    system: str = SYSTEM_S1          # [deprecated] S1 | S2 | S1+S2, 用 profiles 替代
     units: int = 1                   # 期望交易单位数(每层 VaR = units × unit_var)
     direction: str = DIRECTION_BOTH  # both | long | short
     group: str = ""                  # 相关性组标签(如 black/cheme; 空=不参与组限)
     filters: list = field(default_factory=list)   # list[FilterConfig]
     intrabar_stop: bool = False      # 盘中止损 (主K切换为 base.intrabar_period)
-    speeds: list = field(default_factory=list)   # list[SpeedConfig];
-                                     # 非空时忽略 system, 按 core.profiles
-                                     # 展开；多档 YAML 必须显式 name/system
+    speeds: list = field(default_factory=list)   # [deprecated] list[SpeedConfig]
+                                     # 用 profiles 替代
+    profiles: list = field(default_factory=list)  # list[ProfileConfig];
+                                     # 非空时唯一入口, 与 system/speeds 互斥,
+                                     # 按 core.profiles 展开
 
     def allows_direction(self, direction: int) -> bool:
         """direction: 1=多, -1=空"""

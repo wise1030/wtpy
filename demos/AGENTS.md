@@ -249,3 +249,21 @@ close 突破入场/trigger 武装）。剩余：live h1 部署前 rt m5 日历�
   `profiles: [{preset: S1|S2, 逐字段覆盖, share}]`；两步走:
   A 配置层统一零引擎漂移（推荐先做）, B 引擎去 system 化（可选,
   快照 v5）。边界: 与双系统 A/B 负结果无关, 不改变生产单 profile 结论。
+- [x] **profile 配置统一 A 方案落地（2026-10-30 傍晚，分析见
+  docs/PROFILE_CONFIG_UNIFICATION.md）**：配置层向代码层看齐——
+  `profiles[]` 成为唯一入口（`preset: S1|S2` = 窗口+filter 预设简写,
+  显式 entry/exit/fs/filter 逐字段覆盖, 打开 "S2 语义+自定义窗口"/
+  "S1 窗口+关过滤器" 组合空间）；`system`/`speeds` 转 deprecated 别名
+  （展开结果与旧实现逐字等价：ProfileSpec 序列/name 顺序/units/
+  share 全保留），显式使用打 WARN, 与 profiles 叠加 fail-loud 互斥
+  （消灭 "speeds 非空忽略 system" 优先级规则）。引擎/快照零改动:
+  ProfileSpec 增 filter 字段(默认 True, 不入快照指纹), 引擎构造
+  enable_s1_filter 改传 profile.filter (legacy 路径推导值与原
+  base 开关等价, S2 引擎门短路 ⇒ 行为不变)。生产 turtle_config
+  删 12 处 system:S1 行 (缺省单 S1 profile, 启动零警告)。
+  黄金基线第三次刷新: signals/funds/trades 哈希逐位一致
+  (9.7264464 不变), 仅 config_sha 更新——零语义漂移实锤。
+  测试 589→**606** (+17: preset 等价/窗口覆盖/filter 语义/双档
+  等价 legacy/互斥/弃用告警/快照指纹不变), ruff, 已部署生产
+  (64 文件 md5 全一致, 24 inited, 恢复正确, 0 error)。
+  剩余 B 方案(引擎去 system 化, 快照 v5)为可选后续。

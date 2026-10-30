@@ -568,7 +568,7 @@ class PortfolioSim:
             stop_atr_mult=self.base.stop_atr_mult,
             pyramid_layers=self.base.pyramid_layers,
             pyramid_step_atr=self.base.pyramid_step_atr,
-            enable_s1_filter=self.base.enable_s1_filter,
+            enable_s1_filter=profile.filter,
             entry_mode=entry_mode,
             stop_n_mode=self.base.stop_n_mode,
             trigger_envelope=self.base.trigger_envelope,

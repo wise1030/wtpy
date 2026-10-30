@@ -32,10 +32,15 @@ class ProfileSpec:
     fs: int
     units: float                # PositionSizer 名义单位
     share: float                # 品种内预算份额（legacy 可为 0）
+    filter: bool = True         # S1 过滤器语义 (引擎 enable_s1_filter;
+                                # 不入快照指纹 — 每启由配置重建, 与
+                                # enable_s1_filter 现状同口径)
 
     def snapshot_meta(self) -> dict:
         """写入快照的语义指纹。任何变化都要求显式迁移，禁止同名静默
-        继承旧 s1_last/armed/channels 或混用新旧 sizing。"""
+        继承旧 s1_last/armed/channels 或混用新旧 sizing。
+        (filter 有意不入指纹: 它是每启构造参数, 与 system 快照校验
+        组合已能保证语义连续。)"""
         return {
             "system": self.system,
             "entry": int(self.entry),
@@ -46,12 +51,116 @@ class ProfileSpec:
         }
 
 
-def resolve_profiles(inst_cfg, base_cfg) -> list:
-    """把 system/speeds 两种输入统一展开为 ProfileSpec 列表。
+# 预设缺省 (docs/PROFILE_CONFIG_UNIFICATION.md): preset 只填缺省字段,
+# 显式字段永远赢。S1 的 filter 缺省跟随 base.enable_s1_filter (全局
+# "裸20/10" 开关的语义不变); S2 恒无过滤器语义。
+_PRESET_DEFAULTS = {
+    "S1": lambda base: {
+        "system": "S1",
+        "entry": int(base.s1_entry), "exit": int(base.s1_exit),
+        "fs": int(base.s2_entry),
+        "filter": bool(base.enable_s1_filter),
+    },
+    "S2": lambda base: {
+        "system": "S2",
+        "entry": int(base.s2_entry), "exit": int(base.s2_exit),
+        "fs": int(base.s2_entry),
+        "filter": False,
+    },
+}
 
-    纯函数、零框架依赖； legacy 的 name、顺序、units 和 share 全部保留，
-    以保证现有快照键和执行优先级不变。
+
+def _expand_profiles(inst_cfg, base_cfg) -> list:
+    """profiles 入口展开 (2026-10-30 配置统一的唯一新分支)。
+
+    校验规则 (fail-loud, 与旧 speeds 分支同严格度):
+    - 多档必须显式 name 且唯一 (快照身份); 单档 name 可缺省, 键=预设名
+      (无预设时必须显式 name, 否则无法寻址);
+    - share 各自 (0,1] 且合计 1; 单档缺省 1.0;
+    - preset 仅 S1|S2; 无 preset 时 entry/exit 必须显式 (fs 缺省
+      base.s2_entry, filter 缺省 base.enable_s1_filter);
+    - preset S2 上显式 filter=true 非法 (S2 无过滤器语义);
+    - 窗口整数 >= 2。
     """
+    code = str(inst_cfg.code)
+    items = list(getattr(inst_cfg, "profiles", None) or [])
+    if not items:
+        raise ValueError(f"{code}: profiles 需为非空列表")
+    multi = len(items) > 1
+    names = [str(getattr(p, "name", "") or "") for p in items]
+    if multi and any(not n for n in names):
+        raise ValueError(f"{code}: 多档 profiles 必须显式 name (快照身份)")
+    if len(set(names)) != len(names):
+        raise ValueError(f"{code}: profiles 名称重复")
+
+    units_total = float(getattr(inst_cfg, "units", 1))
+    out = []
+    total_share = 0.0
+    for j, p in enumerate(items):
+        preset = str(getattr(p, "preset", "") or "").strip().upper()
+        if preset and preset not in _PRESET_DEFAULTS:
+            raise ValueError(
+                f"{code}: profiles[{j}].preset 非法 '{preset}', 仅支持 S1|S2")
+        if preset:
+            eff = _PRESET_DEFAULTS[preset](base_cfg)
+        else:
+            eff = {"system": "", "entry": None, "exit": None,
+                   "fs": None, "filter": None}
+        # 显式字段覆盖预设缺省
+        for field in ("entry", "exit", "fs", "filter"):
+            v = getattr(p, field, None)
+            if v is not None:
+                eff[field] = v
+        if eff["entry"] is None or eff["exit"] is None:
+            raise ValueError(
+                f"{code}: profiles[{j}] 无 preset 时必须显式 entry/exit")
+        flt = bool(eff["filter"]) if eff["filter"] is not None \
+            else bool(base_cfg.enable_s1_filter)
+        system = preset or ("S1" if flt else "S2")
+        if preset == "S2" and flt:
+            raise ValueError(
+                f"{code}: profiles[{j}] preset S2 无过滤器语义, "
+                "filter 只能为 false/缺省")
+        for field in ("entry", "exit"):
+            v = eff[field]
+            if not isinstance(v, int) or isinstance(v, bool) or v < 2:
+                raise ValueError(
+                    f"{code}: profiles[{j}].{field} 需为 >=2 的整数")
+        fs = eff["fs"] if eff["fs"] is not None else int(base_cfg.s2_entry)
+        if not isinstance(fs, int) or isinstance(fs, bool) or fs < 2:
+            raise ValueError(f"{code}: profiles[{j}].fs 需为 >=2 的整数")
+        share = getattr(p, "share", None)
+        share = 1.0 if share is None else float(share)
+        if not 0 < share <= 1:
+            raise ValueError(f"{code}: profiles[{j}].share 需在 (0,1]")
+        total_share += share
+        name = names[j] or preset
+        if not name:
+            raise ValueError(
+                f"{code}: profiles[{j}] 无 preset 时必须显式 name")
+        out.append(ProfileSpec(
+            key=name, system=system, entry=int(eff["entry"]),
+            exit=int(eff["exit"]), fs=int(fs),
+            units=max(0.0, units_total * share),
+            share=share, filter=flt))
+    if not math.isclose(total_share, 1.0, abs_tol=1e-6):
+        raise ValueError(
+            f"{code}: profiles share 之和需为 1 (当前 {total_share:g})")
+    return out
+
+
+def resolve_profiles(inst_cfg, base_cfg) -> list:
+    """把 profiles/system/speeds 三种输入统一展开为 ProfileSpec 列表。
+
+    纯函数、零框架依赖。profiles 是唯一推荐入口 (2026-10-30 配置
+    统一); system/speeds 是 deprecated 别名, 展开结果与旧实现逐字
+    等价 (legacy 的 name、顺序、units 和 share 全部保留，以保证现有
+    快照键和执行优先级不变)。
+    """
+    profiles = getattr(inst_cfg, "profiles", None) or []
+    if profiles:
+        return _expand_profiles(inst_cfg, base_cfg)
+
     speeds = getattr(inst_cfg, "speeds", None) or []
     if speeds:
         keys = [str(sp.name) for sp in speeds]
@@ -72,7 +181,9 @@ def resolve_profiles(inst_cfg, base_cfg) -> list:
                 # SpeedConfig 时 fs=None 也走同一缺省口径。
                 fs=int(sp.fs if sp.fs is not None else base_cfg.s2_entry),
                 units=max(0.0, float(inst_cfg.units) * float(sp.share)),
-                share=float(sp.share))
+                share=float(sp.share),
+                filter=bool(base_cfg.enable_s1_filter)
+                if str(sp.system) == "S1" else False)
             for sp in speeds
         ]
 
@@ -83,10 +194,11 @@ def resolve_profiles(inst_cfg, base_cfg) -> list:
         return [
             ProfileSpec("S1", "S1", int(base_cfg.s1_entry),
                         int(base_cfg.s1_exit), int(base_cfg.s2_entry),
-                        float(u1), u1 / denom),
+                        float(u1), u1 / denom,
+                        filter=bool(base_cfg.enable_s1_filter)),
             ProfileSpec("S2", "S2", int(base_cfg.s2_entry),
                         int(base_cfg.s2_exit), int(base_cfg.s2_entry),
-                        float(u2), u2 / denom),
+                        float(u2), u2 / denom, filter=False),
         ]
 
     system = str(inst_cfg.system)
@@ -98,7 +210,9 @@ def resolve_profiles(inst_cfg, base_cfg) -> list:
     else:
         entry, exit_ = base_cfg.s1_entry, base_cfg.s1_exit
     return [ProfileSpec(system, system, int(entry), int(exit_),
-                        int(base_cfg.s2_entry), float(inst_cfg.units), 1.0)]
+                        int(base_cfg.s2_entry), float(inst_cfg.units), 1.0,
+                        filter=bool(base_cfg.enable_s1_filter)
+                        if system == "S1" else False)]
 
 
 def required_bars(inst_cfg, base_cfg) -> int:

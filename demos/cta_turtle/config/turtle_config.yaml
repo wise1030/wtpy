@@ -103,7 +103,6 @@ instruments:
   # 黑色
   - code: SHFE.rb.HOT
     period: d1
-    system: S1
     units: 1
     direction: both
     group: black
@@ -111,14 +110,12 @@ instruments:
   # 有色
   - code: SHFE.cu.HOT
     period: d1
-    system: S1
     units: 1
     direction: both
     group: metal
     intrabar_stop: false
   - code: SHFE.al.HOT
     period: d1
-    system: S1
     units: 1
     direction: both
     group: metal
@@ -126,7 +123,6 @@ instruments:
   # 能源
   - code: INE.sc.HOT
     period: d1
-    system: S1
     units: 1
     direction: both
     group: energy
@@ -134,28 +130,24 @@ instruments:
   # 化工
   - code: CZCE.TA.HOT
     period: d1
-    system: S1
     units: 1
     direction: both
     group: cheme
     intrabar_stop: false
   - code: CZCE.MA.HOT
     period: d1
-    system: S1
     units: 1
     direction: both
     group: cheme
     intrabar_stop: false
   - code: DCE.pp.HOT
     period: d1
-    system: S1
     units: 1
     direction: both
     group: cheme
     intrabar_stop: false
   - code: DCE.l.HOT
     period: d1
-    system: S1
     units: 1
     direction: both
     group: cheme
@@ -163,14 +155,12 @@ instruments:
   # 油脂油料
   - code: DCE.m.HOT
     period: d1
-    system: S1
     units: 1
     direction: both
     group: oils
     intrabar_stop: false
   - code: DCE.p.HOT
     period: d1
-    system: S1
     units: 1
     direction: both
     group: oils
@@ -178,7 +168,6 @@ instruments:
   # 软商品
   - code: CZCE.CF.HOT
     period: d1
-    system: S1
     units: 1
     direction: both
     group: soft
@@ -186,7 +175,6 @@ instruments:
   # 股指
   - code: CFFEX.IF.HOT
     period: d1
-    system: S1
     units: 1
     direction: both
     group: equity
@@ -194,10 +182,17 @@ instruments:
 
 # === 单品种历史配置存档 (字段模板备查) ===
 #   period: d1            # d1 | h1, 每品种独立选择
-#   system: S1            # S1(20/10+盈利跳过+55fail-safe) | S2(55/20)
-#   # system: "S1+S2"     # 双系统并行: 各半 units 独立引擎, 净仓合并执行,
-#                         # 品种内风险/保证金预算按 units 占比切分 (经典海龟口径)
-#   units: 2              # 每层 N × 20万 VaR
+#   profiles:             # 信号 profile 唯一入口 (system/speeds 已弃用):
+#     - preset: S1        # 预设=窗口+过滤器简写; 可逐字段覆盖 (entry/exit/
+#                         # fs/filter)。多档必须显式 name + share 合计 1:
+#     # - name: fast
+#     #   preset: S1
+#     #   entry: 15        # 覆盖预设窗口
+#     #   share: 0.5
+#     # - name: slow
+#     #   preset: S2
+#     #   share: 0.5
+#   units: 2              # 每层 N × 20万 VaR (品种名义单位, 按 share 折算)
 #   direction: both       # both | long | short (隐式方向闸)
 #   group: black          # 相关性组标签 (配合 risk.max_units_per_group)
 #   intrabar_stop: false  # 盘中止损: 主K切为 base.intrabar_period,
@@ -215,7 +210,8 @@ instruments:
 #   2) storage 有对应 period 的 K 线数据 (h1 需小时线)
 # - code: DCE.i.HOT
 #   period: d1
-#   system: S2
+#   profiles:
+#     - preset: S2
 #   units: 1
 #   direction: long       # 只做多: 空头信号禁止开仓
 #   group: black

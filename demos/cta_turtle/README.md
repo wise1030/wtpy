@@ -48,7 +48,7 @@ StraTurtle (框架壳)           生命周期/图表/执行/持久化/对账/盘
 | S1 过滤 | 上次 S1 突破盈利 → 跳过本次；被跳过则武装 fail-safe：价格继续突破 55 周期强制入场；被跳过的模拟单 2N 止损后过滤器解除（`enable_s1_filter` 可关闭） |
 | S2 | 55 周期突破入场 / 20 周期出场，无过滤 |
 | 双系统 | `system: "S1+S2"` 两子系统并行，各分 ceil/floor 半量 units，独立通道/引擎状态，框架净仓=两者之和，品种内风险/保证金预算按 units 占比切分 |
-| 信号 profiles | `system` 与 `speeds` 由 `core/profiles.py` 统一展开：S1/S2 是引擎入场语义，speeds 是窗口/语义/份额组合；多档 speeds 必须显式 `name/system`，legacy 双系统保留 ceil/floor（不机械转 50/50）。ATR、period、过滤链、执行与风控仍为品种级共享；快照携带 profile 身份与语义指纹，改名/改语义不做静默迁移 |
+| 信号 profiles | `profiles[]` 是唯一入口（`system`/`speeds` 为弃用别名，deprecated 告警，展开结果等价）：`preset: S1\|S2` 是"窗口+过滤器语义"的预设简写（S1=20/10+盈利跳过/fail-safe；S2=55/20 无过滤），显式 `entry/exit/fs/filter` 逐字段覆盖预设缺省——`S2 语义+自定义窗口`、`S1 窗口+关过滤器` 等任意组合可表达；多档必须显式 `name` 且 `share` 合计=1（品种预算按份额切分），与旧键互斥 fail-loud。ATR、period、过滤链、执行与风控仍为品种级共享；快照携带 profile 身份与语义指纹，改名/改语义不做静默迁移 |
 | 加仓 | 每盈利 0.5N 加一层（可配 `pyramid_step_atr`），上限 `pyramid_layers`（1=不加仓），加仓后整体止损上移至最后加仓价 ∓ 2N；`stop_n_mode=ratchet` 时加仓位只在两次加仓之间单调向不利方向（防 N 缩小时价格未推进就加仓） |
 | 止损 | 2N 硬止损，bar 内 low/high 触碰判定，按止损价离场；`stop_n_mode` 控制 N 口径（默认 ratchet=只收紧不放宽，见「与经典海龟的偏离」）；`intrabar_stop: true` 时主K切换为分钟线（默认 m5）**盘中即时离场**；`entry_mode: trigger` 时止损/加仓/通道出场全部由 tick 武装位盘中触发 |
 | 触发执行 | `entry_mode: trigger`：日评估仅武装价位。常规使用 `next_*` 最近 N 根（含刚闭合 bar）；`arm_exclude_signal=true` 使用已排除信号根的 current 通道并忽略 envelope。tick 穿越即触发；过滤器于武装时前置裁决，风控于触发时复核当前权益；实盘日线由 session_end 的 m5 聚合评估；回测走 check_bar 触碰仿真 |

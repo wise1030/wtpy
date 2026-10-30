@@ -6,6 +6,7 @@ import yaml
 
 from schemas import (TurtleConfig, TurtleBaseConfig, InstrumentConfig,
                      RiskConfig, FilterConfig, NotifyConfig, SpeedConfig,
+                     ProfileConfig,
                      VALID_DIRECTIONS, VALID_SYSTEMS, VALID_PERIODS,
                      VALID_SUB_PERIODS)
 from filters.base import get_filter_class
@@ -16,7 +17,7 @@ from core.profiles import required_bars, describe_profiles, resolve_profiles
 # 防护是配置面最危险的洞)
 _TOP_KEYS = {"base", "risk", "notify", "instruments", "config_version"}
 _INST_KEYS = {"code", "period", "system", "units", "direction", "group",
-              "filters", "intrabar_stop", "speeds"}
+              "filters", "intrabar_stop", "speeds", "profiles"}
 
 
 def allocated_capital(risk, code: str, codes: list) -> float:
@@ -216,11 +217,26 @@ class ConfigLoader:
             filters = ConfigLoader._parse_filters(code, item.get('filters'))
             speeds = ConfigLoader._parse_speeds(
                 code, item.get('speeds'), default_fs=base.s2_entry)
+            profiles = ConfigLoader._parse_profiles(
+                code, item.get('profiles'))
+            if profiles and (speeds or 'system' in item):
+                raise ValueError(
+                    f"{code}: profiles 与 system/speeds 互斥 —— profiles "
+                    f"非空时是唯一入口, 禁止再叠加旧键造成优先级歧义")
+            deprecated = []
+            if speeds:
+                deprecated.append("speeds")
+            if not profiles and 'system' in item:
+                deprecated.append("system")
+            if deprecated:
+                print(f"[ConfigLoader] WARN {code}: "
+                      f"{'/'.join(deprecated)} 已弃用, 请迁移到 profiles "
+                      f"(docs/PROFILE_CONFIG_UNIFICATION.md)")
             instruments.append(InstrumentConfig(
                 code=code, period=period, system=system,
                 units=units, direction=direction,
                 group=group, filters=filters,
-                speeds=speeds,
+                speeds=speeds, profiles=profiles,
                 intrabar_stop=intrabar_stop))
 
         if not instruments:
@@ -234,7 +250,7 @@ class ConfigLoader:
                     f"{inst.code}: bar_cnt({base.bar_cnt}) 小于实际 profiles "
                     f"所需 {need} 根 (含全部 entry/exit/fs 与 prev 余量); "
                     f"请增大 bar_cnt 或缩短窗口")
-            if inst.speeds or inst.system == "S1+S2":
+            if inst.profiles or inst.speeds or inst.system == "S1+S2":
                 print(f"[ConfigLoader] {inst.code} profiles: "
                       f"{describe_profiles(resolve_profiles(inst, base))}")
         if risk.alloc_weights:
@@ -255,6 +271,52 @@ class ConfigLoader:
               f"gate={risk.account_gate_mode} "
               f"notify={'on' if notify.enabled else 'OFF'}")
         return cfg
+
+    @staticmethod
+    def _parse_profiles(code: str, raw_list) -> list:
+        """解析 instruments[].profiles (统一入口, 2026-10-30)。
+
+        preset 是窗口+filter 的预设简写 (S1/S2), 显式字段覆盖预设缺省;
+        语义校验集中在 core.profiles._expand_profiles (单一口径,
+        直测 dataclass 实例化同样 fail-loud)。这里只做 YAML 形状/类型
+        校验: 未知键拒绝、整数窗口、share/filter 类型。
+        """
+        if raw_list is None:
+            return []
+        if not isinstance(raw_list, list) or not raw_list:
+            raise ValueError(f"{code}: profiles 需为非空列表")
+        allowed = {"name", "preset", "entry", "exit", "fs",
+                   "filter", "share"}
+        out = []
+        for j, sp in enumerate(raw_list):
+            if not isinstance(sp, dict):
+                raise ValueError(f"{code}: profiles[{j}] 需为映射")
+            unknown = set(sp) - allowed
+            if unknown:
+                raise ValueError(
+                    f"{code}: profiles[{j}] 含未知字段 {sorted(unknown)} "
+                    f"(合法: {sorted(allowed)})")
+            for field in ("entry", "exit", "fs"):
+                value = sp.get(field)
+                if value is not None and (
+                        not isinstance(value, int) or isinstance(value, bool)):
+                    raise ValueError(
+                        f"{code}: profiles[{j}].{field} 需为整数，"
+                        "禁止浮点/字符串静默截断")
+            share = sp.get("share")
+            if share is not None:
+                share = float(share)
+                if not 0 < share <= 1:
+                    raise ValueError(f"{code}: profiles[{j}].share 需在 (0,1]")
+            flt = sp.get("filter")
+            if flt is not None and not isinstance(flt, bool):
+                raise ValueError(f"{code}: profiles[{j}].filter 需为 bool")
+            out.append(ProfileConfig(
+                name=str(sp.get("name") or ""),
+                preset=str(sp.get("preset") or ""),
+                entry=sp.get("entry"), exit=sp.get("exit"),
+                fs=sp.get("fs"), filter=flt, share=share))
+        return out
 
     @staticmethod
     def _parse_speeds(code: str, raw_list, default_fs: int = 55) -> list:

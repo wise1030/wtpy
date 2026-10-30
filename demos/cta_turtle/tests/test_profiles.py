@@ -6,7 +6,8 @@ import pytest
 from schemas import (InstrumentConfig, SpeedConfig, TurtleBaseConfig,
                      TurtleConfig)
 from core.profiles import (ProfileSpec, resolve_profiles, required_bars,
-                           snapshot_meta, validate_snapshot)
+                           snapshot_meta, validate_snapshot,
+                           validate_snapshot_meta)
 from core.ConfigLoader import ConfigLoader
 from core.TurtleEngine import TurtleEngine
 from run_portfolio_bt import PortfolioSim, build_channels, channel_at
@@ -192,3 +193,150 @@ def test_build_channels_uses_normalized_profile_windows():
     assert ch["entry_upper"] == pytest.approx(float(np.max(h[15:20])))
     _atr2, base_chan = build_channels(bars, base, "S1")
     assert channel_at(base_chan, 20)["entry_upper"] == pytest.approx(1000.0)
+
+
+# ---------- profiles 统一入口 (2026-10-30 配置统一) ----------
+
+from schemas import ProfileConfig  # noqa: E402
+
+
+def _inst(profiles=None, units=1, system="S1", speeds=None):
+    return InstrumentConfig(code="X.Y.HOT", system=system, units=units,
+                            profiles=profiles or [],
+                            speeds=speeds or [])
+
+
+def test_profiles_single_preset_s1_equals_legacy_system():
+    base = TurtleBaseConfig(s1_entry=21, s1_exit=11, s2_entry=56)
+    legacy = resolve_profiles(InstrumentConfig(code="X", system="S1"), base)
+    new = resolve_profiles(
+        _inst(profiles=[ProfileConfig(preset="S1")]), base)
+    assert new == legacy
+    assert new[0].key == "S1" and new[0].filter is True
+
+
+def test_profiles_single_preset_s2_uses_s2_windows():
+    base = TurtleBaseConfig(s2_entry=56, s2_exit=22)
+    ps = resolve_profiles(_inst(profiles=[ProfileConfig(preset="S2")]), base)
+    assert (ps[0].system, ps[0].entry, ps[0].exit, ps[0].fs) == \
+        ("S2", 56, 22, 56)
+    assert ps[0].filter is False
+
+
+def test_profiles_dual_preset_equals_legacy_s1s2():
+    base = TurtleBaseConfig()
+    legacy = resolve_profiles(
+        InstrumentConfig(code="X", system="S1+S2", units=2), base)
+    dual = resolve_profiles(_inst(
+        units=2,
+        profiles=[ProfileConfig(name="S1", preset="S1", share=0.5),
+                  ProfileConfig(name="S2", preset="S2", share=0.5)]), base)
+    assert [p.key for p in dual] == ["S1", "S2"]
+    assert [(p.units, p.share) for p in dual] == \
+        [(p.units, p.share) for p in legacy]
+    assert [p.filter for p in dual] == [True, False]
+
+
+def test_profiles_preset_window_override_keeps_semantics():
+    """S2 预设 + entry 覆盖 = "S2 语义 + 40/20 窗口" (统一的核心收益)"""
+    base = TurtleBaseConfig(s2_entry=56, s2_exit=22)
+    ps = resolve_profiles(_inst(profiles=[ProfileConfig(
+        preset="S2", entry=40)]), base)
+    assert (ps[0].system, ps[0].entry, ps[0].exit) == ("S2", 40, 22)
+    assert ps[0].filter is False
+
+
+def test_profiles_s1_filter_off_keeps_s1_engine_semantics():
+    """preset S1 + filter: false = 裸20/10: 引擎仍是 S1 状态机, 过滤器关"""
+    base = TurtleBaseConfig()
+    ps = resolve_profiles(
+        _inst(profiles=[ProfileConfig(preset="S1", filter=False)]), base)
+    assert ps[0].system == "S1" and ps[0].filter is False
+
+
+def test_profiles_custom_windows_without_preset():
+    base = TurtleBaseConfig()
+    ps = resolve_profiles(_inst(profiles=[ProfileConfig(
+        name="alt", entry=40, exit=15)]), base)
+    assert (ps[0].key, ps[0].system, ps[0].entry, ps[0].exit) == \
+        ("alt", "S1", 40, 15)
+    assert ps[0].fs == base.s2_entry and ps[0].filter is True
+
+
+@pytest.mark.parametrize("profiles,match", [
+    ([ProfileConfig(preset="S2", filter=True)], "S2 无过滤器语义"),
+    ([ProfileConfig(name="a", preset="S1", share=0.5),
+      ProfileConfig(name="b", preset="S2", share=0.4)], "之和需为 1"),
+    ([ProfileConfig(preset="S1", share=0.5),
+      ProfileConfig(preset="S2", share=0.5)], "必须显式 name"),
+    ([ProfileConfig(preset="S1"), ProfileConfig(name="b", preset="S2")],
+     "必须显式 name"),
+    ([ProfileConfig(name="x")], "必须显式 entry/exit"),
+    ([ProfileConfig(preset="S3")], "preset 非法"),
+    ([ProfileConfig(preset="S1", share=1.5)], "share 需在"),
+])
+def test_profiles_validation_fail_loud(profiles, match):
+    base = TurtleBaseConfig()
+    with pytest.raises(ValueError, match=match):
+        resolve_profiles(_inst(profiles=profiles), base)
+
+
+def test_profiles_system_and_speeds_mutually_exclusive(tmp_path):
+    """profiles 是唯一入口: 与旧键叠加 = fail-loud, 优先级规则不借尸还魂"""
+    base_yaml = (
+        "base: {unit_var: 200000}\n"
+        "instruments:\n"
+        "  - code: SHFE.rb.HOT\n"
+        "    system: S1\n"
+        "    profiles:\n"
+        "      - preset: S1\n")
+    fp = str(tmp_path / "cfg.yaml")
+    (tmp_path / "cfg.yaml").write_text(base_yaml, encoding="utf-8")
+    with pytest.raises(ValueError, match="互斥"):
+        ConfigLoader.load(fp, warn=False)
+
+
+def test_profiles_yaml_end_to_end_and_legacy_warning(tmp_path):
+    import yaml as _yaml
+    p = tmp_path / "cfg.yaml"
+    p.write_text(_yaml.safe_dump({
+        "base": {"unit_var": 200000},
+        "instruments": [{
+            "code": "SHFE.rb.HOT", "units": 2,
+            "profiles": [
+                {"name": "fast", "preset": "S1", "entry": 15, "share": 0.5},
+                {"name": "slow", "preset": "S2", "share": 0.5},
+            ],
+        }],
+    }, allow_unicode=True), encoding="utf-8")
+    cfg = ConfigLoader.load(str(p), warn=False)
+    ps = resolve_profiles(cfg.instruments[0], cfg.base)
+    assert [(x.key, x.system, x.entry, x.exit, x.units, x.share)
+            for x in ps] == [
+        ("fast", "S1", 15, cfg.base.s1_exit, 1.0, 0.5),
+        ("slow", "S2", cfg.base.s2_entry, cfg.base.s2_exit, 1.0, 0.5)]
+    # deprecated system 键 → 告警但可用
+    p2 = tmp_path / "legacy.yaml"
+    p2.write_text(_yaml.safe_dump({
+        "base": {"unit_var": 200000},
+        "instruments": [{"code": "SHFE.rb.HOT", "system": "S2"}],
+    }, allow_unicode=True), encoding="utf-8")
+    cfg2 = ConfigLoader.load(str(p2), warn=False)
+    assert resolve_profiles(cfg2.instruments[0], cfg2.base)[0].system == "S2"
+
+
+def test_profile_filter_reaches_engine():
+    from StraTurtle import StraTurtle
+    inst = InstrumentConfig(code="SHFE.rb.HOT", units=1, profiles=[
+        ProfileConfig(preset="S1", filter=False)])
+    stra = StraTurtle("tf", inst, TurtleBaseConfig())
+    assert stra._subs[0]["engine"].enable_s1_filter is False
+    assert stra._subs[0]["engine"].system == "S1"
+
+
+def test_snapshot_meta_unchanged_by_unification():
+    """快照指纹键集合不变 → 存量 v4 快照恢复零影响"""
+    meta = ProfileSpec("S1", "S1", 20, 10, 55, 1.0, 1.0).snapshot_meta()
+    assert set(meta) == {"system", "entry", "exit", "fs", "units", "share"}
+    validate_snapshot_meta({"S1": meta},
+                           [ProfileSpec("S1", "S1", 20, 10, 55, 1.0, 1.0)])
