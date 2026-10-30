@@ -216,8 +216,7 @@ def test_h1_close_mode_breakout_enters_on_flush():
 
 
 def test_h1_trigger_mode_arms_on_flush():
-    """trigger 模式: flush 评估后武装多头突破位 (含当根包络=3450),
-    不直接下单"""
+    """trigger: flush 后使用排除信号根的突破位，不把 3450 包络加回"""
     stra = _make_h1_stra("trigger")
     ctx = MultiCtx()
     _fill_h1_fixture(ctx, breakout_last_bucket=True)
@@ -226,4 +225,21 @@ def test_h1_trigger_mode_arms_on_flush():
     stra.on_session_end(ctx, _LAST)
     assert ctx.orders == []                       # 武装不产生订单
     lv = stra._engine.entry_levels()[1]
-    assert lv is not None and lv == pytest.approx(3450.0)
+    assert lv is not None and lv == pytest.approx(3401.0)
+
+
+def test_h1_bt_trigger_checks_m5_before_new_h1_eval():
+    stra = _make_h1_stra("trigger")
+    ctx = MultiCtx()
+    ctx.is_backtest = True
+    _fill_h1_fixture(ctx)
+    stra.on_init(ctx)
+    stra.on_calculate(ctx)                       # 建立推进基线
+    events = []
+    stra._run_trigger_bar = lambda *args: events.append("check_m5")
+    stra._eval_h1_bar = lambda *args: events.append("eval_h1")
+
+    m5 = ctx.klines["m5"]
+    m5.append(_LAST, 150500, 3400.0, 3401.0, 3399.0, 3400.5)
+    stra.on_calculate(ctx)
+    assert events == ["check_m5", "eval_h1"]

@@ -141,17 +141,14 @@ def _csv_last_date(path: str):
     if not os.path.exists(path):
         return None
     last = None
-    try:
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                parts = line.strip().split(",")
-                if not parts:
-                    continue
-                d = parts[0].replace("/", "").replace("-", "")
-                if d.isdigit() and len(d) >= 8:
-                    last = int(d[:8])
-    except OSError:
-        return None
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split(",")
+            if not parts:
+                continue
+            d = parts[0].replace("/", "").replace("-", "")
+            if d.isdigit() and len(d) >= 8:
+                last = int(d[:8])
     return last
 
 
@@ -160,14 +157,38 @@ def _csv_last_date(path: str):
 # ----------------------------------------------------------------------
 def update(codes: list, common_dir: str, storage_dir: str,
            read_bars=_read_dsb_bars, rebuild=_rebuild_hot_dsb,
-           dry_run: bool = False) -> dict:
-    """为 codes 续接 HOT 日线; 返回 {code: 增量条数}。异常不抛出。"""
+           dry_run: bool = False, failures=None) -> dict:
+    """为 codes 续接 HOT 日线，返回 {code: 增量条数}。
+
+    缺映射、缺文件、空数据、读取/合并/重建异常会逐条汇总、notify；
+    传入 failures 列表时可同时收集失败供 CLI 决定退出码。成功读取且
+    已最新产生的 0 增量（含周末空跑）不是失败。
+    """
+    new_failures = []
+
+    def record_failure(code, reason):
+        msg = f"{code}: {reason}" if code else reason
+        new_failures.append(msg)
+        print(f"[hot_daily] {msg}", file=sys.stderr)
+
+    def flush_failures():
+        if not new_failures:
+            return
+        if failures is not None:
+            failures.extend(new_failures)
+        detail = "; ".join(new_failures)
+        print(f"[hot_daily] 失败汇总 {len(new_failures)} 项: {detail}",
+              file=sys.stderr)
+        notify("hotdaily_fail",
+               f"HOT 日线续接失败 {len(new_failures)} 项: {detail}")
+
     hots_path = os.path.join(common_dir, "hots.json")
     try:
         with open(hots_path, encoding="utf-8") as f:
             hots = json.load(f)
     except (OSError, ValueError) as e:
-        print(f"[hot_daily] hots.json 读取失败: {e}")
+        record_failure("", f"hots.json 读取失败: {e}")
+        flush_failures()
         return {}
     mapping = parse_contracts(hots, codes)
     csv_dir = os.path.join(storage_dir, "csv")
@@ -176,33 +197,39 @@ def update(codes: list, common_dir: str, storage_dir: str,
     rolls = []
     for code, contract in mapping.items():
         if not contract:
-            print(f"[hot_daily] {code}: hots 无规则/无当前主力 -> 跳过")
             added[code] = 0
+            record_failure(code, "hots 无规则/无当前主力 -> 跳过")
             continue
         path = _contract_path(storage_dir, code, contract)
         if not os.path.exists(path):
-            print(f"[hot_daily] {code}: 主力合约数据缺失 {path} -> 跳过")
             added[code] = 0
-            continue
-        try:
-            bars = dedup_by_date(read_bars(path))
-        except Exception as e:          # 数据侧异常不得影响交易链路
-            print(f"[hot_daily] {code}: 读取/解析失败 {e} -> 跳过")
-            added[code] = 0
-            continue
-        if not bars:
-            added[code] = 0
+            record_failure(code, f"主力合约数据缺失 {path} -> 跳过")
             continue
         csv_path = os.path.join(csv_dir, f"{code}_d.csv")
-        prev_last = _csv_last_date(csv_path)
-        rows = bars_to_rows(bars)
-        if prev_last and rows and rows[0]["date"] > prev_last:
-            rolls.append((code, contract, prev_last, rows[0]["date"]))
+        try:
+            bars = dedup_by_date(read_bars(path))
+            if not bars:
+                added[code] = 0
+                record_failure(code, f"主力合约日线为空或无有效日期 {path}")
+                continue
+            rows = bars_to_rows(bars)
+            prev_last = _csv_last_date(csv_path)
+        except Exception as e:          # 单品种失败不阻断其他品种
+            added[code] = 0
+            record_failure(code, f"读取/解析失败 {e} -> 跳过")
+            continue
         if dry_run:
             n = sum(1 for r in rows if prev_last is None
                     or r["date"] > (prev_last or 0))
         else:
-            n = bj.merge_rows(rows, "d", csv_path)
+            try:
+                n = bj.merge_rows(rows, "d", csv_path)
+            except Exception as e:
+                added[code] = 0
+                record_failure(code, f"CSV 合并失败 {e} -> 跳过")
+                continue
+        if prev_last and rows[0]["date"] > prev_last:
+            rolls.append((code, contract, prev_last, rows[0]["date"]))
         added[code] = n
         print(f"[hot_daily] {code}: 主力={contract} 读入 {len(bars)} 根, "
               f"增量 {n} 根 (csv 原末日 {prev_last} -> 现末日 "
@@ -216,19 +243,14 @@ def update(codes: list, common_dir: str, storage_dir: str,
             cnt = rebuild(csv_dir, storage_dir)
             print(f"[hot_daily] HOT 日线 DSB 重建: {cnt} 个文件")
         except Exception as e:
-            # P1-4: 本脚本的静默失败正是 2026-09-01→16 HOT 日线冻结
-            # 16 天的直接原因 — DSB 重建失败必须"响"
-            print(f"[hot_daily] DSB 重建失败(非致命, 策略会重读 csv): {e}")
-            fails = [c for c, n in added.items() if n == 0]
-            notify("hotdaily_fail",
-                   f"HOT 日线续接异常: DSB 重建失败 ({e}); "
-                   f"零增量品种 {fails or '无'} — 策略可能用陈旧 "
-                   f"N/通道评估, 请检查 csv 末日")
+            # 重建失败只按真实故障告警，不能把正常零增量品种列为失败。
+            record_failure("", f"DSB 重建失败 ({e}; 策略会重读 csv)")
     for code, contract, pd, nd in rolls:
         print(f"[hot_daily] WARN 换月: {code} -> {contract} "
               f"(csv 末日 {pd}, 新合约首日 {nd})")
     print(f"[hot_daily] 合计增量 {total} 根, 覆盖 {len(codes)} 个品种"
           + (" (dry-run)" if dry_run else ""))
+    flush_failures()
     # P0 (2026-09-22): 重建后必须重启交易进程 — C++ WtDataReader 按
     # (code, period) 缓存 his 块, 进程不重启永远看不到新 DSB。实测后果:
     # ①周五 20:40 重建后, 周五夜盘 catchup 读到的 his 末根仍是周四
@@ -293,13 +315,16 @@ def main():
         codes = [c for c in codes if c in want]
     print(f"[hot_daily] {datetime.datetime.now():%F %T} "
           f"common={args.common} storage={args.storage} codes={len(codes)}")
-    update(codes, args.common, args.storage, dry_run=args.dry_run)
+    failures = []
+    update(codes, args.common, args.storage, dry_run=args.dry_run,
+           failures=failures)
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
     import traceback
     try:
-        main()
+        sys.exit(main())
     except Exception:
         tb = traceback.format_exc()
         print(tb, file=sys.stderr)

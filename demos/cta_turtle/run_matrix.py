@@ -16,6 +16,7 @@ import subprocess
 import sys
 
 from core.ConfigLoader import ConfigLoader
+from research.run_portfolio_bt import _hash_file, _code_version
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -104,6 +105,12 @@ def synthesize_portfolio(codes, args, out_dir, wmap: dict = None) -> dict:
                         round(float(port_pnl[i]), 2)] +
                        [round(float(a[i]), 2) for a in aligned.values()])
     summary = {"capital": args.capital,
+               "manifest": {
+                   "code_version": _code_version(),
+                   "config_sha256": _hash_file(args.config),
+                   "start": args.start, "end": args.end,
+                   "slippage_ticks": args.slippage,
+                   "note": "独立品种曲线合成，非共享账户约束回测"},
                "weights": {c: round(_w_of(c, curves, wmap), 4)
                            for c in aligned},
                "metrics": metrics,

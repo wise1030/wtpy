@@ -47,6 +47,10 @@ def main():
                     "constrained; 变体跑法见 OPTIMIZATION_PLAN §S4"),
            "variants": {}}
     rows = []
+    reference = None
+    spec_keys = ("config_sha256", "capital", "start", "end",
+                 "slippage_ticks", "margin_usage", "period", "codes",
+                 "priority", "max_units_total", "max_units_per_group")
     for key, (tag, desc, note) in VARIANTS.items():
         name = f"portfolio_bt_{tag}.json" if tag else "portfolio_bt.json"
         path = os.path.join(ROOT, "matrix_results", name)
@@ -55,6 +59,21 @@ def main():
                   file=sys.stderr)
             continue
         d = json.load(open(path, encoding="utf-8"))
+        current = {k: d.get(k) for k in spec_keys}
+        if reference is None:
+            reference = current
+            reference_manifest = d.get("manifest")
+        else:
+            mismatch = [f"{k}: {reference[k]!r} != {current[k]!r}"
+                        for k in spec_keys if reference[k] != current[k]]
+            manifest = d.get("manifest")
+            if reference_manifest is not None and manifest is not None \
+                    and reference_manifest != manifest:
+                mismatch.append("manifest: 输入数据/代码指纹不一致")
+            if mismatch:
+                raise SystemExit(
+                    f"[caliber_ab] 拒绝异口径聚合 {key}: " +
+                    "; ".join(mismatch))
         c = d["constrained"]
         m = c["metrics"]
         entry = {

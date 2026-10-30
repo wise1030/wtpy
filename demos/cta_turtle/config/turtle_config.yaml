@@ -16,9 +16,9 @@ base:
   enable_s1_filter: true  # S1 盈利跳过过滤 (false=裸20/10突破)
   entry_mode: trigger     # close=收盘确认(旧口径) | trigger=盘中触发(方案C,
                           # 经典海龟原生: tick穿越通道即触发, 止损/加仓同理)
-  arm_exclude_signal: true  # S4-1b (2026-10-24 启用): trigger 武装位=突破前
-                          # N 日通道 (严格经典, 排除信号 bar); A/B +53.9pp/
-                          # +0.124 Sharpe (matrix_results/caliber_ab.json)
+  arm_exclude_signal: true  # trigger 武装位=current 通道（已排除刚闭合
+                          # 信号 bar），并忽略 envelope；false=next_* 最近
+                          # N 根通道。2026-10-26 修复旧实现会重新包络信号根
   stop_n_mode: ratchet    # 止损/加仓步长的 N 口径 (P0-2):
                           # ratchet=当根 N 但只收紧不放宽 (默认: 风险口径唯一
                           #   自洽 — 记账 2N == 实际止损亏损; 12 品种
@@ -47,12 +47,12 @@ base:
                            #   CZCE.TA 账户 112 vs 本策略 64, 共享账户下无法
                            #   归属, 不得据此重建/收养); rebuild=允许按真值
                            #   重建/收养 (仅当本策略独占该账户时使用)
-                           # 成交确认不受影响: 用"下单窗口内增量 == 本层手数"
-                           # 判定, 对共享账户免疫
-  ghost_auto_trim: true    # ghost_fill 自愈 (2026-09-17 CF 34 手幽灵仓事故):
-                           #   真值确认"订单未到柜台"后, 自动把信号层从尾部
-                           #   裁剪到与券商同向且不超过它的手数 (只缩量绝不
-                           #   放大, 共享账户免疫); false=只告警人工处置
+                           # alert 不用账户净增量/绝对净仓做本策略自动成交
+                           # 确认或裁仓；rebuild(独占)才允许，alert 只接受
+                           # 本通道方向匹配的逐笔成交，异常转人工
+  ghost_auto_trim: true    # ghost_fill 自愈开关: 仅 rebuild/独占账户自动
+                           # 裁剪；alert/共享账户即使 true 也只告警人工处置，
+                           # 防止第三方同品种仓位导致误裁；false=总是只告警
   limit_lock_secs: 120     # 涨跌停锁死检测 (秒, 0=关闭): tick 价钉住不动超
                            #   过该时长且存在未闭合成交窗口 → 告警并暂停该
                            #   品种加仓 (出场/止损不受影响, 有界实现见

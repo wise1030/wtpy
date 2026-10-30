@@ -107,6 +107,12 @@ SimpleRiskMon (C++ 账户级熔断)      ← 引擎内置兜底
   账户免疫），未到位则 `ghost_fill`。
 - **S1+S2 双系统**：`system: "S1+S2"` 时两引擎各半 units 并行，净仓批量
   执行（当前配置均为单 S1）。
+- **speeds / profiles**：S1/S2 是引擎入场语义，speeds 才是窗口/语义/
+  份额组合；多档 speeds 必须逐项显式 `name/system`（`name: S2` 或
+  55/20 本身不代表 S2）。legacy 双系统按 ceil/floor 分配 units，
+  不能机械改写为 50/50 speeds。快照记录 profile 身份与语义指纹，
+  改名、改窗口/份额或 S1/S2 后会 fail-loud，须显式迁移，不能靠删除
+  快照让持仓静默塌缩到首 profile。
 
 ### 2.3 武装-触发状态机（entry_mode=trigger）
 
@@ -223,7 +229,8 @@ S1 盈利跳过保留在引擎内（与 sim 单推进深度耦合），可用
 |---|---|---|
 | `code` | — | `SHFE.rb.HOT` 格式（HOT=主力连续） |
 | `period` | d1 | 信号周期 d1｜h1 |
-| `system` | S1 | S1｜S2｜S1+S2（双系统各半 units） |
+| `system` | S1 | S1｜S2｜S1+S2（双系统按 ceil/floor 分配 units） |
+| `speeds` | [] | 多 profile 组合；多档必须显式 name/system，share 合计 1，长窗口须满足 bar_cnt |
 | `units` | 1 | 交易单位数；每层 VaR = units×unit_var |
 | `direction` | both | both｜long｜short（方向闸） |
 | `group` | "" | 相关性组（black/metal/energy/cheme/oils/soft/equity） |
@@ -313,7 +320,9 @@ riskmon:
 | veto_* | 风控否决/缩量、手数为 0（首见，同类去重） | 300s |
 | fill_timeout | 下单 10 分钟未达目标仓位（真值源不可用时走 fees 代理口径） | 300s |
 | ghost_fill | 真值源显示券商侧仓位未达目标（执行单元卡死/订单未到柜台） | 300s |
-| ghost_trim | ghost_fill 自愈动作：信号层已按券商实际持仓自动裁剪（只缩量） | 300s |
+| ghost_trim | 仅 rebuild/独占账户：ghost_fill 后按券商实际持仓自动裁剪（只缩量） | 300s |
+| ghost_trim_blocked | alert/共享账户疑似幽灵仓：禁止按账户绝对净仓自动裁剪，需人工核对归属 | 300s |
+| exit_unconfirmed | 出场目标已提交但平仓成交未齐；引擎/风险保留且禁止重入，超时仅告警不假确认 | 300s |
 | limit_lock | 疑似涨跌停锁死：价格钉住 >limit_lock_secs 且有未闭合成交窗口，加仓已暂停 | 300s |
 | truth_stale | 真值文件陈旧（>truth_max_age）→ 真值对账/资金闸门已停用 | 300s |
 | truth_mismatch | alert 模式：账户真值与框架仓差额（共享账户归属需人工确认） | 300s |
@@ -321,14 +330,16 @@ riskmon:
 | reconcile | 引擎与券商持仓持续失配→重建 / 外部全平 | 300s |
 | session | 收盘持仓汇总 | 每日 |
 | hots_roll | 主力换月（update_hots.py） | 每次变更 |
-| hots_fail / hots_partial | 主力更新双源（sina+tqsdk）都失败 / 部分品种无持仓数据 | 每次 |
+| hots_fail / hots_partial | 双源失败或全部无正持仓有效行情（不写盘不重启）/ 部分品种无数据沿用旧映射 | 每次 |
 | contracts_fail | contracts 定时同步失败（CTP 断连/超时/产出异常） | 每次 |
-| hotdaily_fail | HOT 日线续接 DSB 重建失败（16 天冻结事故同款检测点） | 每次 |
+| hotdaily_fail | HOT 缺主力映射/数据、读取/合并/DSB 重建失败；任务非零退出，需排查数据链 | 每次 |
 | hotdaily_restart | HOT 日线续接完成并已重启交易进程（每日 20:40 正常留痕，异常即未重启） | 每次 |
 | trigger_drop | 触发决策因 N 缺失被丢弃（不应发生，发生即 bug） | 300s |
 
 启用方式：turtle_config.yaml `notify.enabled: true` + 填入企业微信/钉钉
-webhook URL（`type: wechat|dingtalk`）。⚠️ **生产必须启用**：
+webhook URL（`type: wechat|dingtalk`）。配置后先运行
+`python3 scripts/notify_selftest.py`：真实推送成功才返回 0，未启用或失败均非零。
+⚠️ **生产必须启用**：
 2026-09-17 裸露持仓两天无人知晓的事故根因就是 `enabled=false` —
 所有 S 级检测都终止于本地 `Logs/alerts.log`。即使不启用 webhook，
 `_alert` 仍无条件追加 `Logs/alerts.log` 作为最后一道留痕。

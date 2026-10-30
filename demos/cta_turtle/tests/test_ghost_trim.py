@@ -32,6 +32,16 @@ class TestTrimToLots:
         assert [l for l, _ in e.layers] == [45, 20]
         assert e.direction == 1
 
+    def test_non_boundary_target_partially_trims_last_layer(self):
+        e = _eng()
+        e.confirm_enter(1, 45, 100.0, n=5.0)
+        e.confirm_add(20, 105.0, n=5.0)
+        e.confirm_add(19, 110.0, n=5.0)
+        e.confirm_add(15, 115.0, n=5.0)
+        assert e.trim_to_lots(66) == 33
+        assert [l for l, _ in e.layers] == [45, 20, 1]
+        assert sum(l for l, _ in e.layers) == 66
+
     def test_trim_to_zero_flattens(self):
         e = _eng()
         e.confirm_enter(-1, 50, 100.0, n=5.0)
@@ -73,6 +83,8 @@ class _NullNotify:
 
 
 def _make_stra(**base_kw):
+    # 自动 trim 仅允许在显式独占账户语义下测试；共享 alert 另有禁测。
+    base_kw.setdefault("truth_rebuild_mode", "rebuild")
     base = TurtleBaseConfig(**base_kw)
     inst = InstrumentConfig(code="CZCE.CF.HOT", units=1)
     return StraTurtle("turtle_CZCE_CF_HOT", inst, base,
@@ -190,3 +202,13 @@ class TestGhostTrim:
         stra2._maybe_ghost_trim(ctx, "S1", stra2._fill_pending["S1"], 0.0)
         assert stra2._combined_target() == 0
         assert ctx.positions.get("CZCE.CF.HOT") == 0
+
+    def test_alert_shared_account_never_auto_trim(self):
+        """账户净仓归属不唯一时，ghost_auto_trim=True 也只能告警。"""
+        stra = _make_stra(truth_rebuild_mode="alert")
+        self._stra_with_pos(stra)
+        ctx = _Ctx(broker_net=-65.0)
+        stra._maybe_ghost_trim(ctx, "S1", stra._fill_pending["S1"], -65.0)
+        assert stra._combined_target() == -99
+        assert ctx.positions == {}
+        assert any("ghost trim blocked" in t for _, t in ctx.logs)

@@ -17,6 +17,7 @@
 import argparse
 import datetime
 import json
+import math
 import os
 import sys
 
@@ -155,8 +156,40 @@ def query_holds(symbols: list, market: str) -> dict:
     return holds
 
 
+def _select_hots(candidates: dict, holds: dict) -> dict:
+    """按正持仓量选主力，保留缺行情与真实零持仓的区别。
+
+    返回 {品种key: (主力合约或None, 最大有效持仓或None)}。缺字段、
+    非数值及 NaN/inf 都是缺行情 (None)；接口明确返回的 0 会保留为
+    0.0，但只有严格大于 0 的持仓才可成为可写入的主力合约。
+    """
+    out = {}
+    for key, codes in candidates.items():
+        best, best_hold = None, None
+        max_seen = None
+        for c in codes:
+            if c not in holds:                 # 缺失不能等同于真实 0
+                continue
+            try:
+                h = float(holds[c])
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(h):
+                continue
+            if max_seen is None or h > max_seen:
+                max_seen = h
+            if h > 0 and (best_hold is None or h > best_hold):
+                best, best_hold = c, h
+        out[key] = (best, best_hold if best is not None else max_seen)
+    return out
+
+
 def pick_hots(candidates: dict) -> dict:
-    """{品种key: [合约代码...]} → {品种key: (主力合约, 持仓量)}"""
+    """{品种key: [合约代码...]} → {品种key: (主力合约, 持仓量)}
+
+    无有效行情的持仓为 None；全部持仓 <=0 时主力为 None，绝不以首
+    候选或 0 持仓合约冒充主力。部分合约缺行情不影响其余有效合约。
+    """
     # 按 market 分组批量查询
     all_syms = {s for codes in candidates.values() for s in codes}
     idx_syms = [s for s in all_syms if _pid_of(s) in INDEX_PRODUCTS]
@@ -166,15 +199,7 @@ def pick_hots(candidates: dict) -> dict:
         holds.update(query_holds(cty_syms, "CF"))
     if idx_syms:
         holds.update(query_holds(idx_syms, "FF"))
-    out = {}
-    for key, codes in candidates.items():
-        best, best_hold = None, -1.0
-        for c in codes:
-            h = holds.get(c, 0.0) or 0.0
-            if h > best_hold:
-                best, best_hold = c, h
-        out[key] = (best, best_hold)
-    return out
+    return _select_hots(candidates, holds)
 
 
 def _pid_of(symbol: str) -> str:
@@ -251,7 +276,28 @@ def main():
         if key not in picked:
             continue
         hot, hold = picked[key]
-        print(f"[pick] {key}: 主力={hot} 持仓={hold:.0f}")
+        if hot:
+            print(f"[pick] {key}: 主力={hot} 持仓={hold:.0f}")
+        else:
+            hold_text = "缺失" if hold is None else f"{hold:.0f}"
+            print(f"[pick] {key}: 无有效主力 持仓={hold_text}")
+
+    valid = {}
+    for key, (hot, hold) in picked.items():
+        try:
+            hold = float(hold)
+        except (TypeError, ValueError):
+            continue
+        if hot and math.isfinite(hold) and hold > 0:
+            valid[key] = (hot, hold)
+    if not valid:
+        print("[pick] 全部品种均无正持仓有效行情，拒绝写入/成功退出",
+              file=sys.stderr)
+        return 1
+    if len(valid) < len(picked):
+        print(f"[pick] 警告：仅 {len(valid)}/{len(picked)} 品种有有效行情，"
+              "其余沿用旧映射", file=sys.stderr)
+    picked = valid
 
     if not args.write:
         print("[pick] dry-run (加 --write 合并进 hots.json)")

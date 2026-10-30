@@ -1,4 +1,6 @@
 """Webhook 推送适配器测试 (打桩 _post, 不发真实请求)"""
+import sys
+
 import core.notifier as nf
 from core.notifier import WebhookNotifier, NullNotifier
 
@@ -86,3 +88,18 @@ def test_strategy_reconcile_alert_hooked():
     stra._reconcile(ctx, _closes())
     keys = [k for k, _ in sent]
     assert any("reconcile" in k for k in keys)
+
+
+def test_notify_selftest_disabled_and_success(tmp_path, monkeypatch):
+    from scripts import notify_selftest as ns
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text("notify:\n  enabled: false\n  urls: []\n"
+                   "instruments:\n  - code: SHFE.rb.HOT\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["notify_selftest.py",
+                                      "--config", str(cfg)])
+    assert ns.main() == 2
+    cfg.write_text("notify:\n  enabled: true\n  type: generic\n"
+                   "  urls: ['http://example.invalid']\n"
+                   "instruments:\n  - code: SHFE.rb.HOT\n", encoding="utf-8")
+    monkeypatch.setattr(nf, "_post", lambda *args: True)
+    assert ns.main() == 0

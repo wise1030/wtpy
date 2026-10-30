@@ -104,12 +104,14 @@ def test_dual_entries_combine_to_net_order():
     assert ctx.orders == [("SHFE.rb.HOT", lots1 + lots2, "Dual")]
     # 风控账本按市场合并记账
     assert stra._risk.has_position("SHFE.rb.HOT")
-    assert stra._risk._book["SHFE.rb.HOT"]["lots"] == lots1 + lots2
+    assert stra._risk.entry("SHFE.rb.HOT", "S1")["lots"] == lots1
+    assert stra._risk.entry("SHFE.rb.HOT", "S2")["lots"] == lots2
 
 
 def test_dual_partial_exit_keeps_other_sub():
     """S1 止损离场而 S2 持仓 → 部分平仓而非清零"""
     stra = _mk_dual(units=2)
+    stra._is_backtest = True
     e1, e2 = stra._subs[0]["engine"], stra._subs[1]["engine"]
     e1.confirm_enter(1, 100, 3500.0)
     e2.confirm_enter(1, 80, 3500.0)
@@ -119,7 +121,189 @@ def test_dual_partial_exit_keeps_other_sub():
         "S2": []}, n=30.0)
     assert e1.direction == 0 and e2.direction == 1
     assert ctx.orders == [("SHFE.rb.HOT", 80, "Dual")]   # 净仓 80
-    assert stra._risk._book["SHFE.rb.HOT"]["lots"] == 80
+    assert stra._risk.entry("SHFE.rb.HOT", "S2")["lots"] == 80
+    assert stra._risk.entry("SHFE.rb.HOT", "S1") is None
+
+
+class _BatchJournal:
+    def __init__(self, volume=0.0, vwap=None):
+        self.volume = volume
+        self.vwap = vwap
+
+    def cursor(self):
+        return 0
+
+    def fill_stats(self, code, cursor, side=None, offset=None):
+        return self.volume, self.vwap
+
+    def layer_price(self, *args, **kwargs):
+        return self.vwap
+
+
+class _BatchCtx(MiniCtx):
+    def __init__(self, pos=0):
+        super().__init__(pos)
+        self.kv = {}
+        self.px = 0.0
+
+    def stra_get_price(self, code):
+        return self.px
+
+    def stra_get_tdate(self):
+        return None
+
+    def stra_get_fund_data(self, flag=0):
+        return 0.0
+
+    def user_save_data(self, key, value):
+        self.kv[key] = value
+
+    def user_load_data(self, key, default=None, value_type=str):
+        return self.kv.get(key, "")
+
+
+def test_dual_live_exit_batch_waits_for_net_fill():
+    stra = _mk_dual(units=2)
+    e1, e2 = stra._subs[0]["engine"], stra._subs[1]["engine"]
+    e1.confirm_enter(1, 100, 3500.0)
+    e2.confirm_enter(1, 80, 3500.0)
+    stra._last_n = 30.0
+    journal = _BatchJournal()
+    stra._trade_journal = journal
+    ctx = _BatchCtx(pos=180)
+    stra._execute_dual(ctx, {
+        "S1": [{"decision": DEC_EXIT, "reason": "stop", "price": 3440.0}],
+        "S2": []}, n=30.0)
+    assert ctx.orders == [("SHFE.rb.HOT", 80, "DualExit")]
+    assert e1.direction == 1 and e2.direction == 1   # 未确认前都保留
+    assert stra._risk.entry("SHFE.rb.HOT", "S1")["lots"] == 100
+    assert stra._risk.entry("SHFE.rb.HOT", "S2")["lots"] == 80
+    intent = stra._exit_orders["__dual__"]["intent"]
+    assert intent.before == 180 and intent.after == 80
+
+    journal.volume, journal.vwap = 100.0, 3435.0
+    stra._process_exit_orders(ctx)
+    assert e1.direction == 0 and e2.direction == 1
+    assert stra._risk.entry("SHFE.rb.HOT", "S2")["lots"] == 80
+    assert stra._risk.entry("SHFE.rb.HOT", "S1") is None
+    assert stra._exit_orders == {}
+
+
+def test_dual_exit_batch_snapshot_restores_intent():
+    stra = _mk_dual(units=2)
+    e1, e2 = stra._subs[0]["engine"], stra._subs[1]["engine"]
+    e1.confirm_enter(1, 100, 3500.0)
+    e2.confirm_enter(1, 80, 3500.0)
+    stra._last_n = 30.0
+    stra._trade_journal = _BatchJournal()
+    ctx = _BatchCtx(pos=180)
+    stra._execute_dual(ctx, {
+        "S1": [{"decision": DEC_EXIT, "reason": "stop", "price": 3440.0}],
+        "S2": []}, n=30.0)
+    saved = stra._exit_order_snapshot()
+    json.dumps(saved)                              # 必须可持久化
+
+    restored = _mk_dual(units=2)
+    restored._sub("S1")["engine"].restore(e1.snapshot())
+    restored._sub("S2")["engine"].restore(e2.snapshot())
+    restored._restore_exit_orders(saved)
+    fp = restored._exit_orders["__dual__"]
+    assert fp["intent"].after == 80
+    assert [e.system for e in fp["engines"]] == ["S1"]
+    assert fp["engines"][0].direction == 1
+    # 批次已覆盖 S1；兼容补录不得再生成独立的 S1 出场记录。
+    # 否则批次成交后该记录会把仍持仓的 S2 风险账一并误清。
+    assert list(restored._exit_orders) == ["__dual__"]
+
+
+def test_restored_dual_exit_fill_keeps_remaining_sub_risk():
+    stra = _mk_dual(units=2)
+    e1, e2 = stra._subs[0]["engine"], stra._subs[1]["engine"]
+    e1.confirm_enter(1, 100, 3500.0)
+    e2.confirm_enter(1, 80, 3500.0)
+    stra._last_n = 30.0
+    stra._trade_journal = _BatchJournal()
+    stra._sync_risk_book(30.0)
+    ctx = _BatchCtx(pos=180)
+    stra._execute_dual(ctx, {
+        "S1": [{"decision": DEC_EXIT, "reason": "stop", "price": 3440.0}],
+        "S2": []}, n=30.0)
+    saved = stra._exit_order_snapshot()
+
+    restored = _mk_dual(units=2)
+    restored._sub("S1")["engine"].restore(e1.snapshot())
+    restored._sub("S2")["engine"].restore(e2.snapshot())
+    restored._last_n = 30.0
+    restored._sync_risk_book(30.0)
+    restored._restore_exit_orders(saved)
+    journal = _BatchJournal(volume=100.0, vwap=3435.0)
+    restored._trade_journal = journal
+    restored._process_exit_orders(ctx)
+    assert [s["engine"].direction for s in restored._subs] == [0, 1]
+    book = restored._risk.entry("SHFE.rb.HOT", "S2")
+    assert book["lots"] == 80
+    assert restored._risk.entry("SHFE.rb.HOT", "S1") is None
+    assert restored._exit_orders == {}
+
+
+def test_dual_mixed_enter_is_deferred_and_replayed_after_exit_fill():
+    stra = _mk_dual(units=2)
+    e1, e2 = stra._subs[0]["engine"], stra._subs[1]["engine"]
+    e1.confirm_enter(1, 100, 3500.0)
+    stra._last_n = 30.0
+    journal = _BatchJournal()
+    stra._trade_journal = journal
+    ctx = _BatchCtx(pos=100)
+    stra._execute_dual(ctx, {
+        "S1": [{"decision": DEC_EXIT, "reason": "stop", "price": 3440.0}],
+        "S2": [{"decision": DEC_ENTER, "direction": -1,
+                "price": 3400.0, "n": 30.0, "failsafe": False}]},
+        n=30.0)
+    # 混合净目标不得立即执行 enter；批次只提交净出场。
+    assert ctx.orders == [("SHFE.rb.HOT", 0, "DualExit")]
+    assert [d["decision"] for d in stra._deferred_decisions["S2"]] == ["enter"]
+    assert e2.direction == 0
+
+    # 快照恢复后仍是"延后"而不是消失。
+    saved = json.loads(json.dumps({
+        "exit_orders": stra._exit_order_snapshot(),
+        "deferred": stra._deferred_decisions}))
+    restored = _mk_dual(units=2)
+    restored._sub("S1")["engine"].restore(e1.snapshot())
+    restored._sub("S2")["engine"].restore(e2.snapshot())
+    restored._restore_exit_orders(saved["exit_orders"])
+    restored._deferred_decisions = saved["deferred"]
+    restored._last_n = 30.0
+    journal.volume, journal.vwap = 100.0, 3435.0
+    restored._trade_journal = journal
+    restored._process_exit_orders(ctx)
+    r1, r2 = restored._subs[0]["engine"], restored._subs[1]["engine"]
+    assert r1.direction == 0
+    assert r2.direction == -1
+    assert restored._deferred_decisions == {}
+    assert ctx.orders[-1] == ("SHFE.rb.HOT", -r2.layers[0][0], "Dual")
+    assert restored._risk.has_position("SHFE.rb.HOT")
+
+
+def test_dual_trigger_same_tick_is_one_net_order():
+    inst = InstrumentConfig(code="SHFE.rb.HOT", period="d1",
+                            system="S1+S2", units=2)
+    stra = StraTurtle("td_trig", inst, TurtleBaseConfig(entry_mode="trigger"))
+    stra._volscale = 10.0
+    stra._pricetick = 1.0
+    stra._last_n = 30.0
+    for sub in stra._subs:
+        e = sub["engine"]
+        e._n = 30.0
+        e._entry_ch = (100.0, 90.0)
+        e._rearm()
+    ctx = _BatchCtx()
+    ctx.px = 100.0
+    stra.on_tick(ctx, "SHFE.rb.HOT", None)
+    assert len(ctx.orders) == 1
+    assert ctx.orders[0][2] == "Dual"
+    assert ctx.orders[0][1] == stra._combined_target()
+    assert all(s["engine"].direction == 1 for s in stra._subs)
 
 
 def test_dual_filter_chain_blocks_both_subs():
@@ -164,6 +348,31 @@ def test_dual_shares_risk_budget_sequentially():
     assert l1 >= 1 and l1 <= 75
     assert l2 <= 150 - l1
     assert stra._risk.open_risk() <= 5_000_000 * 0.06 + 1e-6
+
+
+def test_dual_same_batch_reserves_total_risk():
+    """同批第二个子系统必须看到第一个的新风险占用。
+
+    旧实现全批结束后才 sync，两个入场可分别消费同一份 total_risk
+    剩余额度；现在每个 confirm 后立即做批次内预算预约。
+    """
+    from schemas import RiskConfig
+    inst = InstrumentConfig(code="X.Y.HOT", period="d1",
+                            system="S1+S2", units=2)
+    rcfg = RiskConfig(max_units_total=0, max_units_per_group=0,
+                      max_total_risk_frac=0.01)
+    stra = StraTurtle("tb_reserve", inst, TurtleBaseConfig(), risk_cfg=rcfg)
+    stra._volscale = 10.0
+    ctx = MiniCtx()
+    dec = {"decision": DEC_ENTER, "direction": 1, "price": 3500.0,
+           "n": 100.0}
+    stra._execute_dual(ctx, {"S1": [dec], "S2": [dict(dec)]}, n=100.0)
+    l1 = stra._sub_lots(stra._subs[0])
+    l2 = stra._sub_lots(stra._subs[1])
+    budget = stra._risk.cfg.fallback_capital * 0.01
+    assert l1 == int(budget // 2000)  # budget / (100×10×2)
+    assert l2 == 0             # 第一笔已占满总风险，第二笔不得重复消费
+    assert stra._risk.open_risk() <= budget + 1e-6
 
 
 def test_dual_snapshot_v3_roundtrip():
@@ -301,9 +510,10 @@ def test_dual_risk_book_uses_layer_n_not_current():
     stra._sync_risk_book(200.0)          # 当根 N 已漂到 200
     expect = 10 * 60.0 * 10.0 * 2.0 + 5 * 80.0 * 10.0 * 2.0
     assert abs(stra._risk.open_risk() - expect) < 1e-6
-    book = stra._risk._book["SHFE.rb.HOT"]
-    assert book["lots"] == 15
-    assert abs(book["risk"] - expect) < 1e-6
+    book1 = stra._risk.entry("SHFE.rb.HOT", "S1")
+    book2 = stra._risk.entry("SHFE.rb.HOT", "S2")
+    assert book1["lots"] == 10 and book2["lots"] == 5
+    assert abs(book1["risk"] + book2["risk"] - expect) < 1e-6
 
 
 def test_engine_booked_risk_per_layer():

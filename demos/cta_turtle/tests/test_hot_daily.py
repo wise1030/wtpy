@@ -92,10 +92,12 @@ def test_update_appends_delta_and_rebuilds(tmp_path):
     lines = csv_path.read_text().strip().splitlines()
     assert lines[-1].startswith("2026/09/02")   # 保持原文件日期风格
     assert "3121.0" in lines[-1]                # 重复日期取后者
-    # 幂等: 再跑一次不再追加
+    # 幂等: 再跑一次不再追加，正常零增量不是失败
+    failures = []
     assert uhd.update(["SHFE.rb.HOT"], str(common), str(storage),
-                      read_bars=fake_read,
-                      rebuild=lambda *a: 0)["SHFE.rb.HOT"] == 0
+                      read_bars=fake_read, rebuild=lambda *a: 0,
+                      failures=failures)["SHFE.rb.HOT"] == 0
+    assert failures == []
 
 
 def test_update_skips_missing_rule_or_file(tmp_path):
@@ -133,3 +135,39 @@ def test_update_survives_reader_exception(tmp_path):
     got = uhd.update(["SHFE.rb.HOT"], str(common), str(storage),
                      read_bars=boom, rebuild=lambda *a: 0)
     assert got == {"SHFE.rb.HOT": 0}
+
+
+def test_missing_mapping_and_files_are_collected_as_failures(tmp_path):
+    common = tmp_path / "common"
+    storage = tmp_path / "storage"
+    common.mkdir()
+    (storage / "csv").mkdir(parents=True)
+    (common / "hots.json").write_text(json.dumps(
+        {"SHFE": {"rb": [{"to": "rb2701"}], "cu": [{"to": "cu2610"}]}}),
+        encoding="utf-8")
+    failures = []
+    got = uhd.update(["SHFE.rb.HOT", "SHFE.cu.HOT"], str(common),
+                     str(storage), read_bars=lambda p: [],
+                     rebuild=lambda *a: 0, failures=failures)
+    assert got == {"SHFE.rb.HOT": 0, "SHFE.cu.HOT": 0}
+    assert len(failures) == 2
+    assert all("数据缺失" in msg for msg in failures)
+
+
+def test_reader_exception_is_failure_not_false_success(tmp_path):
+    common = tmp_path / "common"
+    storage = tmp_path / "storage"
+    common.mkdir()
+    (storage / "csv").mkdir(parents=True)
+    (common / "hots.json").write_text(json.dumps(
+        {"SHFE": {"rb": [{"to": "rb2701"}]}}), encoding="utf-8")
+    (storage / "his" / "day" / "SHFE").mkdir(parents=True)
+    (storage / "his" / "day" / "SHFE" / "rb2701.dsb").write_bytes(b"x")
+    failures = []
+
+    def boom(path):
+        raise RuntimeError("decode error")
+
+    uhd.update(["SHFE.rb.HOT"], str(common), str(storage),
+               read_bars=boom, rebuild=lambda *a: 0, failures=failures)
+    assert len(failures) == 1 and "decode error" in failures[0]

@@ -135,3 +135,20 @@ def donchian(highs: np.ndarray, lows: np.ndarray,
     upper[period:] = hwin.max(axis=1)[:-1]
     lower[period:] = lwin.min(axis=1)[:-1]
     return upper, lower
+
+
+_CHANNEL_KEYS = ("entry_upper", "entry_lower", "exit_upper", "exit_lower",
+                 "fs_upper", "fs_lower")
+
+
+def with_next_channels(channels: dict, next_channels: dict) -> dict:
+    """附加次日通道 next_*，统一生产与组合研究的窗口归属。
+
+    channels 的 current/prev 用于当根 close 信号；next_* 用于 trigger
+    在当根闭合后武装下一根。只复制六类基础通道，不复制 prev_*，避免
+    各调用方自行错位一根。
+    """
+    out = dict(channels)
+    for key in _CHANNEL_KEYS:
+        out["next_" + key] = next_channels[key]
+    return out

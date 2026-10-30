@@ -309,7 +309,7 @@ def test_fill_confirm_truth_blocks_reanchor_and_alerts(tmp_path):
     """执行单元卡死: 下单窗口内账户持仓**无增量** → 不回写 avgpx 且
     ghost_fill 告警 (真值增量口径下 fees 不再作为证据)"""
     p = _write(tmp_path, data={"positions": [_rt_pos(lots=0.0)]})
-    stra = _mk_stra(p)
+    stra = _mk_stra(p, rebuild_mode="rebuild")
     stra._notify = _Notify()
     stra._engine.confirm_enter(1, 50, 3400.0, n=30.0)
     recorded = stra._engine.layers[-1][1]
@@ -328,7 +328,7 @@ def test_fill_confirm_truth_blocks_reanchor_and_alerts(tmp_path):
 def test_fill_confirm_truth_allows_reanchor(tmp_path):
     """账户持仓增量达到本层手数 → 允许回写 (即使 fees 无变化)"""
     p = _write(tmp_path, data={"positions": [_rt_pos(lots=50.0)]})
-    stra = _mk_stra(p)
+    stra = _mk_stra(p, rebuild_mode="rebuild")
     stra._engine.confirm_enter(1, 50, 3400.0, n=30.0)
     stra._fill_pending = {"S1": {"engine": stra._engine, "ts": time.time(),
                                  "fees0": 100.0, "lots": 50, "truth0": 0.0}}
@@ -336,6 +336,20 @@ def test_fill_confirm_truth_allows_reanchor(tmp_path):
     stra._reanchor_actual_fill(ctx)
     assert not stra._fill_pending
     assert abs(stra._engine.layers[-1][1] - 3405.0) < 1e-9
+
+
+def test_fill_confirm_shared_alert_ignores_account_delta(tmp_path):
+    """第三方同向成交也可能造成账户增量，alert 不得据此确认。"""
+    p = _write(tmp_path, data={"positions": [_rt_pos(lots=50.0)]})
+    stra = _mk_stra(p)                       # 默认 alert（共享/未知归属）
+    stra._engine.confirm_enter(1, 50, 3400.0, n=30.0)
+    recorded = stra._engine.layers[-1][1]
+    stra._fill_pending = {"S1": {"engine": stra._engine, "ts": time.time(),
+                                 "fees0": 100.0, "lots": 50, "truth0": 0.0}}
+    ctx = TruthCtx(sig_pos=50, avgpx=3405.0, fees=100.0)
+    stra._reanchor_actual_fill(ctx)
+    assert stra._fill_pending
+    assert stra._engine.layers[-1][1] == recorded
 
 
 def test_fill_confirm_fees_timeout_unblocks(tmp_path):
@@ -468,7 +482,7 @@ def _append_trd(tmp_path, rows):
             f.write(r + "\n")
 
 
-def test_trade_journal_filters_cancel_and_parses(tmp_path):
+def test_trade_journal_action_side_offset_and_close_today(tmp_path):
     p = _trd(tmp_path, [
         "0,20260914,1788245888000,SHFE.rb.2701,CNL,4,3400,  1,  2",
         "1,20260914,1788245889000,SHFE.rb.2701,OL,6,3405,  3,  4",
@@ -478,10 +492,15 @@ def test_trade_journal_filters_cancel_and_parses(tmp_path):
     ])
     j = TradeJournal(p)
     assert j.available
-    # 撤单行(CNL)剔除; 6@3405 + 4@3407 = 3405.8
-    assert abs(j.layer_price("SHFE.rb.2701", 0, 10) - 3405.8) < 1e-9
+    # CNL 是平今多仓的真实卖出，不是撤单；开仓过滤后 6@3405+4@3407。
+    assert abs(j.layer_price("SHFE.rb.2701", 0, 10,
+                            offset="open") - 3405.8) < 1e-9
+    assert j.layer_price("SHFE.rb.2701", 0, 4,
+                         side=-1, offset="close") == 3400.0
+    assert j.fill_stats("SHFE.rb.2701", 0, side=-1,
+                        offset="close") == (4.0, 3400.0)
     # 未读满 → None (不猜)
-    assert j.layer_price("SHFE.rb.2701", 0, 11) is None
+    assert j.layer_price("SHFE.rb.2701", 0, 11, offset="open") is None
     # 其它合约互不干扰
     assert abs(j.layer_price("DCE.i.2701", 0, 9) - 999.0) < 1e-9
     assert j.layer_price("CZCE.MA.HOT", 0, 1) is None
@@ -490,8 +509,8 @@ def test_trade_journal_filters_cancel_and_parses(tmp_path):
 def test_trade_journal_cursor_and_skip(tmp_path):
     p = _trd(tmp_path, ["1,20260914,1,SHFE.rb.2701,OL,7,3400,1,1"])
     j = TradeJournal(p)
-    cur = j.cursor()                       # 当前行数 = 1 (表头+1行)
-    assert cur == 2
+    cur = j.cursor_key()                   # 业务游标含文件身份+行号
+    assert j.cursor() == 2
     # 游标之后的成交才计入
     with open(p, "a", encoding="utf-8") as f:
         f.write("2,20260914,2,SHFE.rb.2701,OL,3,3410,2,2\n")
@@ -500,6 +519,45 @@ def test_trade_journal_cursor_and_skip(tmp_path):
     assert abs(j.layer_price("SHFE.rb.2701", 0, 2, skip=8) - 3410.0) < 1e-9
     assert abs(j.layer_price("SHFE.rb.2701", 0, 1, skip=9) - 3410.0) < 1e-9
     assert j.layer_price("SHFE.rb.2701", 0, 1, skip=10) is None  # 不足
+
+
+def test_trade_journal_cursor_invalidates_after_rotation(tmp_path):
+    """trades.csv 按交易日轮转后，旧文件身份的游标不得消费新文件行。"""
+    p = _trd(tmp_path, [
+        "1,20260914,1,SHFE.rb.2701,OL,5,3400,1,1",
+        "2,20260914,2,SHFE.rb.2701,OL,5,3401,2,2",
+    ])
+    j = TradeJournal(p)
+    old_cur = j.cursor_key()
+    # 新交易日文件重建（同路径、新 inode），首行就是真实平仓成交。
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(_TRD_HDR + "\n")
+        f.write("3,20260915,1,SHFE.rb.2701,CL,7,3390,3,3\n")
+    assert j.fill_stats("SHFE.rb.2701", old_cur, side=-1,
+                        offset="close") == (0.0, None)
+    # 新代际文件里已存在的行也不得回填给旧订单窗口：无归属证据时保持
+    # UNKNOWN，只把轮转后登记的游标用于未来成交。
+    new_cur = j.cursor_key()
+    assert j.fill_stats("SHFE.rb.2701", new_cur, side=-1,
+                        offset="close") == (0.0, None)
+    with open(p, "a", encoding="utf-8") as f:
+        f.write("4,20260915,2,SHFE.rb.2701,CL,3,3388,4,4\n")
+    assert j.fill_stats("SHFE.rb.2701", new_cur, side=-1,
+                        offset="close") == (3.0, 3388.0)
+
+
+def test_trade_journal_does_not_consume_partial_last_line(tmp_path):
+    """writer 先落半行时不得推进游标；补全后同一笔成交必须可读。"""
+    p = os.path.join(str(tmp_path), "trades.csv")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(_TRD_HDR + "\n")
+        f.write("1,20260914,1,SHFE.rb.2701")     # 故意无换行的半行
+    j = TradeJournal(p)
+    cur = j.cursor_key()
+    assert j.layer_price("SHFE.rb.2701", cur, 1, offset="open") is None
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(",OL,7,3400,1,1\n")
+    assert j.layer_price("SHFE.rb.2701", cur, 7, offset="open") == 3400.0
 
 
 def test_trade_journal_missing_and_truncated(tmp_path):

@@ -25,7 +25,7 @@ from wtpy import BaseCtaStrategy, CtaContext
 from schemas import InstrumentConfig, TurtleBaseConfig, RiskConfig
 from filters import build_chain, FilterContext
 from core.aggregate import aggregate_h1, norm_m5_time
-from core.indicators import wilder_atr, donchian
+from core.indicators import wilder_atr, donchian, with_next_channels
 from core.TurtleEngine import (TurtleEngine)
 from core.PositionSizer import PositionSizer
 from execution import ExecutionRouter
@@ -33,7 +33,10 @@ from execution.telemetry import Telemetry
 from execution.fill_tracker import FillTracker
 from execution.truth_monitor import TruthMonitor
 from execution.models import StrategyMode
+from execution.batch import TargetIntent
 from core.RiskManager import RiskManager
+from core.profiles import (resolve_profiles, required_bars, snapshot_meta,
+                           validate_snapshot)
 
 # 组合目录 (部署侧 = deploy/cta_turtle): 真值源/状态文件按此定位
 _GROUP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -65,57 +68,30 @@ class StraTurtle(BaseCtaStrategy):
                                           False, bt_no_simtick)
 
         # === 子系统装配 ===
-        # S1+S2: 经典海龟双系统并行, 各分得 floor/ceil 半量 units,
-        # 共享过滤链与组合风控账本 (同 code 合并记账), 独立引擎状态;
-        # 框架持仓为两子系统净和, 批量执行后统一 set_position。
-        # units=1 时 S2 分 0 手 → 其入场按 lots=0 否决 (空转)。
+        # system/speeds 由 core.profiles 唯一解析：S1/S2 是引擎语义和
+        # base 窗口预设，S1+S2 是 legacy 双 profile 组合。legacy 的
+        # ceil/floor units、顺序和快照 name 全部保留，不能机械翻成 50/50。
+        # 各 profile 只独立通道/引擎状态；ATR、过滤链、执行和风控仍共享。
+        self._profiles = resolve_profiles(inst_cfg, base_cfg)
         self._subs = []
-
-        def _mk_sub(sysname: str, units, entry=None, exit_=None, fs=None,
-                    share=1.0, system=None):
-            """装配一个子系统/速度; entry/exit/fs=None 时沿用全局 S1/S2 口径
-
-            system: 引擎语义 (S1|S2), 与展示名 sysname 解耦 (2026-10-20)。
-            多速度的 name 可以是 fast/slow, 引擎仍按 system 决定 S1 过滤器。
-            """
-            engine_system = system or sysname
-            if engine_system not in ("S1", "S2"):
-                raise ValueError(
-                    f"子系统 {sysname}: system 必须为 S1|S2, "
-                    f"当前 {engine_system!r}")
-            return {"name": sysname, "units": max(0.0, float(units)),
-                    "entry": entry, "exit": exit_, "fs": fs,
-                    "share": float(share), "system": engine_system,
-                    "engine": TurtleEngine(
-                        system=engine_system,
-                        stop_atr_mult=base_cfg.stop_atr_mult,
-                        pyramid_layers=base_cfg.pyramid_layers,
-                        pyramid_step_atr=base_cfg.pyramid_step_atr,
-                        enable_s1_filter=base_cfg.enable_s1_filter,
-                        entry_mode=base_cfg.entry_mode,
-                        stop_n_mode=base_cfg.stop_n_mode,
-                        trigger_envelope=base_cfg.trigger_envelope,
-                        allow_same_bar_reversal=
-                        base_cfg.allow_same_bar_reversal,
-                        gap_stop=base_cfg.gap_stop,
-                        arm_exclude_signal=base_cfg.arm_exclude_signal)}
-
-        if getattr(inst_cfg, "speeds", None):
-            # 多速度 (2026-09-16): 每档速度 = 独立通道窗口的子系统, 按 share
-            # 切分品种风险预算, 框架层净额化后一次下单 (净额化同时降低换手)
-            u = float(inst_cfg.units)
-            for sp in inst_cfg.speeds:
-                self._subs.append(_mk_sub(sp.name, u * sp.share, sp.entry,
-                                          sp.exit, sp.fs, sp.share,
-                                          system=getattr(sp, "system", "S1")))
-        elif inst_cfg.system == "S1+S2":
-            u = int(inst_cfg.units)
-            self._subs.append(_mk_sub("S1", u - u // 2,
-                                      share=(u - u // 2) / max(u, 1)))
-            self._subs.append(_mk_sub("S2", u // 2,
-                                      share=(u // 2) / max(u, 1)))
-        else:
-            self._subs.append(_mk_sub(inst_cfg.system, inst_cfg.units))
+        for spec in self._profiles:
+            self._subs.append({
+                "name": spec.key, "units": spec.units,
+                "entry": spec.entry, "exit": spec.exit, "fs": spec.fs,
+                "share": spec.share, "system": spec.system,
+                "engine": TurtleEngine(
+                    system=spec.system,
+                    stop_atr_mult=base_cfg.stop_atr_mult,
+                    pyramid_layers=base_cfg.pyramid_layers,
+                    pyramid_step_atr=base_cfg.pyramid_step_atr,
+                    enable_s1_filter=base_cfg.enable_s1_filter,
+                    entry_mode=base_cfg.entry_mode,
+                    stop_n_mode=base_cfg.stop_n_mode,
+                    trigger_envelope=base_cfg.trigger_envelope,
+                    allow_same_bar_reversal=
+                    base_cfg.allow_same_bar_reversal,
+                    gap_stop=base_cfg.gap_stop,
+                    arm_exclude_signal=base_cfg.arm_exclude_signal)})
         # 兼容别名: 单系统即唯一引擎; 双系统指向 S1 子系统
         self._engine = self._subs[0]["engine"]
 
@@ -157,6 +133,20 @@ class StraTurtle(BaseCtaStrategy):
         # (P2: 原实现是单槽, 同一批次里后确认的子系统会覆盖前一个,
         #  导致先确认那层的记账价永不被成交均价修正)
         self._fill_pending = {}
+        # 实盘出场未知态: {子系统名: 证据游标/原因/手数/时间}; 引擎层
+        # _exit_pending 保留持仓，二者一起入快照。回测始终为空。
+        self._exit_orders = {}
+        # enter/add 的 write-ahead 目标意图: 先持久化，再提交绝对目标；
+        # 成交证据到达后才确认引擎。崩溃恢复禁止假确认。回测恒空。
+        self._open_intents = {}
+        self._outbox_seq = 0
+        # 订单级归因链 (2026-10-29, docs/ORDER_ATTRIBUTION_NO_CPP.md):
+        # 本地id 归因替代 C++ userTag; 回测/侧车缺失时恒 None → 行为不变。
+        self._attr = None
+        # 实盘多 profile 出场批次挂起时延后的 enter/add 决策。pending 保留
+        # 在引擎中防重复触发；批次真实成交确认后再统一重放。入快照，崩溃
+        # 恢复后仍不会把"延后"退化成"取消"。
+        self._deferred_decisions = {}
         # 涨跌停锁死疑似状态: {code: True}; on_tick 价格钉住检测置位,
         # 价格恢复移动即清除; 置位期间 veto 加仓 (出场/止损不受影响)
         self._limit_lock = {}
@@ -345,6 +335,378 @@ class StraTurtle(BaseCtaStrategy):
         """→ execution.FillTracker.mark_fill_pending (A1-3 迁出, 薄转发)"""
         return self._fills.mark_fill_pending(context, key, engine)
 
+    def _begin_exit_order(self, context, key: str, engine, dec: dict):
+        return self._fills.begin_exit_order(context, key, engine, dec)
+
+    def _cancel_exit_order(self, context, key: str, engine):
+        return self._fills.cancel_exit_order(context, key, engine)
+
+    def _begin_dual_exit(self, context, intent, engines):
+        return self._fills.begin_dual_exit(context, intent, engines)
+
+    def _cancel_dual_exit(self, context):
+        return self._fills.cancel_dual_exit(context)
+
+    def _process_exit_orders(self, context):
+        return self._fills.process_exit_orders(context)
+
+    def _exit_order_snapshot(self) -> dict:
+        """可 JSON 持久化的出场证据状态（引擎对象按 profile 名恢复）。"""
+        out = {}
+        for key, fp in self._exit_orders.items():
+            if fp.get("batch"):
+                row = {k: v for k, v in fp.items()
+                       if k not in ("intent", "engines")}
+                row["intent"] = fp["intent"].snapshot()
+                row["engine_names"] = [s["name"] for s in self._subs
+                                       if s["engine"] in fp["engines"]]
+                out[key] = row
+            else:
+                out[key] = {k: v for k, v in fp.items() if k != "engine"}
+        return out
+
+    def _restore_exit_orders(self, saved):
+        batched_names = set()
+        for key, fp in (saved or {}).items():
+            if fp.get("batch"):
+                engines = [s["engine"] for s in self._subs
+                           if s["name"] in fp.get("engine_names", [])]
+                batched_names.update(fp.get("engine_names", []))
+                self._exit_orders[key] = {
+                    **fp, "intent": TargetIntent.restore(fp["intent"]),
+                    "engines": engines}
+                continue
+            sub = self._sub(key)
+            if sub is not None and sub["engine"]._exit_pending is not None:
+                self._exit_orders[key] = {**fp, "engine": sub["engine"]}
+        # 兼容只含引擎 exit_pending、缺外层证据字段的恢复快照：宁可
+        # 进入 UNKNOWN 等待人工/新证据，也不能静默当作已平仓。已属于
+        # __dual__ 批次的 profile 不得再补一条单 profile 记录，否则批次
+        # 成交后该记录会把仍持仓的其他 profile 风险账误清。
+        for sub in self._subs:
+            ep = sub["engine"]._exit_pending
+            if ep is not None and sub["name"] not in self._exit_orders \
+                    and sub["name"] not in batched_names:
+                self._exit_orders[sub["name"]] = {
+                    "engine": sub["engine"], "ts": time.time(),
+                    "lots": ep.get("lots", 0),
+                    "direction": ep.get("direction", 0),
+                    "decision_price": ep.get("price"),
+                    "reason": ep.get("reason", "unknown"),
+                    "cursor": None,
+                }
+
+    # ------------------------------------------------------------------
+    # enter/add write-ahead 目标意图 (outbox)
+    # ------------------------------------------------------------------
+    def _begin_position_intent(self, context: CtaContext, kind: str,
+                               sub: dict, dec: dict, lots: int):
+        """实盘 enter/add：目标意图先于绝对目标单持久化。
+
+        只登记，不确认引擎；返回 intent id。回测返回 None 且不改变任何
+        行为。崩溃恢复时根据框架目标仓与真实成交证据决定重放/确认/UNKNOWN。
+        """
+        if self._is_backtest:
+            return None
+        code = self._inst.code
+        engine = sub["engine"]
+        before = int(round(context.stra_get_position(code)))
+        d = int(dec.get("direction") or engine.direction)
+        self._outbox_seq += 1
+        get_day = getattr(context, "stra_get_date", None)
+        tdate = None
+        if get_day is not None:
+            try:
+                tdate = int(get_day())
+            except (TypeError, ValueError):
+                tdate = None
+        journal = self._trade_journal_source()
+        rec = {
+            "id": f"{self.name()}#{self._outbox_seq}",
+            "kind": kind,
+            "profile": sub["name"],
+            "intent": {"code": code, "before": before,
+                       "after": before + d * int(lots)},
+            "decision": dict(dec),
+            "lots": int(lots),
+            "state": "new",
+            "ts": time.time(),
+            "tdate": tdate,
+            "cursor": self._fills.journal_cursor(journal),
+            "truth0": self._truth_net(code),
+            "fees0": self._fills.get_fees(context),
+        }
+        self._open_intents[rec["id"]] = rec
+        # 同步进订单级归因队列 (先于目标单; 与快照同一持久化时点)。
+        self._attr_register_intent(context, rec)
+        # 意图必须先落盘；set_position 之后即使 confirm 前崩溃，也能恢复。
+        # 直测桩可能未实现 user_save_data；真实框架上下文必定实现。
+        try:
+            self._persist(context)
+        except AttributeError:
+            pass
+        return rec["id"]
+
+    def _complete_position_intent(self, intent_id: str):
+        if intent_id is not None:
+            self._open_intents.pop(intent_id, None)
+            if self._attr is not None:
+                # 引擎已同步确认: 归因队列出队, 簿镜像保留在 after。
+                self._attr.attr.complete(intent_id)
+
+    def _position_intent_snapshot(self) -> dict:
+        return {k: {kk: vv for kk, vv in rec.items() if kk != "engine"}
+                for k, rec in self._open_intents.items()}
+
+    def _restore_position_intents(self, saved, seq: int):
+        self._open_intents = {}
+        self._outbox_seq = int(seq or 0)
+        for iid, rec in (saved or {}).items():
+            if isinstance(rec, dict) and isinstance(rec.get("intent"), dict):
+                self._open_intents[str(iid)] = dict(rec)
+
+    # ------------------------------------------------------------------
+    # 订单级归因链 (localid attribution, 零 C++ 改动)
+    # ------------------------------------------------------------------
+    def _attr_ensure(self, context: CtaContext):
+        """惰性构建 ExecAttribution (仅实盘; 回测恒 None)。
+
+        数据源: 侧车 exec_*.jsonl (A5-1 已部署) + trades.csv (TraderAdapter
+        同步落盘, 路径与真值源同目录)。簿镜像初值取券商多空两簿 (rtdata
+        positions, 精确到多空), 真值缺失时退化引擎净仓; 漂移由意图 before
+        校准兜住, 不会假确认。"""
+        if self._attr is not None or self._is_backtest:
+            return
+        from core.OrderAttributor import ExecAttribution
+        from execution.paths import GROUP_DIR
+        jdir = os.path.join(GROUP_DIR, "generated", "exec_journal")
+        tcsv = ""
+        t = self._truth_source()
+        if t is not None and t.path:
+            tcsv = os.path.join(os.path.dirname(t.path), "trades.csv")
+        self._attr = ExecAttribution(self._inst.code, jdir, tcsv)
+        broker_pos = None
+        if t is not None and t.ok:
+            try:
+                broker_pos = t.positions()
+            except Exception:
+                broker_pos = None
+        self._attr.init_book(broker_pos,
+                             fallback_net=float(self._combined_target()))
+        # 恢复路径: 已持久化的 enter/add 意图按落盘顺序重放进队列
+        for rec in self._open_intents.values():
+            intent = rec.get("intent") or {}
+            try:
+                self._attr.on_intent(
+                    rec["id"], int(intent["before"]), int(intent["after"]),
+                    float(rec.get("ts") or 0.0))
+            except (KeyError, TypeError, ValueError):
+                continue
+        # 已持久化的出场证据: 单 profile 按 key, 批次按 __dual__
+        for key, fp in self._exit_orders.items():
+            try:
+                if fp.get("batch"):
+                    it = fp["intent"]
+                    self._attr.on_intent("__dual__", int(it.before),
+                                         int(it.after),
+                                         float(fp.get("ts") or 0.0))
+                else:
+                    d = 1 if float(fp.get("direction") or 0) > 0 else -1
+                    lots = int(round(float(fp.get("lots") or 0)))
+                    before = self._combined_target()
+                    self._attr.on_intent(str(key), before,
+                                         before - d * lots,
+                                         float(fp.get("ts") or 0.0))
+            except (KeyError, TypeError, ValueError):
+                continue
+
+    def _attr_register_intent(self, context: CtaContext, rec: dict):
+        """write-ahead 意图同步进归因队列 (先于目标单, 与快照同一次持久化)。"""
+        self._attr_ensure(context)
+        if self._attr is None:
+            return
+        try:
+            self._attr.on_intent(rec["id"], int(rec["intent"]["before"]),
+                                 int(rec["intent"]["after"]),
+                                 float(rec.get("ts") or 0.0))
+        except (KeyError, TypeError, ValueError):
+            pass
+
+    def _attr_feed(self, context: CtaContext) -> bool:
+        """增量事件喂入归因器; 有未匹配成交 (守恒破坏) → 告警, 保持 UNKNOWN。
+
+        纯出场场景 (重启后无 enter/add) 首次调用时惰性构建并回放已持久化
+        意图, 出场确认同样享受订单级证据。"""
+        if self._attr is None:
+            self._attr_ensure(context)
+        if self._attr is None:
+            return False
+        n = self._attr.poll()
+        if n > 0:
+            bad = self._attr.attr.unmatched[-n:]
+            codes = sorted({str(x.get("code")) for x in bad})
+            txt = (f"{self.name()} attribution unmatched fills: {n} 笔 "
+                   f"({','.join(codes)}) — 守恒破坏, 相关意图保持 UNKNOWN")
+            context.stra_log_text(f"{self.name()} {txt}", level=3)
+            self._alert("attribution_mismatch", txt)
+        return True
+
+    def _attr_progress(self, iid: str):
+        if self._attr is None:
+            return None
+        return self._attr.progress(iid)
+
+    def _process_open_intents(self, context: CtaContext):
+        """推进 enter/add outbox；未知时保持封锁，绝不按框架信号假成交。"""
+        if not self._open_intents:
+            return
+        self._attr_feed(context)
+        code = self._inst.code
+        get_day = getattr(context, "stra_get_date", None)
+        cur_day = None
+        if get_day is not None:
+            try:
+                cur_day = int(get_day())
+            except (TypeError, ValueError):
+                cur_day = None
+        changed = False
+        for iid, rec in list(self._open_intents.items()):
+            if cur_day is not None and rec.get("tdate") is not None \
+                    and int(rec["tdate"]) != cur_day:
+                sub = self._sub(rec.get("profile"))
+                if sub is not None:
+                    sub["engine"].clear_pending()
+                txt = (f"{code} {rec['kind']} intent expired on day change "
+                       f"({rec.get('tdate')} -> {cur_day})")
+                context.stra_log_text(f"{self.name()} {txt}", level=2)
+                self._alert("intent_expired", txt)
+                self._open_intents.pop(iid, None)
+                if self._attr is not None:
+                    self._attr.discard(iid)
+                changed = True
+                continue
+
+            target = int(rec["intent"]["after"])
+            before = int(rec["intent"]["before"])
+            try:
+                fw = int(round(context.stra_get_position(code)))
+            except Exception:
+                continue
+            sub = self._sub(rec.get("profile"))
+            if sub is None:
+                self._open_intents.pop(iid, None)
+                changed = True
+                continue
+            e = sub["engine"]
+
+            # W1/提交丢失：绝对目标重放是幂等的，不重新走触发链，避免用
+            # 重启后的新 tick 价替代原决策价。
+            if fw == before and rec.get("state") == "new":
+                tag = rec.get("decision", {}).get("tag") or (
+                    "Enter" if rec["kind"] == "enter" else "Add")
+                try:
+                    context.stra_set_position(code, target, tag)
+                    rec["state"] = "submitted"
+                    try:
+                        self._persist(context)
+                    except AttributeError:
+                        pass
+                except Exception:
+                    context.stra_log_text(
+                        f"{self.name()} intent {iid} resubmit failed", level=3)
+                continue
+
+            if fw != target:
+                if not rec.get("alerted"):
+                    rec["alerted"] = True
+                    txt = (f"{code}[{rec['profile']}] {rec['kind']} intent "
+                           f"UNKNOWN: fw={fw}, want={target}, "
+                           f"from={before}; blocked")
+                    context.stra_log_text(f"{self.name()} {txt}", level=3)
+                    self._alert("intent_unknown", txt)
+                    changed = True
+                continue
+
+            # 订单级归因证据 (2026-10-29, 优先于时序/fees 链): localid
+            # 绑定的全部真实成交到位 → 以精确 vwap 确认。失败静默回落
+            # 下方既有证据链 (truth→逐笔时序→fees), 任何不确定性都保持
+            # UNKNOWN, 绝不假确认。
+            ap = self._attr_progress(iid)
+            if ap is not None and ap.get("done"):
+                dec = rec.get("decision") or {}
+                d = int(dec.get("direction") or e.direction)
+                lots = int(rec.get("lots") or 0)
+                price = float(ap.get("vwap") or dec.get("price") or 0.0)
+                n = float(dec.get("n") or e._n or 1.0)
+                already = False
+                if e.direction == d and e.layers:
+                    last_l, last_p = e.layers[-1]
+                    already = int(last_l) == lots and abs(last_p - price) < 1e-9
+                if not already:
+                    if rec["kind"] == "enter":
+                        e.confirm_enter(d, lots, price, n)
+                    else:
+                        e.confirm_add(lots, price, n)
+                fp = {"engine": e, "ts": float(rec.get("ts") or time.time()),
+                      "fees0": rec.get("fees0"),
+                      "lots": float(rec.get("lots") or 0),
+                      "cursor": rec.get("cursor"),
+                      "truth0": rec.get("truth0"), "skip": 0.0}
+                self._fill_pending[rec["profile"]] = fp
+                self._sync_risk_book(n)
+                self._open_intents.pop(iid, None)
+                changed = True
+                context.stra_log_text(
+                    f"{self.name()}[{rec['profile']}] {rec['kind']} intent "
+                    f"confirmed evidence=orders vwap={price:.2f}")
+                continue
+
+            # 目标账已到位只说明订单已提交；必须走与运行时一致的成交证据链。
+            fp = {"engine": e, "ts": float(rec.get("ts") or time.time()),
+                  "fees0": rec.get("fees0"),
+                  "lots": float(rec.get("lots") or 0),
+                  "cursor": rec.get("cursor"),
+                  "truth0": rec.get("truth0"), "skip": 0.0}
+            confirmed, source, _pos = self._fill_confirmed(
+                context, fp, code, target)
+            if not confirmed:
+                waited = time.time() - float(rec.get("ts") or 0)
+                if waited > 600 and not rec.get("alerted"):
+                    rec["alerted"] = True
+                    txt = (f"{code}[{rec['profile']}] {rec['kind']} "
+                           f"intent unconfirmed {waited:.0f}s; blocked")
+                    context.stra_log_text(f"{self.name()} {txt}", level=3)
+                    self._alert("intent_unconfirmed", txt)
+                    changed = True
+                continue
+
+            dec = rec.get("decision") or {}
+            d = int(dec.get("direction") or e.direction)
+            price = float(dec.get("price") or 0.0)
+            n = float(dec.get("n") or e._n or 1.0)
+            lots = int(rec.get("lots") or 0)
+            already = False
+            if e.direction == d and e.layers:
+                last_l, last_p = e.layers[-1]
+                already = int(last_l) == lots and abs(last_p - price) < 1e-9
+            if not already:
+                if rec["kind"] == "enter":
+                    e.confirm_enter(d, lots, price, n)
+                else:
+                    e.confirm_add(lots, price, n)
+            self._fill_pending[rec["profile"]] = fp
+            self._sync_risk_book(n)
+            self._open_intents.pop(iid, None)
+            changed = True
+            context.stra_log_text(
+                f"{self.name()}[{rec['profile']}] {rec['kind']} intent "
+                f"confirmed evidence={source}; target restored")
+        if changed:
+            try:
+                self._persist(context)
+            except AttributeError:
+                pass
+
     def _truth_net(self, code: str):
         """→ execution.TruthMonitor.truth_net (A1-4 迁出, 薄转发)"""
         return self._truthmon.truth_net(code)
@@ -374,6 +736,7 @@ class StraTurtle(BaseCtaStrategy):
     def on_init(self, context: CtaContext):
         code = self._inst.code
         p = self._base
+        self._risk.register_sid_context(self.name(), context)
 
         # 回测隔离 (2026-10-20): 先于任何真值探测置位。
         # 回测环境的 generated/traders/<id>/rtdata.json 可能是同机实盘
@@ -443,16 +806,18 @@ class StraTurtle(BaseCtaStrategy):
         context.register_index_line(ch_idx, "entry_lower", lineType=0)
         context.register_index_line(ch_idx, "stop", lineType=0)
 
-        # === 状态恢复 (v4: +trigger武装; v3: 双子系统+去重键; v2/v1 兼容) ===
+        # === 状态恢复 (v4: +trigger武装/profile语义指纹; v3/v2/v1 兼容) ===
         raw = context.user_load_data(f"{self.name()}_engine", "", str)
         if raw:
             try:
                 data = json.loads(raw)
                 if isinstance(data, dict) and data.get("v") in (3, 4):
+                    # 原名找不到会静默漏恢复，随后净仓可能被收养成
+                    # 首 profile 单层。身份/语义不一致必须 fail-loud。
+                    validate_snapshot(data, self._profiles)
                     for nm, snap in (data.get("subs") or {}).items():
                         sub = self._sub(nm)
-                        if sub:
-                            sub["engine"].restore(snap)
+                        sub["engine"].restore(snap)
                     self._d1_date = data.get("d1_date")
                     self._m5_key = data.get("m5_key")
                     self._h1_key = data.get("h1_key")
@@ -498,6 +863,16 @@ class StraTurtle(BaseCtaStrategy):
                         if en is not None and np.isfinite(en):
                             self._last_n = en
                             break
+                self._restore_exit_orders(data.get("exit_orders"))
+                if data.get("v") == 4:
+                    self._restore_position_intents(data.get("intents"),
+                                                   data.get("outbox_seq"))
+                    saved_def = data.get("deferred") or {}
+                    if isinstance(saved_def, dict):
+                        self._deferred_decisions = {
+                            str(k): [dict(x) for x in v]
+                            for k, v in saved_def.items()
+                            if isinstance(v, list)}
                 context.stra_log_text(
                     f"{self.name()} restored: dir={self._engine.direction}, "
                     f"layers={len(self._engine.layers)}")
@@ -519,7 +894,8 @@ class StraTurtle(BaseCtaStrategy):
                 f"{t.age() if t.age() is None else round(t.age(), 1)}s, "
                 f"available={t.available()})")
         pos, pos_src = self._truth_position(context, code)
-        if pos != 0 and self._combined_target() == 0:
+        if pos != 0 and self._combined_target() == 0 \
+                and not self._open_intents:
             avgpx = abs(float(context.stra_get_position_avgpx(code) or 0))
             if not np.isfinite(avgpx) or avgpx <= 0:
                 px = context.stra_get_price(code)
@@ -537,36 +913,35 @@ class StraTurtle(BaseCtaStrategy):
 
         # 组合风控账本恢复: RiskManager._book 进程内存态不持久化,
         # 重启后为空 → 持仓期间组合总敞口/单位数约束被低估
-        # (2026-09-04 审计发现)。按恢复/收养的引擎持仓重建记账。
-        tot_lots = 0
-        wsum = 0.0
-        dirn = 0
-        n0 = None
-        risk0 = 0.0
+        # (2026-09-04 审计发现)。按恢复/收养的引擎持仓逐 profile
+        # 重建记账；单位数仍由 code 级 meta 去重。
+        if self._risk.has_position(code):
+            self._risk.on_closed(code)       # 清掉旧进程可能残留的各 profile
+        restored_lots = 0
+        restored_risk = 0.0
         for s in self._subs:
             e = s["engine"]
             if e.direction == 0 or not e.layers:
                 continue
-            dirn = e.direction
-            for l, pr in e.layers:
-                tot_lots += l
-                wsum += l * pr
-            risk0 += e.booked_risk(self._volscale or 1.0,
-                                   p.stop_atr_mult,
-                                   stop=e.stop_anchor())
-            if n0 is None and e._n is not None and np.isfinite(e._n):
-                n0 = e._n
-        if tot_lots > 0 and not self._risk.has_position(code):
-            self._risk.on_rebuilt(
-                code, dirn, tot_lots, wsum / tot_lots,
-                n0 or 1.0, self._volscale or 1.0,
+            L = sum(l for l, _ in e.layers)
+            avg = sum(l * pr for l, pr in e.layers) / L
+            n0 = e._n if e._n is not None and np.isfinite(e._n) else 1.0
+            risk0 = e.booked_risk(self._volscale or 1.0,
+                                  p.stop_atr_mult,
+                                  stop=e.stop_anchor())
+            self._risk.sync_position(
+                code, e.direction, L, avg, n0, self._volscale or 1.0,
                 p.stop_atr_mult, self._inst.group,
-                risk=risk0 if risk0 > 0 else None,
-                sid=self.name(), units=float(self._inst.units))
+                risk=risk0,       # 锁盈到 0 也是有效风险，不得回退默认 2N
+                sid=self.name(), units=float(self._inst.units),
+                profile=s["name"])
+            restored_lots += L
+            restored_risk += risk0
+        if restored_lots > 0:
             context.stra_log_text(
-                f"{self.name()} risk book restored: dir={dirn} "
-                f"lots={tot_lots} avg={wsum / tot_lots:.2f} "
-                f"risk={risk0:.0f} (stop caliber)")
+                f"{self.name()} risk book restored: "
+                f"lots={restored_lots} risk={restored_risk:.0f} "
+                f"profiles={len(self._subs)} (stop caliber)")
 
         context.stra_log_text(
             f"StraTurtle inited: {code} {self._inst.period} "
@@ -593,6 +968,12 @@ class StraTurtle(BaseCtaStrategy):
     def on_calculate(self, context: CtaContext):
         self._in_schedule = True
         try:
+            self._process_open_intents(context)
+            self._process_exit_orders(context)
+            if self._exit_orders or self._open_intents:
+                # 目标/出场未确认：禁止评估/重入，仅推进证据并落快照。
+                self._persist(context)
+                return
             path = self._mode.calc_path
             if path == "h1":
                 self._on_calc_h1(context)
@@ -697,17 +1078,17 @@ class StraTurtle(BaseCtaStrategy):
             if float(mkeys[i]) <= float(self._h1_m5_key):
                 continue
             j = closure_at.get(i)
-            if j is not None and j < n_closed and \
-                    int(keys[j]) > int(self._h1_key):
-                # 桶 j 的末根到达 → 闭合评估 (bt 逐日推进时即按此
-                # 依序闭合全天各桶, 与 live 逐小时驱动时序等价)
-                self._eval_h1_bar(context, h1, j)
+            # bt trigger 先用旧武装消费当前 m5，再闭合 h1 并武装未来；
+            # 否则会用本 m5 收盘后才知道的 h1 通道回溯此前价格。
             if is_bt and trig:
                 o = float(opens[i]) if opens is not None \
                     else float(mbars.closes[i])
                 self._run_trigger_bar(context, o, float(mbars.highs[i]),
                                       float(mbars.lows[i]),
                                       float(mbars.closes[i]))
+            if j is not None and j < n_closed and \
+                    int(keys[j]) > int(self._h1_key):
+                self._eval_h1_bar(context, h1, j)
             self._h1_m5_key = float(mkeys[i])
         # sweep 兜底: 闭合检测依赖"末根 bar 在本 call 内被消费"; 若末根
         # 恰好是基线前最后一根 (live hang 恢复的 15:00→15:05 场景),
@@ -883,6 +1264,9 @@ class StraTurtle(BaseCtaStrategy):
                                            chan[self._subs[0]["name"]],
                                            open=o):
                 self._execute(context, dec, n, fctx)
+        # ratchet/成交价变化后统一刷新实际止损口径风险，避免账本长期
+        # 虚占或低估。同步是纯覆盖操作，单/双 profile 均幂等。
+        self._sync_risk_book(n)
         return atr, n, chan
 
     def _calc_indicators(self, highs, lows, closes):
@@ -937,19 +1321,24 @@ class StraTurtle(BaseCtaStrategy):
             a, b = ch(en)
             c2, d2 = ch(ex)
             f1, f2 = ch(fsp)
-            chan[sub["name"]] = _mk(a, b, c2, d2, f1, f2)
+            current = _mk(a, b, c2, d2, f1, f2)
+            # trigger 次日常规通道 = 最近 N 根（含刚闭合 bar），与
+            # close 的 current/prev 分离；arm_exclude 时不用 next_*。
+            nxt = {
+                "entry_upper": float(np.max(highs[-en:])),
+                "entry_lower": float(np.min(lows[-en:])),
+                "exit_upper": float(np.max(highs[-ex:])),
+                "exit_lower": float(np.min(lows[-ex:])),
+                "fs_upper": float(np.max(highs[-fsp:])),
+                "fs_lower": float(np.min(lows[-fsp:])),
+            }
+            chan[sub["name"]] = with_next_channels(current, nxt)
         return atr, n, chan
 
     def _need_bars(self) -> int:
-        """暖机所需信号周期 bar 数 (覆盖各子系统窗口 + ATR + 2 根余量)"""
-        p = self._base
-        need = max(p.s2_entry, p.s1_entry, p.s2_exit, p.atr_period)
-        for s in self._subs:
-            for k in ("entry", "exit", "fs"):
-                v = s.get(k)
-                if v:
-                    need = max(need, int(v))
-        return need + 2
+        """暖机所需信号周期 bar 数：与 ConfigLoader 共用 profiles 口径，
+        覆盖 base/全部 speed 窗口 + ATR + prev 通道余量。"""
+        return required_bars(self._inst, self._base)
 
     def _post_calculate(self, context: CtaContext, closes, n: float,
                         chan: dict, mark: bool = True):
@@ -959,10 +1348,15 @@ class StraTurtle(BaseCtaStrategy):
         error 丢弃, CtaStraBaseCtx:2036) — mark 再叠 _in_schedule 闸,
         on_tick/session_end 路径自动跳过。"""
         code = self._inst.code
+        self._process_exit_orders(context)
+        if self._exit_orders:
+            self._persist(context)
+            return
         # 日损闸先于对账/持久化: 触发后本 bar 的目标仓已归零
         self._update_daily_guard(context)
         self._reconcile(context, closes)
         self._reanchor_actual_fill(context)
+        self._sync_risk_book(n)
         self._dump_fund_live(context)
         pos = context.stra_get_position(code)
         first = self._first_active_sub()
@@ -982,9 +1376,14 @@ class StraTurtle(BaseCtaStrategy):
         snap = {"v": 4,
                 "subs": {s["name"]: s["engine"].snapshot()
                          for s in self._subs},
+                "profiles": snapshot_meta(self._profiles),
                 "d1_date": self._d1_date, "m5_key": self._m5_key,
                 "h1_key": self._h1_key,
-                "h1_m5_key": self._h1_m5_key}
+                "h1_m5_key": self._h1_m5_key,
+                "exit_orders": self._exit_order_snapshot(),
+                "deferred": self._deferred_decisions,
+                "intents": self._position_intent_snapshot(),
+                "outbox_seq": self._outbox_seq}
         context.user_save_data(f"{self.name()}_engine", json.dumps(snap))
 
     def _dump_fund_live(self, context):
@@ -1110,15 +1509,33 @@ class StraTurtle(BaseCtaStrategy):
                 break
         if not hits:
             return
-        for sub, sp, i in hits:
-            tstr = f"{int(times[i])}" if times is not None else "?"
-            old = self._sub_lots(sub) * (1 if sub["engine"].direction > 0
-                                         else -1)
-            sub["engine"].confirm_exit(sp)
-            self._safe_mark(context, sp, "exit", self.name())
-            context.stra_log_text(
-                f"{self.name()}[{sub['name']}] intrabar exit "
-                f"{old}@{sp:.2f} (stop touched @m5 {tstr})", level=1)
+        if not self._is_backtest and self._is_dual:
+            # 多 profile 实盘盘中止损与常规出场同一语义：目标仓下降不
+            # 等于成交完成，必须登记批次并等待真实平仓证据。
+            dec_map = {}
+            for sub, sp, _i in hits:
+                dec_map.setdefault(sub["name"], []).append({
+                    "decision": "exit", "reason": "stop", "price": sp,
+                    "tag": "ExitI"})
+            self._execute_dual(context, dec_map, n)
+        else:
+            for sub, sp, i in hits:
+                tstr = f"{int(times[i])}" if times is not None else "?"
+                old = self._sub_lots(sub) * (1 if sub["engine"].direction > 0
+                                             else -1)
+                if not self._is_backtest:
+                    self._execute(context, {
+                        "decision": "exit", "reason": "stop", "price": sp,
+                        "tag": "ExitI"}, n)
+                    continue
+                sub["engine"].confirm_exit(sp)
+                self._safe_mark(context, sp, "exit", self.name())
+                context.stra_log_text(
+                    f"{self.name()}[{sub['name']}] intrabar exit "
+                    f"{old}@{sp:.2f} (stop touched @m5 {tstr})", level=1)
+        if self._exit_orders:
+            self._persist(context)
+            return
         new_t = self._combined_target()
         cur = int(round(context.stra_get_position(code)))
         if new_t != cur:
@@ -1135,6 +1552,7 @@ class StraTurtle(BaseCtaStrategy):
         """单根 bar 触碰仿真 (bt 日线/m5 路径)"""
         if not np.isfinite(self._last_n):
             return
+        dec_map = {}
         for sub in self._subs:
             decs = sub["engine"].check_bar(o, h, l, c)
             if os.environ.get("WT_TRIG_DEBUG") == "1":
@@ -1143,7 +1561,9 @@ class StraTurtle(BaseCtaStrategy):
                     f"OHLC={o:.0f}/{h:.0f}/{l:.0f}/{c:.0f} "
                     f"armed={sub['engine'].armed} "
                     f"decs={[d.get('decision') for d in decs]}")
-            self._exec_trigger_decs(context, sub, decs)
+            if decs:
+                dec_map[sub["name"]] = decs
+        self._exec_trigger_batch(context, dec_map)
 
     def _run_trigger_bars(self, context: CtaContext, mbars, mkey):
         """新增主K段逐根触碰仿真 (trigger 模式的 m5 主K路径)"""
@@ -1162,6 +1582,11 @@ class StraTurtle(BaseCtaStrategy):
     def on_tick(self, context: CtaContext, stdCode: str, newTick):
         """实盘 tick 驱动触发 (trigger 模式)"""
         if self._mode.entry_mode != "trigger" or stdCode != self._inst.code:
+            return
+        self._process_open_intents(context)
+        self._process_exit_orders(context)
+        if self._exit_orders or self._open_intents:
+            self._persist(context)
             return
         # 新交易日自愈评估: session_end 未触发(实盘收盘后无 tick,
         # ticker 兜底要求行情时间推进过收盘点, 白盘 15:00 后无行情
@@ -1186,13 +1611,14 @@ class StraTurtle(BaseCtaStrategy):
         # P2-11 补充: fund_live.csv 只挂日评估路径时盘中无行 (2026-09-21
         # 实测: 全天仅 IF catchup 写了一行); tick 路径节流 60s 增补
         self._dump_fund_live(context)
-        fired = False
+        dec_map = {}
         for sub in self._subs:
             decs = sub["engine"].on_price(float(px))
             if decs:
-                fired = True
-            self._exec_trigger_decs(context, sub, decs)
-        if fired:
+                dec_map[sub["name"]] = decs
+        if dec_map:
+            # 同一 tick 全 profile 先收集，再一次净额执行，避免中间目标单。
+            self._exec_trigger_batch(context, dec_map)
             self._persist(context)   # 触发事件即时落快照
 
     def _detect_limit_lock(self, context: CtaContext, code: str,
@@ -1231,6 +1657,33 @@ class StraTurtle(BaseCtaStrategy):
         self._alert("limit_lock",
                     f"{code} {px} pinned {pinned_for:.0f}s, "
                     f"{len(self._fill_pending)} fill pending")
+
+    def _exec_trigger_batch(self, context, dec_map: dict):
+        """同一 tick/bar 的全 profile 决策，一次净额执行。"""
+        if not dec_map:
+            return
+        if not np.isfinite(self._last_n):
+            context.stra_log_text(
+                f"{self.name()} trigger decisions dropped: N unavailable",
+                level=2)
+            for sub in self._subs:
+                if sub["name"] not in dec_map:
+                    continue
+                dropped = sub["engine"].clear_pending()
+                if dropped is not None:
+                    context.stra_log_text(
+                        f"{self.name()}[{sub['name']}] clear pending: "
+                        f"{dropped}", level=2)
+            return
+        for decs in dec_map.values():
+            for dec in decs:
+                dec["prefiltered"] = True
+        if self._is_dual:
+            self._execute_dual(context, dec_map, self._last_n)
+        else:
+            for sub in self._subs:
+                if sub["name"] in dec_map:
+                    self._exec_trigger_decs(context, sub, dec_map[sub["name"]])
 
     def _exec_trigger_decs(self, context: CtaContext, sub: dict,
                            decs: list):
@@ -1272,9 +1725,14 @@ class StraTurtle(BaseCtaStrategy):
         snap = {"v": 4,
                 "subs": {s["name"]: s["engine"].snapshot()
                          for s in self._subs},
+                "profiles": snapshot_meta(self._profiles),
                 "d1_date": self._d1_date, "m5_key": self._m5_key,
                 "h1_key": self._h1_key,
-                "h1_m5_key": self._h1_m5_key}
+                "h1_m5_key": self._h1_m5_key,
+                "exit_orders": self._exit_order_snapshot(),
+                "deferred": self._deferred_decisions,
+                "intents": self._position_intent_snapshot(),
+                "outbox_seq": self._outbox_seq}
         context.user_save_data(f"{self.name()}_engine", json.dumps(snap))
 
     @staticmethod
@@ -1336,6 +1794,11 @@ class StraTurtle(BaseCtaStrategy):
             return None
 
     def on_session_end(self, context: CtaContext, curTDate: int):
+        self._process_open_intents(context)
+        self._process_exit_orders(context)
+        if self._exit_orders or self._open_intents:
+            self._persist(context)
+            return
         if self._combined_target() != 0:
             subs = ",".join(
                 f"{s['name']}:dir{s['engine'].direction}"
@@ -1385,6 +1848,9 @@ class StraTurtle(BaseCtaStrategy):
         # 是刻意的 (那条路径不追加合成bar)
         if bars is None or len(bars) < need - 1:
             return
+        last_date = self._bar_last_date(bars)
+        if last_date is None:
+            return
         # 当日 m5 聚合 (his 无当日, 见 DATA_OPS F3)
         synth = None
         mbars = context.stra_get_bars(code, p.intrabar_period,
@@ -1412,7 +1878,19 @@ class StraTurtle(BaseCtaStrategy):
             lows = np.append(lows, l)
             closes = np.append(closes, c)
         else:
-            # 无当日 m5 (异常兜底): 以 his 末根充当, 评估幂等
+            # 无当日 m5 (数据链路异常): 绝不能用 his 末根冒充当日评估。
+            # 否则会把锚点推进到 curTDate，次日真实日线补齐后 catch-up
+            # 误判"已是最新"并永久跳过当日评估。保持锚点不动，等数据
+            # 恢复后由 catch-up 用真实 his 日期补评估。
+            if int(last_date) < int(curTDate):
+                txt = (f"session eval skipped: 当日 m5 缺失, his last="
+                       f"{last_date} < tdate={curTDate}; 等待数据恢复后 "
+                       "catch-up 补评估")
+                context.stra_log_text(f"{self.name()} {txt}", level=2)
+                self._alert("session_eval_missing_m5", txt)
+                return
+            # his 已含当日 bar 的边界（如盘后启动/数据链已补齐）:
+            # 用实际数据日期做评估锚。
             o, h, l, c = float(highs[-1]), float(highs[-1]), \
                 float(lows[-1]), prev_close
         # with_oi=True (2026-10-20): his bars 本身带 volume/OI, 之前传
@@ -1425,7 +1903,9 @@ class StraTurtle(BaseCtaStrategy):
                                        synth=synth)
         if n is None:
             return
-        self._d1_date = int(curTDate)
+        # 评估锚必须是"实际参与评估的数据日期"，不是目标交易日。
+        self._d1_date = int(curTDate) if synth is not None \
+            else int(last_date)
         # 当日合成日K落 journal (崩溃窗口兜底)
         if synth is not None and self._use_journal:
             self._journal_writer().append(
@@ -1562,6 +2042,33 @@ class StraTurtle(BaseCtaStrategy):
                 px = None
         if px is None or px != px or px <= 0:
             px = 0.0
+        if not self._is_backtest:
+            # 单/多 profile 实盘统一走异步出场：目标仓 0 不代表券商已平，
+            # 成交证据到达前保留引擎与风险账。
+            if not self._is_dual:
+                e = self._engine
+                fill = px if px > 0 else (
+                    e.layers[-1][1] if e.layers else 0.0)
+                self._execute(context, {
+                    "decision": "exit", "reason": reason, "price": fill,
+                    "tag": "DailyStop"}, self._last_n)
+            else:
+                dec_map = {}
+                for s in self._subs:
+                    e = s["engine"]
+                    if e.direction == 0:
+                        continue
+                    fill = px if px > 0 else (
+                        e.layers[-1][1] if e.layers else 0.0)
+                    dec_map.setdefault(s["name"], []).append({
+                        "decision": "exit", "reason": reason,
+                        "price": fill, "tag": "DailyStop"})
+                self._execute_dual(context, dec_map, self._last_n)
+            txt = (f"{code} {reason} → flatten pending "
+                   f"{int(round(pos))} lots (等待真实平仓确认)")
+            context.stra_log_text(f"{self.name()} {txt}", level=3)
+            self._alert("daily_loss_flatten_pending", txt)
+            return
         context.stra_set_position(code, 0, "DailyStop")
         for s in self._subs:
             e = s["engine"]
@@ -1624,6 +2131,54 @@ class StraTurtle(BaseCtaStrategy):
         """→ execution.ExecutionRouter.execute_dual (A1-1 迁出, 薄转发)"""
         return self._router.execute_dual(context, dec_map, n, fctx)
 
+    def _replay_deferred_decisions(self, context):
+        """出场批次真实成交后重放被延后的 enter/add。
+
+        重放前先从队列取出，避免重放路径再次进入本函数造成递归；当前队列
+        只保存 enter/add，不会生成新的出场批次。风控/过滤会按重放时点重新
+        裁决，风控否决会正常撤武装并丢弃该决策。
+        """
+        dec_map = self._deferred_decisions
+        if not dec_map:
+            return
+        self._deferred_decisions = {}
+        # 延迟决策只在原自然日内有效。出场 UNKNOWN 跨日后，旧突破价不再
+        # 具有执行意义；清 pending 防挂起，禁止跨日补旧单。
+        get_day = getattr(context, "stra_get_date", None)
+        cur_day = None
+        if get_day is not None:
+            try:
+                cur_day = int(get_day())
+            except (TypeError, ValueError):
+                cur_day = None
+        if cur_day is not None:
+            fresh = {}
+            for name, decs in dec_map.items():
+                same_day = [d for d in decs
+                            if d.get("_defer_date", cur_day) == cur_day]
+                stale = [d for d in decs
+                         if d.get("_defer_date", cur_day) != cur_day]
+                if same_day:
+                    fresh[name] = same_day
+                for _d in stale:
+                    sub = self._sub(name)
+                    dropped = sub["engine"].clear_pending() \
+                        if sub is not None else None
+                    txt = (f"deferred {name} decision expired on day "
+                           f"change ({_d.get('_defer_date')} -> {cur_day}); "
+                           f"pending={dropped}")
+                    context.stra_log_text(f"{self.name()} {txt}", level=2)
+                    self._alert("deferred_expired", txt)
+            dec_map = fresh
+            if not dec_map:
+                self._persist(context)
+                return
+        context.stra_log_text(
+            f"{self.name()} replay deferred decisions after exit fill: "
+            f"{ {k: [d['decision'] for d in v] for k, v in dec_map.items()} }")
+        self._execute_dual(context, dec_map, self._last_n)
+        self._persist(context)
+
     def _apply_enter_gates(self, context, sub: dict, d: int, dec: dict, n: float, fctx: FilterContext = None):
         """→ execution.ExecutionRouter.apply_enter_gates (A1-1 迁出, 薄转发)"""
         return self._router.apply_enter_gates(context, sub, d, dec, n, fctx)
@@ -1633,46 +2188,38 @@ class StraTurtle(BaseCtaStrategy):
         return self._router.apply_add_gates(context, sub, dec, n)
 
     def _sub_share(self, sub: dict) -> float:
-        """子系统品种内预算份额 (双系统按 units 占比; 单系统=1.0)"""
-        if getattr(self._inst, "speeds", None):
-            return max(0.0, float(sub.get("share", 1.0)))
-        if not self._is_dual or int(self._inst.units) <= 0:
-            return 1.0
-        return max(0.0, min(1.0, sub["units"] / float(self._inst.units)))
+        """子系统品种内预算份额。直接读 normalized ProfileSpec 展开值：
+        legacy 双系统保留 ceil/floor 比例，speeds 保留显式 share。"""
+        return max(0.0, min(1.0, float(sub.get("share", 1.0))))
 
     def _sync_risk_book(self, n: float):
-        """按两子系统合并仓位覆盖式同步风控账本。
+        """逐 profile 同步风控账本；单位数由 code 级 meta 去重。
 
-        风险值按**当前实际止损位**汇总 (engine.booked_risk(stop=...)):
-        即"所有层在共同止损位离场"的最坏净亏损。用 2N 口径会显著虚高
-        (2026-09-16 实盘实测 52.7 万 vs 20.4 万), 把组合预算占满导致
-        后续加仓全被 `total_risk(cap=0)` 否决。
+        风险值按**当前实际止损位**逐子系统记账 (engine.booked_risk(
+        stop=...)): 各 profile 的价格与风险不再被 net 口径压平，第二个
+        profile 的 cap_entry 也能精确看到第一个 profile 的批次内预约。
         """
         code = self._inst.code
-        tot_l = 0
-        wsum = 0.0
-        dirn = 0
-        risk = 0.0
+        any_pos = False
         for s in self._subs:
             e = s["engine"]
             if e.direction == 0 or not e.layers:
+                self._risk.on_closed(code, profile=s["name"])
                 continue
+            any_pos = True
             L = sum(l for l, _ in e.layers)
-            wsum += sum(l * pr for l, pr in e.layers)
-            tot_l += L
-            dirn = e.direction   # 双系统同向持仓 (反向并存时以首活跃为准)
-            risk += e.booked_risk(self._volscale or 1.0,
-                                  self._base.stop_atr_mult,
-                                  stop=e.stop_anchor())
-        if dirn == 0 or tot_l == 0:
+            avg = sum(l * pr for l, pr in e.layers) / L
+            risk = e.booked_risk(self._volscale or 1.0,
+                                 self._base.stop_atr_mult,
+                                 stop=e.stop_anchor())
+            self._risk.sync_position(
+                code, e.direction, L, avg,
+                n if n and n > 0 else 1.0, self._volscale or 1.0,
+                self._base.stop_atr_mult, self._inst.group, risk=risk,
+                sid=self.name(), units=float(self._inst.units),
+                profile=s["name"])
+        if not any_pos:
             self._risk.on_closed(code)
-            return
-        price = wsum / tot_l
-        self._risk.sync_position(
-            code, dirn, tot_l, price,
-            n if n and n > 0 else 1.0, self._volscale or 1.0,
-            self._base.stop_atr_mult, self._inst.group, risk=risk,
-            sid=self.name(), units=float(self._inst.units))
 
     def _reject_trigger(self, engine):
         """→ execution.ExecutionRouter.reject_trigger (A1-1 迁出, 薄转发)"""

@@ -228,7 +228,7 @@ def test_check_depth_ok_when_enough_rows(tmp_path):
     assert any(i.level == "info" and "深度 OK" in i.msg for i in issues)
 
 
-def test_has_bars_recognizes_csv_and_dsb(tmp_path):
+def test_has_bars_requires_readable_rows(tmp_path):
     """runBT 的 bt_no_simtick 不能只看 storage/csv (2026-10-20):
     DSB 存储也要识别, 否则有 m5 的品种被误判无 m5。"""
     storage = tmp_path / "storage"
@@ -238,14 +238,17 @@ def test_has_bars_recognizes_csv_and_dsb(tmp_path):
     csv_dir.mkdir(parents=True)
     (csv_dir / "SHFE.rb.HOT_m5.csv").write_text("date,open,high,low,close\n",
                                                  encoding="utf-8")
+    assert not dc.has_bars("SHFE.rb.HOT", "m5", str(storage))  # header-only
+    with open(csv_dir / "SHFE.rb.HOT_m5.csv", "a", encoding="utf-8") as f:
+        f.write("2023/01/03,1,2,0.5,1.5\n")
     assert dc.has_bars("SHFE.rb.HOT", "m5", str(storage))
 
-    # 删 CSV, 只留 DSB → 仍应识别
+    # 删 CSV, 只留不可解析 DSB → 不能证明有效，安全退化为无模拟 tick
     (csv_dir / "SHFE.rb.HOT_m5.csv").unlink()
     dsb_dir = storage / "his" / "min5" / "SHFE"
     dsb_dir.mkdir(parents=True)
     (dsb_dir / "SHFE.rb_HOT.dsb").write_bytes(b"x")
-    assert dc.has_bars("SHFE.rb.HOT", "m5", str(storage))
+    assert not dc.has_bars("SHFE.rb.HOT", "m5", str(storage))
 
 
 # ---------- 策略旁路日志链路 ----------

@@ -8,6 +8,7 @@ import datetime as _dt
 import os
 import time
 from execution.paths import GROUP_DIR as _GROUP_DIR
+from execution.batch import TargetIntent
 
 
 class FillTracker:
@@ -18,15 +19,24 @@ class FillTracker:
     # 立即抛 AttributeError (隐式耦合 loud-failure, 替代静默降级)
     DEPS = (
         "_alert",
+        "_attr",
+        "_attr_feed",
+        "_attr_progress",
         "_base",
         "_combined_target",
+        "_exit_orders",
         "_fill_pending",
         "_ghost_trim_date",
         "_inst",
+        "_is_dual",
         "_last_n",
+        "_persist",
         "_pricetick",
+        "_replay_deferred_decisions",
+        "_risk",
         "_subs",
         "_sync_risk_book",
+        "_truth_mode",
         "_trade_journal_source",
         "_truth_net",
         "_truth_source",
@@ -37,6 +47,18 @@ class FillTracker:
     def __init__(self, host):
         self.h = host   # StrategyHost 显式依赖面 (A1 尾项, 见 host.py)     # StraTurtle 回指 (过渡期)
 
+    @staticmethod
+    def _journal_cursor(journal):
+        """业务游标：带文件身份；旧 journal 桩只实现 cursor() 时兼容。"""
+        if journal is None:
+            return None
+        getter = getattr(journal, "cursor_key", None)
+        return getter() if getter is not None else journal.cursor()
+
+    def journal_cursor(self, journal):
+        """公开给 outbox：同一业务游标口径。"""
+        return self._journal_cursor(journal)
+
     def mark_fill_pending(self, context, key: str, engine):
         """登记"成交均价待回写" (按子系统分槽, 幂等覆盖同槽)。
 
@@ -45,7 +67,7 @@ class FillTracker:
         欠定"的问题。
         """
         j = self.h._trade_journal_source()
-        cursor = j.cursor() if j is not None else None
+        cursor = self._journal_cursor(j)
         # 成交确认的真值基线 (增量口径): 登记时刻的账户持仓, 之后只看
         # **增量**是否等于本层手数 — 绝对值在共享账户下含其他策略仓位,
         # 不可用 (2026-09-15 实测: CZCE.TA 账户 112 vs 本策略 64)
@@ -64,6 +86,214 @@ class FillTracker:
             "fees0": self.get_fees(context),
             "lots": engine.layers[-1][0] if engine.layers else 0,
             "cursor": cursor, "skip": carry, "truth0": truth0}
+    def begin_dual_exit(self, context, intent: TargetIntent, engines: list):
+        """登记多 profile 共享净出场批次，不按 profile 分别假确认。"""
+        journal = self.h._trade_journal_source()
+        self.h._exit_orders["__dual__"] = {
+            "batch": True, "intent": intent, "engines": list(engines),
+            "ts": time.time(),
+            "cursor": self._journal_cursor(journal),
+            "filled": 0.0,
+        }
+        # 订单级归因: mixed/反向批次由 localid 链消解, 不再一律 UNKNOWN。
+        if self.h._attr_feed(context):
+            self.h._attr.on_intent("__dual__", before=int(intent.before),
+                                   after=int(intent.after),
+                                   ts=float(self.h._exit_orders["__dual__"]["ts"]))
+        self.h._persist(context)
+        return True
+
+    def cancel_dual_exit(self, context):
+        fp = self.h._exit_orders.pop("__dual__", None)
+        if fp:
+            for engine in fp["engines"]:
+                engine.cancel_exit()
+            if self.h._attr is not None:
+                self.h._attr.attr.discard("__dual__")
+            self.h._persist(context)
+
+    def _finish_dual_exit(self, context, source: str, vwap=None):
+        fp = self.h._exit_orders.get("__dual__")
+        if not fp:
+            return
+        for engine in fp["engines"]:
+            price = vwap if vwap is not None \
+                else engine._exit_pending["price"]
+            engine.confirm_exit(price)
+        self.h._sync_risk_book(self.h._last_n)
+        self.h._exit_orders.pop("__dual__", None)
+        if self.h._attr is not None:
+            self.h._attr.attr.complete("__dual__")
+        context.stra_log_text(
+            f"{self.h.name()} dual exit confirmed evidence={source}; "
+            "all batch engines settled")
+        self.h._persist(context)
+        # 批次确认是"下一事件"：此时重放此前因混合净目标延后的
+        # enter/add。先弹出当前批次，避免重放队列状态仍指向旧批次。
+        self.h._replay_deferred_decisions(context)
+
+    def _process_dual_exit(self, context, fp: dict):
+        intent = fp["intent"]
+        code = intent.code
+        # 订单级归因证据优先: localid 链全成 (含跨零 mixed, 其拆单由
+        # 期望签名逐一认领) → 精确 vwap 确认, 不再 UNKNOWN 封锁。
+        if self.h._attr_feed(context):
+            ap = self.h._attr_progress("__dual__")
+            if ap is not None and ap.get("done"):
+                self._finish_dual_exit(context, "orders",
+                                       float(ap["vwap"]))
+                return
+        if intent.offset == "mixed":
+            if not fp.get("alerted"):
+                fp["alerted"] = True
+                self.h._alert("dual_exit_mixed",
+                              f"{code} cross-zero exit needs split orders; "
+                              "kept UNKNOWN")
+            return
+        if intent.delta == 0:
+            self._finish_dual_exit(context, "net_zero")
+            return
+        volume = 0.0
+        vwap = None
+        journal = self.h._trade_journal_source()
+        if journal is not None and fp.get("cursor") is not None:
+            volume, vwap = journal.fill_stats(
+                code, fp["cursor"], side=intent.side, offset="close")
+        fp["filled"] = min(intent.lots, float(volume))
+        if volume >= intent.lots:
+            self._finish_dual_exit(context, "trades", vwap)
+            return
+        if self.h._truth_mode == "rebuild":
+            broker = self.h._truth_net(code)
+            if broker is not None and int(round(broker)) == intent.after:
+                self._finish_dual_exit(context, "truth_target", vwap)
+                return
+        waited = time.time() - float(fp.get("ts", 0))
+        if waited > 600 and not fp.get("alerted"):
+            fp["alerted"] = True
+            txt = (f"{code} dual exit unconfirmed {waited:.0f}s: "
+                   f"{volume:g}/{intent.lots} closed; risk/reentry blocked")
+            context.stra_log_text(f"{self.h.name()} {txt}", level=3)
+            self.h._alert("exit_unconfirmed", txt)
+
+    def begin_exit_order(self, context, key: str, engine, dec: dict):
+        """登记出场目标及证据游标；真实平仓前不清引擎/风险账。"""
+        if key in self.h._exit_orders:
+            return True
+        reason = str(dec.get("reason", "exit"))
+        price = float(dec.get("price", 0.0))
+        if not engine.begin_exit(reason, price):
+            return False
+        journal = self.h._trade_journal_source()
+        self.h._exit_orders[key] = {
+            "engine": engine,
+            "ts": time.time(),
+            "lots": sum(l for l, _ in engine.layers),
+            "direction": engine.direction,
+            "decision_price": price,
+            "reason": reason,
+            "cursor": self._journal_cursor(journal),
+            "filled": 0.0,
+        }
+        # 订单级归因: 净出场意图入队 (簿镜像在执行单元簿记口径下推进)。
+        if self.h._attr_feed(context):
+            d = 1 if engine.direction > 0 else -1
+            lots = int(round(float(self.h._exit_orders[key]["lots"])))
+            before = int(self.h._combined_target())
+            self.h._attr.on_intent(str(key), before=before,
+                                   after=before - d * lots,
+                                   ts=float(self.h._exit_orders[key]["ts"]))
+        # 意图先于目标单持久化；崩溃后可恢复 UNKNOWN，而不是当作已平。
+        self.h._persist(context)
+        return True
+
+    def cancel_exit_order(self, context, key: str, engine):
+        """仅用于目标提交异常：撤销未知态并继续管理原持仓。"""
+        self.h._exit_orders.pop(key, None)
+        engine.cancel_exit()
+        if self.h._attr is not None:
+            self.h._attr.attr.discard(str(key))
+        self.h._persist(context)
+
+    def _finish_exit_order(self, context, key: str, fp: dict,
+                           price: float, source: str):
+        engine = fp["engine"]
+        engine.confirm_exit(float(price))
+        self.h._risk.on_closed(self.h._inst.code)
+        self.h._exit_orders.pop(key, None)
+        if self.h._attr is not None:
+            self.h._attr.attr.complete(str(key))
+        context.stra_log_text(
+            f"{self.h.name()}[{key}] exit confirmed @{float(price):.2f} "
+            f"evidence={source}; engine/risk released")
+        self.h._persist(context)
+
+    def process_exit_orders(self, context):
+        """按平仓成交证据推进 exit pending；超时只告警，绝不假确认。
+
+        证据优先级：订单级 localid 归因 (精确到意图) → 本交易通道逐笔
+        平仓 (方向+开平匹配) → 独占账户 (rebuild) 的券商零仓。共享 alert
+        模式不使用账户绝对仓或净增量作为本策略成交证明。部分成交只更
+        新进度，保留全部风险直到全成。
+        """
+        code = self.h._inst.code
+        attr_on = self.h._attr_feed(context)
+        for key, fp in list(self.h._exit_orders.items()):
+            if fp.get("batch"):
+                self._process_dual_exit(context, fp)
+                continue
+            engine = fp.get("engine")
+            if engine is None or engine.direction == 0:
+                self.h._exit_orders.pop(key, None)
+                self.h._risk.on_closed(code)
+                continue
+            lots = float(fp.get("lots") or 0)
+            if lots <= 0:
+                continue
+            direction = 1 if engine.direction > 0 else -1
+            # 平多=卖出(-1)，平空=买入(+1)，与持仓方向相反。
+            trade_side = -direction
+            # 证据 0: localid 归因链 (跨零/反向场景的订单级精确证据)
+            if attr_on:
+                ap = self.h._attr_progress(str(key))
+                if ap is not None and ap.get("done"):
+                    self._finish_exit_order(context, key, fp,
+                                            float(ap["vwap"]), "orders")
+                    continue
+            volume = 0.0
+            vwap = None
+            journal = self.h._trade_journal_source()
+            if journal is not None and fp.get("cursor") is not None:
+                volume, vwap = journal.fill_stats(
+                    code, fp["cursor"], side=trade_side, offset="close")
+            fp["filled"] = min(lots, float(volume))
+            if volume >= lots:
+                self._finish_exit_order(
+                    context, key, fp,
+                    vwap if vwap is not None else fp["decision_price"],
+                    "trades")
+                continue
+            # 仅独占账户允许用券商绝对零仓作补充证据；共享 alert 下
+            # 账户含其他策略仓位，不能用于本策略自动确认。
+            if self.h._truth_mode == "rebuild":
+                broker = self.h._truth_net(code)
+                if broker == 0:
+                    self._finish_exit_order(
+                        context, key, fp,
+                        vwap if vwap is not None else fp["decision_price"],
+                        "truth_zero")
+                    continue
+                if broker is not None:
+                    fp["broker_remaining"] = abs(float(broker))
+            waited = time.time() - float(fp.get("ts", 0))
+            if waited > 600 and not fp.get("alerted"):
+                fp["alerted"] = True
+                txt = (f"{code}[{key}] exit unconfirmed {waited:.0f}s: "
+                       f"close fills {volume:g}/{lots:g}; target flat but "
+                       "engine/risk retained, new entries blocked")
+                context.stra_log_text(f"{self.h.name()} {txt}", level=3)
+                self.h._alert("exit_unconfirmed", txt)
+
     def journal_layer_price(self, code: str, fp: dict, engine,
                              skip: float = 0.0):
         """本层真实成交均价 (逐笔成交口径); 不可用/未成交齐 → None。
@@ -75,8 +305,10 @@ class FillTracker:
             return None
         lots = fp.get("lots") or engine.layers[-1][0]
         try:
-            return j.layer_price(code, fp["cursor"], float(lots),
-                                 skip=float(fp.get("skip") or 0.0) + skip)
+            return j.layer_price(
+                code, fp["cursor"], float(lots),
+                skip=float(fp.get("skip") or 0.0) + skip,
+                side=engine.direction, offset="open")
         except Exception:
             return None
     def get_fees(self, context) -> float:
@@ -107,19 +339,14 @@ class FillTracker:
         (trades.csv 只随真实成交回报增长, 与信号口径无关的真实证据);
         "framework" = 框架信号口径 (fees 代理)。
 
-        口径 (2026-09-15 修订为**增量**): 账户持仓含其他策略同合约仓位,
-        绝对值无法归属 (实测 CZTA 账户 112/本策略 64)。故只看**本次下单
-        窗口内的增量**: 登记时刻记 truth0, 之后要求 (now - truth0) 与
-        本层手数同号且足额。这样即使账户已有别家仓位也不误判。
-
-        证据链 (2026-09-22 修订, CF 47+47/p 29 手幽灵事故):
-        1. 真值增量 (最强, 需 truth0 基线 + 真值新鲜);
-        2. 逐笔成交 journal (次强, 独立于真值 — 真值链路 2026-09-17
-           起因 CTP 重连查询错误永久卡死, 此证据救活确认);
-        3. fees 代理 (最弱, **信号口径**: 信号落地即计费 → fail-open
-           会把未成交瞬间误确认! 仅当真值源未配置/文件缺失时采信;
-           真值已配置但陈旧时视为未验证 → 保持窗口 → 600s fill_timeout
-           告警 → 2x 超时放行, 避免免费品种永久阻塞)。
+        证据链（2026-10-26 收紧）：
+        1. 账户净仓增量仅在 `truth_rebuild_mode=rebuild`（显式独占账户）
+           可用；共享 alert 下第三方同品种成交可能造成相同增量，不能归属。
+        2. 本通道逐笔成交按品种 + open/close + 买卖方向匹配。CNL/CNS
+           是平今真实成交，不是撤单。
+        3. fees 是信号口径，只在环境没有真值源时作降级代理。真值存在时
+           不用 fees 或墙钟超时替代真实成交；600s 告警后仍等待证据，
+           避免把执行卡死误确认成已成交。
         """
         pos = float(context.stra_get_position(code))
         engine = fp.get("engine")
@@ -128,7 +355,11 @@ class FillTracker:
             sign = 1
         lots = abs(float(fp.get("lots") or 0))
         t0 = fp.get("truth0")
-        if t0 is not None and lots > 0:
+        if t0 is not None and lots > 0 \
+                and self.h._truth_mode == "rebuild" \
+                and not self.h._is_dual:
+            # 账户净增量只在本策略独占账户时有归属意义；共享 alert
+            # 模式下第三方同品种成交可能恰好等于本层手数，不能确认。
             now = self.h._truth_net(code)
             if now is not None:
                 delta = now - t0
@@ -142,17 +373,24 @@ class FillTracker:
         # === 证据 2: 逐笔成交 (真实成交回报, 独立于真值链路) ===
         j = self.h._trade_journal_source()
         if j is not None and lots > 0 and fp.get("cursor") is not None:
-            actual = j.layer_price(code, fp.get("cursor"), lots,
-                                   float(fp.get("skip") or 0.0))
+            actual = j.layer_price(
+                code, fp.get("cursor"), lots,
+                float(fp.get("skip") or 0.0),
+                side=sign, offset="open")
             if actual is not None:
                 return True, "trades", pos
-        # === 证据 3: fees 代理 (真值缺失/未配置时才可信) ===
+        # === 证据 3: fees 代理 (只有环境无真值时才可信) ===
+        # 真值存在时，无论新鲜或陈旧，都不能用信号口径 fees 或墙钟
+        # 超时替代真实成交；否则第三方交易/执行卡死会再次造成假确认。
+        truth_present = self.h._truth_source() is not None
         fees0 = fp.get("fees0")
         if fees0 is None:
-            return True, pos_src, pos
+            return (False, pos_src, pos) if truth_present \
+                else (True, pos_src, pos)
         fees = self.get_fees(context)
         fees_increased = fees is None or fees > fees0
-        if fees_increased and not self.h._truth_stale_now():
+        if fees_increased and not truth_present \
+                and not self.h._truth_stale_now():
             return True, pos_src, pos
         # 以下两种情况都落入超时窗口 (600s 告警 / 2x 放行):
         # a) fees 未增 (免费/未配置费率品种, 旧行为);
@@ -162,7 +400,7 @@ class FillTracker:
         #    真实成交落 journal, 超时后放行 (记账价保持决策价)
         waited = time.time() - fp.get("ts", 0)
         limit = 600 if fees0 > 0 else 1800
-        if waited > limit * 2:
+        if waited > limit * 2 and not truth_present:
             if not fp.get("unblocked"):
                 fp["unblocked"] = True
                 context.stra_log_text(
@@ -249,6 +487,7 @@ class FillTracker:
             return                # 反推异常(持仓干预等), 放弃修正
         if self.h._pricetick and abs(actual - recorded) > 0.5 * self.h._pricetick:
             e.reanchor_last_price(actual)
+            self.h._sync_risk_book(self.h._last_n)
             context.stra_log_text(
                 f"{self.h.name()} fill re-anchor layer{len(e.layers)} "
                 f"{recorded:.2f} -> {actual:.2f} ({src}), "
@@ -289,19 +528,21 @@ class FillTracker:
         """ghost_fill 自愈 (P0-3, 2026-09-17 CF 34 手幽灵仓事故)。
 
         真值源确认"订单未到柜台"后若只告警不处置, 引擎会永久按未持仓
-        手数管理风险 (风控预算虚占、止损虚算、极端情况下按虚高手数
-        平仓被拒)。处置 = 把本策略信号层从尾部裁剪到"与券商同向且
-        不超过券商"的手数:
-          - **只缩量, 绝不放大**: 仅丢弃本策略未确认的尾部层, 不按
-            券商绝对值建仓 → 共享账户免疫 (券商持仓含别家同向仓位时
-            最多保守多裁, 不会错加);
-          - 跨子系统从尾部子系统开始裁, 保持净额一致;
-          - 裁剪后 set_position 对齐信号账 + 风控账本重建 + 告警;
-          - base.ghost_auto_trim=False 退回旧行为 (只告警人工处置)。
-        券商绝对值含别家同向仓位 → 本策略持仓被低估的残余风险由
-        运行时对账 (reconcile) 兜底, 裁错的层会以 truth_mismatch 告警。
+        手数管理风险。自动裁剪会改变真实目标仓，因此仅允许在
+        `truth_rebuild_mode=rebuild` 的显式独占账户中执行；共享 alert
+        下账户绝对净仓含其他策略，必须告警人工处理，不能宣称共享免疫。
+        裁剪仍遵循只缩量、尾部层优先、不同向不动作；base.ghost_auto_trim
+        =False 时无论账户模式都只告警。
         """
         if not self.h._base.ghost_auto_trim:
+            return
+        if self.h._truth_mode != "rebuild":
+            # 共享/未知归属账户：绝对净仓含其他策略，自动裁剪可能卖掉
+            # 本策略真实仓。仅告警人工处置；独占账户才可自动 trim。
+            txt = (f"{self.h._inst.code} ghost trim blocked: "
+                   "shared/alert account lacks strategy fill attribution")
+            context.stra_log_text(f"{self.h.name()} {txt}", level=3)
+            self.h._alert("ghost_trim_blocked", txt)
             return
         broker_net = float(broker_net)
         tot = self.h._combined_target()

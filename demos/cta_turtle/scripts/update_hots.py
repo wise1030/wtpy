@@ -24,6 +24,7 @@ wt-turtle-contracts.timer 之后, 距夜盘 21:00 留够启动链时间)。
 import argparse
 import datetime
 import json
+import math
 import os
 import signal
 import subprocess
@@ -32,8 +33,8 @@ import sys
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
-from pick_hot_sina import (PRODUCTS, active_contracts, pick_hots,  # noqa: E402
-                           merge_hots)
+from pick_hot_sina import (PRODUCTS, _select_hots, active_contracts,  # noqa: E402
+                           merge_hots, pick_hots)
 from timer_notify import notify as _notify  # noqa: E402
 
 
@@ -47,6 +48,20 @@ def _current_hots(hots: dict) -> dict:
     return cur
 
 
+def _valid_picks(candidates: dict, picked: dict) -> dict:
+    """仅保留有合约名且持仓严格为正的结果，其他品种沿用旧映射。"""
+    valid = {}
+    for key in candidates:
+        try:
+            hot, hold = picked.get(key, (None, None))
+            hold = float(hold)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if hot and math.isfinite(hold) and hold > 0:
+            valid[key] = (hot, hold)
+    return valid
+
+
 def _pick_holds_tqsdk(candidates: dict) -> dict:
     """tqsdk 兜底主力判定: 按 open_interest 最大 (P1-7)。
 
@@ -54,8 +69,9 @@ def _pick_holds_tqsdk(candidates: dict) -> dict:
     sina 单点依赖, 失败=换月静默顺延一天。candidates 与 pick_hots
     同构 ({品种key: [新浪代码...]}), 返回也回新浪代码, 下游口径不变。
 
-    tqsdk 未装/无凭据/查询失败 → 抛异常 (main 发告警 rc=1, 沿用旧
-    映射, 次日 timer 重试; 绝不写陈旧/空缺映射)。"""
+    tqsdk 未装/无凭据/初始化失败 → 抛异常；单合约查询失败按缺行情
+    处理。两种路径最终都由 main 拒绝全无效结果 (告警 rc=1，沿用旧
+    映射，次日 timer 重试；绝不写陈旧/空缺/零持仓映射)。"""
     import os as _os
     from tqsdk import TqApi, TqAuth
     user, pwd = _os.environ.get("TQ_USER"), _os.environ.get("TQ_PASS")
@@ -63,23 +79,21 @@ def _pick_holds_tqsdk(candidates: dict) -> dict:
         raise RuntimeError("tqsdk 兜底需 TQ_USER/TQ_PASS 环境变量")
     api = TqApi(auth=TqAuth(user, pwd), web_gui=False)
     try:
-        out = {}
+        holds = {}
         for key, codes in candidates.items():
             exchg = key.split(".")[0]
-            best, best_oi = None, -1.0
             for c in codes:
                 # CZCE: tqsdk 用 CTP 3 位码 (TA701), 新浪 4 位 (TA2701)
                 sym = c if exchg != "CZCE" \
                     else c[:len(c) - 4] + c[-3:]
                 try:
                     q = api.get_quote(f"{exchg}.{sym}")
-                    oi = float(getattr(q, "open_interest", 0) or 0)
+                    oi = getattr(q, "open_interest", None)
                 except Exception:
                     continue
-                if oi > best_oi:
-                    best, best_oi = c, oi
-            out[key] = (best, best_oi)
-        return out
+                if oi is not None:       # 缺行情与接口真实返回 0 分开
+                    holds[c] = oi
+        return _select_hots(candidates, holds)
     finally:
         try:
             api.close()
@@ -152,12 +166,23 @@ def main() -> int:
             _notify("hots_fail", f"海龟主力更新失败 {today}: sina({e}) "
                     f"tqsdk({e2}) — 沿用旧映射, 次日自动重试")
             return 1
-    empty = [k for k, (h, _) in picked.items() if not h]
-    if empty:
-        print(f"[hots] 警告: {len(empty)} 品种无持仓数据 {empty}",
+    valid = _valid_picks(candidates, picked)
+    invalid = [k for k in candidates if k not in valid]
+    if not valid:
+        msg = (f"海龟主力更新失败 {today} ({src}): 全部 {len(invalid)} "
+               f"个品种均无正持仓有效行情 {invalid} — 沿用全部旧映射, "
+               "不写文件不重启")
+        print(f"[hots] {msg}", file=sys.stderr)
+        _notify("hots_fail", msg)
+        return 1
+    if invalid:
+        print(f"[hots] 警告: 仅 {len(valid)}/{len(candidates)} 品种有"
+              f"有效行情, {len(invalid)} 品种沿用旧映射 {invalid}",
               file=sys.stderr)
-        _notify("hots_partial", f"海龟主力更新 {today} ({src}): "
-                f"{len(empty)} 品种无持仓数据 {empty} — 该品种沿用旧映射")
+        _notify("hots_partial", f"海龟主力部分更新 {today} ({src}): "
+                f"仅 {len(valid)}/{len(candidates)} 品种有有效行情; "
+                f"无效品种 {invalid} 沿用旧映射")
+    picked = valid
 
     with open(hots_path, encoding="utf-8") as f:
         hots = json.load(f)

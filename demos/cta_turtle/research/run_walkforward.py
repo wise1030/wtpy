@@ -58,6 +58,8 @@ def iter_windows(start: int, end: int, train_months: int,
                  test_months: int) -> list:
     """滚动窗切分。输入输出均为 yyyymmddhhmm 整数, 窗口按自然月对齐
     到当月 01 日 0900; 验证窗起点超出 end 或被截断退化(≤单点)的窗丢弃。"""
+    if train_months <= 0 or test_months <= 0:
+        raise ValueError("train_months/test_months 必须为正整数")
     def mk(y, m):
         # yyyymm01 + 0900 → y*1e8 + m*1e6 + 10900
         return y * 100000000 + m * 1000000 + 10900
@@ -159,7 +161,7 @@ def run_backtest(code: str, cfg_path: str, start: int, end: int,
 
 
 METRIC_KEYS = ("total_return", "annual_return", "max_falldown",
-               "sharpe_ratio", "win_rate")
+               "sharpe_ratio", "win_rate", "fallback")
 
 
 def main():
@@ -244,6 +246,8 @@ def main():
         row.update({f"oos_{k}": oos.get(k) for k in METRIC_KEYS})
         rows.append(row)
 
+    if not rows:
+        raise SystemExit("[wf] 全部窗口失败或为空，拒绝生成空汇总")
     out_csv = os.path.join(out_dir, "wf_summary.csv")
     with open(out_csv, "w", newline='', encoding='utf-8') as f:
         wtr = csv.DictWriter(f, fieldnames=list(rows[0].keys()))

@@ -38,6 +38,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import subprocess
 import sys
 from itertools import groupby
 
@@ -52,7 +53,9 @@ from core.PositionSizer import PositionSizer                # noqa: E402
 from core.RiskManager import RiskManager                    # noqa: E402
 from core.TurtleEngine import TurtleEngine                  # noqa: E402
 from core.aggregate import aggregate_h1                     # noqa: E402
-from core.indicators import wilder_atr, donchian            # noqa: E402
+from core.profiles import resolve_profiles, required_bars    # noqa: E402
+from core.indicators import (wilder_atr, donchian,           # noqa: E402
+                             with_next_channels)
 from filters import build_chain, FilterContext                 # noqa: E402
 from core import portfolio as pf                            # noqa: E402
 
@@ -213,6 +216,40 @@ def load_fees(common_dir: str) -> dict:
         return {}
 
 
+def load_roll_calendar(common_dir: str) -> dict:
+    """读取 hots 换月日历：code -> [{date, delta}]，按日期排序。
+
+    oldclose/newclose 均有效时 delta=newclose-oldclose；否则为 None，
+    换月当日仅在仍有持仓时用 open-prev_close 估算并记录警告。
+    """
+    path = os.path.join(common_dir, "hots.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for ex, products in (raw or {}).items():
+        for prod, rules in (products or {}).items():
+            code = f"{ex}.{prod}.HOT"
+            for rule in rules or []:
+                try:
+                    date = int(rule.get("date"))
+                    old = float(rule.get("oldclose") or 0.0)
+                    new = float(rule.get("newclose") or 0.0)
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if date <= 0 or not rule.get("from") or not rule.get("to"):
+                    continue
+                delta = new - old if old > 0 and new > 0 else None
+                out.setdefault(code, []).append(
+                    {"date": date, "delta": delta,
+                     "from": rule["from"], "to": rule["to"]})
+    for rules in out.values():
+        rules.sort(key=lambda r: r["date"])
+    return out
+
+
 def contract_info(code: str, contracts: dict):
     parts = code.split(".")
     if len(parts) < 2:
@@ -221,10 +258,17 @@ def contract_info(code: str, contracts: dict):
 
 
 def fee_cfg(code: str, fees: dict):
+    """费率键规范化；缺失必须 fail-loud，不能静默按免费处理。"""
     parts = code.split(".")
     if len(parts) < 2:
-        return {}
-    return fees.get(f"{parts[0]}.{parts[1]}", {}) or {}
+        raise KeyError(f"非法合约代码 {code}")
+    ex, prod = parts[0], parts[1]
+    candidates = (f"{ex}.{prod}", f"{ex}.{prod.upper()}",
+                  f"{ex}.{prod.lower()}")
+    for key in candidates:
+        if key in fees:
+            return fees[key] or {}
+    raise KeyError(f"缺少费率配置 {code}（尝试过 {candidates}）")
 
 
 def fee_cost(fee: dict, side: str, price: float, lots: float,
@@ -249,28 +293,88 @@ def fee_cost(fee: dict, side: str, price: float, lots: float,
         return 0.0
     if fee.get("byvolume"):
         return abs(lots) * rate
+    if abs(rate) > 0.01:
+        raise ValueError(
+            f"疑似比例费率单位错误: {rate}（>1%）；请核对 byvolume/交易所费率")
     return abs(price * volscale * lots) * rate
 
 
 # ----------------------------------------------------------------------
 # 指标 / 通道
 # ----------------------------------------------------------------------
-def build_channels(bars: dict, base, system: str) -> tuple:
-    """返回 (atr, chan dict数组); 通道不含当前 bar, 与 TurtleEngine 一致。"""
-    h, l, c = bars["highs"], bars["lows"], bars["closes"]
+def _roll_index(bars: dict, date: int):
+    """d1 直接索引；h1 用交易日字段找该日首桶。"""
+    if "tdate" in bars:
+        found = np.flatnonzero(np.asarray(bars["tdate"]) == int(date))
+        return int(found[0]) if len(found) else None
+    return bars["index"].get(int(date))
+
+
+def _roll_delta(bars: dict, rule: dict):
+    idx = _roll_index(bars, int(rule["date"]))
+    if idx is None or idx <= 0:
+        return None
+    delta = rule.get("delta")
+    if delta is not None:
+        return float(delta)
+    return float(bars["opens"][idx] - bars["closes"][idx - 1])
+
+
+def _roll_adjusted_hlc(bars: dict, i: int, rules: list):
+    """只应用当前 i 之前已发生的换月，避免未来价差进入指标。"""
+    h = np.asarray(bars["highs"][:i + 1], dtype=float).copy()
+    l = np.asarray(bars["lows"][:i + 1], dtype=float).copy()
+    c = np.asarray(bars["closes"][:i + 1], dtype=float).copy()
+    for rule in rules:
+        idx = _roll_index(bars, int(rule["date"]))
+        if idx is None or idx > i:
+            continue
+        delta = _roll_delta(bars, rule)
+        if delta is not None and delta != 0:
+            h[:idx] += delta
+            l[:idx] += delta
+            c[:idx] += delta
+    return h, l, c
+
+
+def _channel_arrays(h, l, c, base, en, ex, fs):
     atr = wilder_atr(h, l, c, base.atr_period)
-    if system == "S2":
-        en, ex, fs = base.s2_entry, base.s2_exit, base.s2_entry
-    else:
-        en, ex, fs = base.s1_entry, base.s1_exit, base.s2_entry
     eu, el = donchian(h, l, en)
     xu, xl = donchian(h, l, ex)
     fu, fl = donchian(h, l, fs)
-    return atr, {
-        "entry_upper": eu, "entry_lower": el,
-        "exit_upper": xu, "exit_lower": xl,
-        "fs_upper": fu, "fs_lower": fl,
-    }
+    return atr, {"entry_upper": eu, "entry_lower": el,
+                 "exit_upper": xu, "exit_lower": xl,
+                 "fs_upper": fu, "fs_lower": fl}
+
+
+def build_channels(bars: dict, base, system: str, profile=None,
+                   roll_rules=None) -> tuple:
+    """返回 (atr, chan dict数组); 通道不含当前 bar, 与 TurtleEngine 一致。
+
+    roll_rules 存在时，每个 i 仅用 i 前已发生的换月调整历史 OHLC，
+    使 ATR/Donchian 与换月 re-anchor 后的层价处于同一合约坐标。
+    """
+    if profile is not None:
+        en, ex, fs = profile.entry, profile.exit, profile.fs
+    elif system == "S2":
+        en, ex, fs = base.s2_entry, base.s2_exit, base.s2_entry
+    else:
+        en, ex, fs = base.s1_entry, base.s1_exit, base.s2_entry
+    if not roll_rules:
+        return _channel_arrays(bars["highs"], bars["lows"], bars["closes"],
+                               base, en, ex, fs)
+    n = len(bars["closes"])
+    atr = np.full(n, np.nan)
+    chan = {k: np.full(n, np.nan) for k in
+            ("entry_upper", "entry_lower", "exit_upper", "exit_lower",
+             "fs_upper", "fs_lower")}
+    for i in range(n):
+        h, l, c = _roll_adjusted_hlc(bars, i, roll_rules)
+        a, ch = _channel_arrays(h, l, c, base, en, ex, fs)
+        atr[i] = a[-1]
+        for key in chan:
+            chan[key][i] = ch[key][-1]
+    return atr, chan
 
 
 def channel_at(chan: dict, i: int) -> dict:
@@ -304,7 +408,8 @@ class PortfolioSim:
                  max_units: int = None, max_group: int = None,
                  unconstrained: bool = False,
                  entry_mode: str = "close", data_dir: str = None,
-                 period: str = "d1", codes: list = None):
+                 period: str = "d1", codes: list = None,
+                  common_dir: str = None):
         # period (S3, 2026-10-24): d1=日级推进 (默认) | h1=小时级推进
         #   (m5→h1 聚合, 窗口计数按 h1 bar 解释 = 更快的速度档, 与
         #   速度研究口径一致; 保证金/记录仍按交易日日界标记)。
@@ -355,6 +460,10 @@ class PortfolioSim:
         self.margin_rate = float(cfg.risk.margin_rate)
         self.slippage = int(slippage)
         self.risk = RiskManager(risk_cfg)
+        self.roll_calendar = load_roll_calendar(
+            common_dir or os.path.abspath(os.path.join(ROOT, "..", "common")))
+        self.roll_seen = set()
+        self.rolls = []
         self.sizer = PositionSizer(self.base.unit_var)
         self.contracts = contracts
         self.fees = fees
@@ -370,7 +479,13 @@ class PortfolioSim:
         self.groups = {}
         self.units = {}
         self.chains = {}
-        self.open_dates = {}    # code -> 首层开仓交易日 (平今费率判定, P2-2)
+        self.required = {}      # code -> 实际 profile 暖机深度
+        self.profile_specs = {} # code -> 首 profile (兼容观测)
+        self.profiles = {}      # code -> [ProfileSpec, ...]
+        self.subs = {}          # code -> [{key, profile, engine, open_dates}]
+        self.broker_pos = {}    # code -> net 执行目标 (gross engines 的净额)
+        self.orders = 0         # net 目标发生非零变化的批次数
+        self.open_dates = {}    # code -> 首 profile 各层开仓日 (兼容观测)
         self.m5 = {}            # code -> load_m5 结果 (trigger d1 模式)
         self._armed_upto = {}   # code -> h1 trigger 已武装到的 bar 下标 (S3)
         self.realized = 0.0
@@ -379,19 +494,18 @@ class PortfolioSim:
         self.rejected = 0
         self.margin_peak = 0.0
         self.margin_breach_days = 0
+        self.csv_dir = data_dir or os.path.join(ROOT, "..", "storage", "csv")
 
         for inst in cfg.instruments:
             code = inst.code
-            csv_dir = data_dir or os.path.join(ROOT, "..", "storage", "csv")
+            profiles = resolve_profiles(inst, self.base)
+            csv_dir = self.csv_dir
             path = os.path.join(csv_dir, f"{code}_d.csv")
             bars = load_bars(path)
             info = contract_info(code, contracts)
             if not bars or not info:
                 print(f"[pbt] WARN {code}: 缺数据/合约信息, 跳过")
                 continue
-            if inst.system not in ("S1", "S2"):
-                raise SystemExit(
-                    f"[pbt] {code}: v1 仅支持 S1/S2, 当前 {inst.system}")
             vs = float(info.get("volscale") or 0)
             pt = float(info.get("pricetick") or 0)
             if vs <= 0 or pt <= 0:
@@ -413,21 +527,30 @@ class PortfolioSim:
             self.priceticks[code] = pt
             self.groups[code] = inst.group or ""
             self.units[code] = float(inst.units)
+            self.required[code] = required_bars(inst, self.base)
+            self.profiles[code] = profiles
+            self.profile_specs[code] = profiles[0]
             self.marks[code] = None
-            self.engines[code] = TurtleEngine(
-                system=inst.system,
-                stop_atr_mult=self.base.stop_atr_mult,
-                pyramid_layers=self.base.pyramid_layers,
-                pyramid_step_atr=self.base.pyramid_step_atr,
-                enable_s1_filter=self.base.enable_s1_filter,
-                entry_mode=entry_mode,
-                stop_n_mode=self.base.stop_n_mode,
-                trigger_envelope=self.base.trigger_envelope,
-                allow_same_bar_reversal=self.base.allow_same_bar_reversal,
-                gap_stop=self.base.gap_stop,
-                arm_exclude_signal=self.base.arm_exclude_signal)
-            atr, chan = build_channels(bars, self.base, inst.system)
-            self.chans[code] = {"atr": atr, "chan": chan}
+            self.broker_pos[code] = 0
+            self.subs[code] = []
+            chan_by_profile = {}
+            atr = None
+            for idx, profile in enumerate(profiles):
+                engine = self._make_engine(profile, entry_mode)
+                # 首 profile 的 open_dates 暴露为旧 open_dates[code] 观测
+                # 口径；其余 profile 独立列表，平今日期不互染。
+                odays = self.open_dates.setdefault(code, []) if idx == 0 else []
+                self.subs[code].append({
+                    "key": profile.key, "profile": profile,
+                    "engine": engine, "open_dates": odays})
+                a, chan_by_profile[profile.key] = build_channels(
+                    bars, self.base, profile.system, profile=profile,
+                    roll_rules=self.roll_calendar.get(code))
+                atr = a if atr is None else atr
+            self.engines[code] = self.subs[code][0]["engine"]  # 兼容别名
+            self.chans[code] = {
+                "atr": atr, "chan": chan_by_profile[profiles[0].key],
+                "by_profile": chan_by_profile}
             self.chains[code] = build_chain(inst)
             if entry_mode == "trigger" and period == "d1":
                 m5 = load_m5(os.path.join(csv_dir, f"{code}_m5.csv"))
@@ -439,28 +562,122 @@ class PortfolioSim:
         if not self.data:
             raise SystemExit("[pbt] 无可用品种数据")
 
+    def _make_engine(self, profile, entry_mode: str) -> TurtleEngine:
+        return TurtleEngine(
+            system=profile.system,
+            stop_atr_mult=self.base.stop_atr_mult,
+            pyramid_layers=self.base.pyramid_layers,
+            pyramid_step_atr=self.base.pyramid_step_atr,
+            enable_s1_filter=self.base.enable_s1_filter,
+            entry_mode=entry_mode,
+            stop_n_mode=self.base.stop_n_mode,
+            trigger_envelope=self.base.trigger_envelope,
+            allow_same_bar_reversal=self.base.allow_same_bar_reversal,
+            gap_stop=self.base.gap_stop,
+            arm_exclude_signal=self.base.arm_exclude_signal)
+
+    def _find_sub(self, code: str, key: str = None):
+        """按 profile key 取子系统；缺省取首 profile（兼容单 profile）。"""
+        subs = self.subs.get(code) or []
+        if key is None:
+            return subs[0] if subs else None
+        for sub in subs:
+            if sub["key"] == key:
+                return sub
+        return None
+
+    def _channels(self, code: str, key: str = None) -> dict:
+        """按 profile 取通道；缺省首 profile。多 profile 共用 ATR。"""
+        pack = self.chans[code]
+        if key is None:
+            return pack["chan"]
+        return pack["by_profile"][key]
+
+    def _open_days(self, code: str, sub: dict) -> list:
+        """首 profile 兼容旧 open_dates[code] 观测；其余读 sub 私有列表。"""
+        if sub is self.subs[code][0]:
+            return self.open_dates.get(code, sub["open_dates"])
+        return sub["open_dates"]
+
+    def _settle_broker(self, code: str):
+        """批末由 gross 子系统净额得到框架净目标，并统计 net 订单。"""
+        net = 0
+        for sub in self.subs.get(code, []):
+            e = sub["engine"]
+            if e.direction != 0 and e.layers:
+                net += (1 if e.direction > 0 else -1) * \
+                    sum(l for l, _ in e.layers)
+        if net != self.broker_pos.get(code, 0):
+            self.orders += 1
+            self.broker_pos[code] = net
+
+    # -- 换月 ---------------------------------------------------------
+    def _apply_rolls(self, d: int):
+        """在当日事件前按换月日历平移持仓与估值锚，避免拼接价差进 PnL。"""
+        for code, rules in self.roll_calendar.items():
+            if code not in self.engines:
+                continue
+            for rule in rules:
+                key = (code, int(rule["date"]))
+                if int(rule["date"]) != int(d) or key in self.roll_seen:
+                    continue
+                self.roll_seen.add(key)
+                bars = self.data[code]
+                delta = _roll_delta(bars, rule)
+                if delta is None:
+                    continue
+                if rule.get("delta") is None:
+                    print(f"[pbt] WARN {code} {d} 换月缺少 old/newclose，"
+                          f"以 open-prev_close 估算 delta={delta:.6f}")
+                # 空仓也必须平移 s1_last/武装位/通道：S1 模拟单即使无
+                # 实际层，同样参与盈利跳过/fail-safe 语义；否则换月后会
+                # 用新价格比较旧合约坐标，错误判断上一笔输赢。
+                held = False
+                for sub in self.subs[code]:
+                    e = sub["engine"]
+                    e.shift_prices(float(delta))
+                    held = held or (e.direction != 0 and bool(e.layers))
+                if held and self.marks.get(code) is not None:
+                    self.marks[code] += float(delta)
+                self._sync_book(code)
+                self.rolls.append({"code": code, "date": int(d),
+                                   "delta": float(delta),
+                                   "from": rule.get("from"),
+                                   "to": rule.get("to")})
+
     # -- 估值 ---------------------------------------------------------
     def _unrealized(self) -> float:
         total = 0.0
-        for code, e in self.engines.items():
-            if e.direction == 0 or not e.layers:
-                continue
+        for code, subs in self.subs.items():
             mark = self.marks.get(code)
             if mark is None:
                 continue
             vs = self.volscales[code]
-            total += sum((mark - px) * e.direction * lots * vs
-                         for lots, px in e.layers)
+            for sub in subs:
+                e = sub["engine"]
+                if e.direction == 0 or not e.layers:
+                    continue
+                total += sum((mark - px) * e.direction * lots * vs
+                             for lots, px in e.layers)
         return total
+
+    def _profile_margin(self, code: str, key: str) -> float:
+        """按当前 mark 估算单个 profile 的 gross 保证金。"""
+        sub = self._find_sub(code, key)
+        if sub is None:
+            return 0.0
+        e = sub["engine"]
+        if e.direction == 0 or not e.layers:
+            return 0.0
+        mark = self.marks.get(code) or e.layers[-1][1]
+        lots = sum(l for l, _ in e.layers)
+        return lots * mark * self.volscales[code] * self.margin_rate
 
     def _gross_margin(self) -> float:
         total = 0.0
-        for code, e in self.engines.items():
-            if e.direction == 0 or not e.layers:
-                continue
-            mark = self.marks.get(code) or e.layers[-1][1]
-            lots = sum(l for l, _ in e.layers)
-            total += lots * mark * self.volscales[code] * self.margin_rate
+        for code, subs in self.subs.items():
+            for sub in subs:
+                total += self._profile_margin(code, sub["key"])
         return total
 
     def equity(self) -> float:
@@ -478,10 +695,11 @@ class PortfolioSim:
         sign = direction if side == "open" else -direction
         return price + sign * self.slippage * pt
 
-    def _strength(self, code: str, i: int, n: float, dec: dict) -> float:
-        """入场强度: 收盘超过突破位的距离/N (用于名额竞争排序)。"""
+    def _strength(self, code: str, i: int, n: float, dec: dict,
+                  key: str = None) -> float:
+        """入场强度: 收盘超过该 profile 突破位的距离/N。"""
         d = int(dec.get("direction") or 0)
-        ch = self.chans[code]["chan"]
+        ch = self._channels(code, key)
         if d > 0:
             lv = (ch["fs_upper"][i] if dec.get("failsafe")
                   else ch["entry_upper"][i])
@@ -491,17 +709,18 @@ class PortfolioSim:
         return max(0.0, (float(lv) - float(dec["price"])) / n)
 
     def _cap_margin_mark(self, final: int, price: float, code: str,
-                         equity: float) -> int:
-        """按**当前 mark** 的全局保证金再收紧一次。
+                         equity: float, key: str = None,
+                         share: float = 1.0) -> int:
+        """按**当前 mark** 的 profile 保证金再收紧一次。
 
         RiskManager 的 margin 账本按建仓均价记, 趋势中浮盈会把当前
-        保证金放大 (本回测 60M/0.6 预算实测峰值 52M); 这里用当日
-        mark 的已占保证金 + 本笔预估, 把全局占用压在预算内。
+        保证金放大；这里用当日 mark 的本 profile 已占保证金 + 本笔
+        预估，按 profile share 消费预算，避免首 profile 挤占后续份额。
         """
         if final <= 0:
             return 0
-        budget = equity * float(self.risk.cfg.max_margin_usage)
-        used = self._gross_margin()
+        budget = equity * float(self.risk.cfg.max_margin_usage) * share
+        used = self._profile_margin(code, key)
         per_lot = price * self.volscales[code] * self.margin_rate
         if per_lot <= 0:
             return final
@@ -509,20 +728,26 @@ class PortfolioSim:
         return min(final, max(0, afford))
 
     def _sync_book(self, code: str):
-        e = self.engines[code]
-        if e.direction == 0 or not e.layers:
+        """逐 profile 同步共享账本；confirm 后立即调用即批次内预算预约。"""
+        any_pos = False
+        for sub in self.subs.get(code, []):
+            e = sub["engine"]
+            if e.direction == 0 or not e.layers:
+                self.risk.on_closed(code, profile=sub["key"])
+                continue
+            any_pos = True
+            lots = sum(l for l, _ in e.layers)
+            avg = sum(l * p for l, p in e.layers) / lots
+            self.risk.sync_position(
+                code, e.direction, lots, avg, e._n or 1.0,
+                self.volscales[code], self.base.stop_atr_mult,
+                group=self.groups[code],
+                risk=e.booked_risk(self.volscales[code],
+                                   self.base.stop_atr_mult,
+                                   stop=e.stop_anchor()),
+                sid="", units=self.units[code], profile=sub["key"])
+        if not any_pos:
             self.risk.on_closed(code)
-            return
-        lots = sum(l for l, _ in e.layers)
-        avg = sum(l * p for l, p in e.layers) / lots
-        self.risk.on_rebuilt(
-            code, e.direction, lots, avg, e._n or 1.0,
-            self.volscales[code], self.base.stop_atr_mult,
-            group=self.groups[code],
-            risk=e.booked_risk(self.volscales[code],
-                               self.base.stop_atr_mult,
-                               stop=e.stop_anchor()),
-            sid="", units=self.units[code])
 
     # -- 决策 ---------------------------------------------------------
     def _filter_ok(self, code: str, i: int, direction: int,
@@ -547,14 +772,36 @@ class PortfolioSim:
                 return False
         return True
 
-    def _entry(self, code: str, i: int, dec: dict, n: float):
-        e = self.engines[code]
+    def _post_add_bases(self, code: str, sub: dict, price: float, n: float):
+        """加仓共同止损重锚后的 (当前 profile 风险, code 全 profile 风险)。"""
+        target = sub["engine"]
+        vs = self.volscales.get(code, 1.0)
+        mult = self.base.stop_atr_mult
+        d = target.direction
+        new_stop = price - d * mult * n
+        profile_base = max(0.0, sum(
+            (px - new_stop) * d * lots * vs
+            for lots, px in target.layers))
+        total = profile_base
+        for other in self.subs.get(code, []):
+            if other is sub:
+                continue
+            e = other["engine"]
+            if e.direction != 0 and e.layers:
+                total += e.booked_risk(vs, mult, stop=e.stop_anchor())
+        return profile_base, max(0.0, total)
+
+    def _entry(self, code: str, i: int, dec: dict, n: float, key: str = None):
+        sub = self._find_sub(code, key)
+        if sub is None:
+            return
+        e = sub["engine"]
         d = int(dec["direction"])
         close = float(self.data[code]["closes"][i])
         fill = self._fill(code, "open", close, d)
         if not self._filter_ok(code, i, d, fill, n):
             return
-        final = self._size_cap(code, fill, n)
+        final = self._size_cap(code, fill, n, "enter", key)
         if final <= 0:
             self.rejected += 1
             return
@@ -562,15 +809,23 @@ class PortfolioSim:
             fee_cfg(code, self.fees), "open", fill, final,
             self.volscales[code])
         e.confirm_enter(d, final, fill, n)
-        self.open_dates[code] = int(self.data[code]["dates"][i])
+        day = int(self.data[code]["dates"][i])
+        if sub is self.subs[code][0]:
+            self.open_dates[code] = [day]
+            sub["open_dates"] = self.open_dates[code]
+        else:
+            sub["open_dates"][:] = [day]
         self.trades += 1
-        self._sync_book(code)
+        self._sync_book(code)          # 批次内预算预约（net 结算由调用批末做）
 
-    def _add(self, code: str, i: int, dec: dict, n: float):
-        e = self.engines[code]
+    def _add(self, code: str, i: int, dec: dict, n: float, key: str = None):
+        sub = self._find_sub(code, key)
+        if sub is None:
+            return
+        e = sub["engine"]
         close = float(self.data[code]["closes"][i])
         fill = self._fill(code, "open", close, e.direction)
-        final = self._size_cap(code, fill, n)
+        final = self._size_cap(code, fill, n, "add", key)
         if final <= 0:
             self.rejected += 1
             return
@@ -578,11 +833,21 @@ class PortfolioSim:
             fee_cfg(code, self.fees), "open", fill, final,
             self.volscales[code])
         e.confirm_add(final, fill, n)
+        day = int(self.data[code]["dates"][i])
+        if sub is self.subs[code][0]:
+            self.open_dates.setdefault(code, []).append(day)
+            sub["open_dates"] = self.open_dates[code]
+        else:
+            sub["open_dates"].append(day)
         self.trades += 1
         self._sync_book(code)
 
-    def _exit(self, code: str, i: int, dec: dict, tdate: int = None):
-        e = self.engines[code]
+    def _exit(self, code: str, i: int, dec: dict, tdate: int = None,
+              key: str = None):
+        sub = self._find_sub(code, key)
+        if sub is None:
+            return
+        e = sub["engine"]
         if e.direction == 0 or not e.layers:
             return
         bars = self.data[code]
@@ -603,63 +868,92 @@ class PortfolioSim:
         vs = self.volscales[code]
         gross = (fill - avg) * e.direction * lots * vs
         self.realized += gross
-        # 平今判定: trigger 模式按**交易日** (夜盘日历日 T-1 属交易日 T),
-        # 故由调用方显式传入 tdate; close 模式 tdate=None → 用 d1 bar 日期
-        today = self.open_dates.get(code) == int(
-            tdate if tdate is not None else bars["dates"][i])
-        self.fee_paid += fee_cost(
-            fee_cfg(code, self.fees), "close", fill, lots, vs, today=today)
+        # 平今按该 profile 每层开仓日判定，不跨 profile 共享日期。
+        exit_date = int(tdate if tdate is not None else bars["dates"][i])
+        open_days = self._open_days(code, sub)
+        fee = fee_cfg(code, self.fees)
+        for layer_i, (layer_lots, _px) in enumerate(e.layers):
+            open_date = open_days[layer_i] if layer_i < len(open_days) else None
+            self.fee_paid += fee_cost(
+                fee, "close", fill, layer_lots, vs,
+                today=(open_date == exit_date))
         e.confirm_exit(fill)
-        self.open_dates.pop(code, None)
-        self.risk.on_closed(code)
+        if sub is self.subs[code][0]:
+            self.open_dates.pop(code, None)
+        sub["open_dates"] = []
         self.trades += 1
+        self._sync_book(code)
 
-    def _size_cap(self, code: str, fill: float, n: float) -> int:
-        """尺寸→风控闸门链 (close/trigger 共用): 返回 final lots, <=0=否决"""
-        lots = self.sizer.layer_lots(n, self.volscales[code], self.units[code])
+    def _size_cap(self, code: str, fill: float, n: float,
+                  kind: str = "enter", key: str = None) -> int:
+        """profile 手数 → 风控闸门链；<=0=否决。"""
+        sub = self._find_sub(code, key)
+        if sub is None:
+            return 0
+        profile = sub["profile"]
+        lots = self.sizer.layer_lots(n, self.volscales[code], profile.units)
         if lots <= 0:
             return 0
+        code_share = min(1.0, sum(p.share for p in self.profiles[code]))
+        post_base = post_profile = None
+        if kind == "add":
+            post_profile, post_base = self._post_add_bases(
+                code, sub, fill, n)
         final, _reasons = self.risk.cap_entry(
             code, lots=lots, n=n, volscale=self.volscales[code],
             price=fill, stop_mult=self.base.stop_atr_mult,
-            equity=self.equity(), group=self.groups[code], share=1.0,
-            sid="")
+            equity=self.equity(), group=self.groups[code],
+            share=profile.share, code_share=code_share,
+            sid="", units=self.units[code], profile=profile.key,
+            post_risk_base=post_base,
+            post_profile_risk_base=post_profile,
+            post_risk_per_lot=(n * self.volscales[code]
+                               * self.base.stop_atr_mult
+                               if kind == "add" else None))
         if final > 0:
-            final = self._cap_margin_mark(final, fill, code, self.equity())
+            final = self._cap_margin_mark(final, fill, code,
+                                          self.equity(), profile.key,
+                                          profile.share)
         return final
 
     # -- trigger 模式: 日线武装 + m5 触碰触发 (2026-10-21) ------------
     def _arm_day(self, code: str, i: int):
-        """交易日 T(=d1 index i) 开盘前武装, 对齐实盘 session_end(T-1) 评估:
-        T-1 的 d1 OHLC + 含当根包络 (chan[i] 不含 bar i = 含 T-1) + atr[i-1]。
-        过滤器武装时前置裁决, 被否决方向当日解除武装 (与实盘 trigger 管线一致)。"""
-        e = self.engines[code]
+        """交易日 T(=d1 index i) 开盘前逐 profile 武装 (session_end T-1 口径)。
+
+        与实盘 `_arm_daily` 同口径；过滤器武装时前置裁决，否决方向当日
+        解除武装。换月日 arm_exclude_signal=True 使用已平移新坐标的
+        chan[i]，不得回退旧坐标。
+        """
         bars = self.data[code]
-        if i < need_bars(self.base) or i < 2:
-            return
-        chan = channel_at(self.chans[code]["chan"], i)
-        if any(not np.isfinite(v) for v in chan.values()):
+        if i < self.required[code] or i < 2:
             return
         n = float(self.chans[code]["atr"][i - 1])
         if not np.isfinite(n) or n <= 0:
             return
-        decs = e.on_bar(float(bars["highs"][i - 1]),
-                        float(bars["lows"][i - 1]),
-                        float(bars["closes"][i - 1]),
-                        float(bars["closes"][i - 2]), n, chan)
-        for dec in decs:
-            if dec.get("decision") != "arm":
+        cur_i = i if self.base.arm_exclude_signal else i - 1
+        for sub in self.subs[code]:
+            e = sub["engine"]
+            chan = with_next_channels(
+                channel_at(self._channels(code, sub["key"]), cur_i),
+                channel_at(self._channels(code, sub["key"]), i))
+            if any(not np.isfinite(v) for v in chan.values()):
                 continue
-            plan = dec.get("plan") or {}
-            for d, keys in ((1, ("long", "fs_long")),
-                            (-1, ("short", "fs_short"))):
-                lv = [plan[k] for k in keys if plan.get(k) is not None]
-                if not lv:
+            decs = e.on_bar(float(bars["highs"][i - 1]),
+                            float(bars["lows"][i - 1]),
+                            float(bars["closes"][i - 1]),
+                            float(bars["closes"][i - 2]), n, chan)
+            for dec in decs:
+                if dec.get("decision") != "arm":
                     continue
-                px = min(lv) if d > 0 else max(lv)
-                # 数据窗口到 T-1 ([:i]), 与武装评估同口径
-                if not self._filter_ok(code, i - 1, d, px, n):
-                    e.disarm_entry(d)
+                plan = dec.get("plan") or {}
+                for d, keys in ((1, ("long", "fs_long")),
+                                (-1, ("short", "fs_short"))):
+                    lv = [plan[k] for k in keys if plan.get(k) is not None]
+                    if not lv:
+                        continue
+                    px = min(lv) if d > 0 else max(lv)
+                    if not self._filter_ok(code, i - 1, d, px, n):
+                        e.disarm_entry(d)
 
     def _day_m5_bars(self, code: str, d: int, prev_d: int) -> list:
         """交易日 T 的 m5 序列: T-1 夜盘 (日历日 T-1, time>=200000) + T 凌晨
@@ -676,29 +970,37 @@ class PortfolioSim:
         out.sort(key=lambda x: (x[0], x[1]))
         return out
 
-    def _dispatch_trigger(self, code: str, i: int, d: int, dec: dict):
+    def _dispatch_trigger(self, code: str, i: int, d: int, dec: dict,
+                          key: str = None):
         """盘中触发决策**立即**确认/否决 —— 与实盘"决策与确认在同一
         on_tick 完成"的不变量一致, pending 不跨 bar。"""
-        e = self.engines[code]
+        sub = self._find_sub(code, key)
+        if sub is None:
+            return
+        e = sub["engine"]
         kind = dec.get("decision")
         if kind == "exit":
-            self._exit(code, i, dec, tdate=d)
+            self._exit(code, i, dec, tdate=d, key=sub["key"])
         elif kind == "enter":
-            self._trigger_open(code, d, dec, "enter")
+            self._trigger_open(code, d, dec, "enter", sub["key"])
         elif kind == "add":
-            self._trigger_open(code, d, dec, "add")
+            self._trigger_open(code, d, dec, "add", sub["key"])
         # "skip" = S1 过滤器内部已处理 (sim 单 + fail-safe 武装), 无动作
         if e._pending is not None:      # 兜底: 决策必须被消费
             e.clear_pending()
 
-    def _trigger_open(self, code: str, d: int, dec: dict, kind: str):
+    def _trigger_open(self, code: str, d: int, dec: dict, kind: str,
+                      key: str = None):
         """入场/加仓触发: 风控触发时复核 (与实盘一致), 否决则 reject_pending
         (当日该方向不再重复触发)。"""
-        e = self.engines[code]
+        sub = self._find_sub(code, key)
+        if sub is None:
+            return
+        e = sub["engine"]
         n = float(dec.get("n") or e._n or 0.0)
         fill = self._fill(code, "open", float(dec["price"]),
                           int(dec.get("direction") or e.direction))
-        final = self._size_cap(code, fill, n)
+        final = self._size_cap(code, fill, n, kind, sub["key"])
         if final <= 0:
             self.rejected += 1
             e.reject_pending()
@@ -707,23 +1009,35 @@ class PortfolioSim:
                                   final, self.volscales[code])
         if kind == "enter":
             e.confirm_enter(int(dec["direction"]), final, fill, n)
-            self.open_dates[code] = d
+            if sub is self.subs[code][0]:
+                self.open_dates[code] = [d]
+                sub["open_dates"] = self.open_dates[code]
+            else:
+                sub["open_dates"][:] = [d]
         else:
             e.confirm_add(final, fill, n)
+            if sub is self.subs[code][0]:
+                self.open_dates.setdefault(code, []).append(d)
+                sub["open_dates"] = self.open_dates[code]
+            else:
+                sub["open_dates"].append(d)
         self.trades += 1
         self._sync_book(code)
 
     # -- 主循环 -------------------------------------------------------
     def _run_close_date(self, d: int):
-        """close 模式单日: 两段式收集全部决策 → exit→entry(可排序)→add。
-        旧实现按配置顺序逐个处理, 名额满时后面的强信号永远进不来,
-        选择顺序会主导组合收益 (2026-10-20)。"""
-        need = need_bars(self.base)
-        pending = []
-        for inst in self.cfg.instruments:
+        """close 模式单日: 全 code × 全 profile 两段式批次。
+
+        1) 出场先释放单位；2) 入场按 strength（跨 profile 统一排序）；
+        3) 加仓最后。每个 confirm 后立即 `_sync_book`，与实盘
+        execute_dual 的批次内预算预约协议一致。
+        """
+        exits, entries, adds = [], [], []
+        for cfg_order, inst in enumerate(self.cfg.instruments):
             code = inst.code
             if code not in self.engines:
                 continue
+            need = self.required[code]
             bars = self.data[code]
             i = bars["index"].get(d)
             if i is None or i < need:
@@ -731,46 +1045,47 @@ class PortfolioSim:
             n = float(self.chans[code]["atr"][i])
             if not np.isfinite(n) or n <= 0:
                 continue
-            chan = channel_at(self.chans[code]["chan"], i)
-            if any(not np.isfinite(v) for v in chan.values()):
-                continue
-            decs = self.engines[code].on_bar(
-                float(bars["highs"][i]), float(bars["lows"][i]),
-                float(bars["closes"][i]), float(bars["closes"][i - 1]),
-                n, chan)
-            pending.append((code, i, n, decs))
-        # 1) 出场先释放单位
-        for code, i, _n, decs in pending:
-            for dec in decs:
-                if dec.get("decision") == "exit":
-                    self._exit(code, i, dec)
-        # 2) 入场: config=配置顺序; strength=突破距离/N 降序
-        entries = []
-        for code, i, n, decs in pending:
-            for dec in decs:
-                if dec.get("decision") == "enter":
-                    entries.append((self._strength(code, i, n, dec),
-                                    code, i, n, dec))
+            for pidx, sub in enumerate(self.subs[code]):
+                chan = channel_at(self._channels(code, sub["key"]), i)
+                if any(not np.isfinite(v) for v in chan.values()):
+                    continue
+                decs = sub["engine"].on_bar(
+                    float(bars["highs"][i]), float(bars["lows"][i]),
+                    float(bars["closes"][i]), float(bars["closes"][i - 1]),
+                    n, chan, open=float(bars["opens"][i]))
+                for dec in decs:
+                    kind = dec.get("decision")
+                    item = (cfg_order, pidx, code, sub["key"], i, n, dec)
+                    if kind == "exit":
+                        exits.append(item)
+                    elif kind == "enter":
+                        entries.append(item)
+                    elif kind == "add":
+                        adds.append(item)
+        for _o, _p, code, key, i, _n, dec in exits:
+            self._exit(code, i, dec, key=key)
         if self.priority == "strength":
-            entries.sort(key=lambda x: (-x[0], x[1]))
-        for _s, code, i, n, dec in entries:
-            self._entry(code, i, dec, n)
-        # 3) 加仓 (不改变单位数, 最后处理)
-        for code, i, n, decs in pending:
-            for dec in decs:
-                if dec.get("decision") == "add":
-                    self._add(code, i, dec, n)
+            entries.sort(key=lambda x: (-self._strength(
+                x[2], x[4], x[5], x[6], x[3]), x[0], x[1], x[2]))
+        for _o, _p, code, key, i, n, dec in entries:
+            self._entry(code, i, dec, n, key=key)
+        for _o, _p, code, key, i, n, dec in adds:
+            self._add(code, i, dec, n, key=key)
+        # 预算在每次 confirm 后立即预约；net 执行目标只在日批末结算一次。
+        touched = {x[2] for x in exits + entries + adds}
+        for code in touched:
+            self._settle_broker(code)
 
     def _run_trigger_date(self, d: int):
         """trigger 模式单日: 先全品种武装 (session_end(T-1) 口径), 再按
         m5 时间顺序跨品种触发 —— 名额竞争=实盘 first-come 语义。
         无 m5 品种退化为 d1 bar 触碰, 事件排在日盘开始 (09:00 槽, 配置序)。"""
-        need = need_bars(self.base)
         streams = []    # (cal_date, time, cfg_order, code, (o,h,l,c))
         for order, inst in enumerate(self.cfg.instruments):
             code = inst.code
             if code not in self.engines:
                 continue
+            need = self.required[code]
             bars = self.data[code]
             i = bars["index"].get(d)
             if i is None:
@@ -787,44 +1102,62 @@ class PortfolioSim:
                     float(bars["lows"][i]), float(bars["closes"][i]))))
         streams.sort(key=lambda x: (x[0], x[1], x[2]))
         for _md, _t, _order, code, bar in streams:
-            decs = self.engines[code].check_bar(*bar)
+            # bar open 是该事件起点已知价；决策后再推进到 close。
+            # 不得在 check_bar 前使用本 bar/当日收盘价计算权益或保证金。
+            self.marks[code] = float(bar[0])
             i = self.data[code]["index"].get(d, 0)
-            for dec in decs:
-                self._dispatch_trigger(code, i, d, dec)
+            dec_map = []
+            for sub in self.subs[code]:
+                for dec in sub["engine"].check_bar(*bar):
+                    dec_map.append((sub["key"], dec))
+            # 与实盘 dual 执行同序：出场先释放单位，再 profile 序 enter/add。
+            for key, dec in dec_map:
+                if dec.get("decision") == "exit":
+                    self._dispatch_trigger(code, i, d, dec, key=key)
+            for key, dec in dec_map:
+                if dec.get("decision") in ("enter", "add"):
+                    self._dispatch_trigger(code, i, d, dec, key=key)
+            for sub in self.subs[code]:
+                if sub["engine"]._pending is not None:
+                    sub["engine"].clear_pending()
+            if dec_map:
+                self._settle_broker(code)   # 同一 m5 事件只结算一次 net
+            self.marks[code] = float(bar[3])
 
     # -- h1 模式: 小时级推进 + 日界标记 (S3, 2026-10-24) --------------
     def _arm_h1(self, code: str, j: int):
-        """为 h1 bar j 武装: 用 bar j-1 的 OHLC + chan[j] (不含 bar j)
-        + atr[j-1], 与 d1 trigger 的 session_end(T-1) 口径同构。
-        过滤器武装时前置裁决 (disarm_entry), 与实盘 trigger 管线一致。"""
-        e = self.engines[code]
+        """为 h1 bar j 逐 profile 武装 (与 d1 trigger session_end 口径同构)。"""
         bars = self.data[code]
-        need = need_bars(self.base)
+        need = self.required[code]
         if j < need or j < 2:
-            return
-        chan = channel_at(self.chans[code]["chan"], j)
-        if any(not np.isfinite(v) for v in chan.values()):
             return
         n = float(self.chans[code]["atr"][j - 1])
         if not np.isfinite(n) or n <= 0:
             return
-        decs = e.on_bar(float(bars["highs"][j - 1]),
-                        float(bars["lows"][j - 1]),
-                        float(bars["closes"][j - 1]),
-                        float(bars["closes"][j - 2]), n, chan,
-                        open=float(bars["opens"][j - 1]))
-        for dec in decs:
-            if dec.get("decision") != "arm":
+        for sub in self.subs[code]:
+            e = sub["engine"]
+            chan = with_next_channels(
+                channel_at(self._channels(code, sub["key"]), j - 1),
+                channel_at(self._channels(code, sub["key"]), j))
+            if any(not np.isfinite(v) for v in chan.values()):
                 continue
-            plan = dec.get("plan") or {}
-            for d, keys in ((1, ("long", "fs_long")),
-                            (-1, ("short", "fs_short"))):
-                lv = [plan[k] for k in keys if plan.get(k) is not None]
-                if not lv:
+            decs = e.on_bar(float(bars["highs"][j - 1]),
+                            float(bars["lows"][j - 1]),
+                            float(bars["closes"][j - 1]),
+                            float(bars["closes"][j - 2]), n, chan,
+                            open=float(bars["opens"][j - 1]))
+            for dec in decs:
+                if dec.get("decision") != "arm":
                     continue
-                px = min(lv) if d > 0 else max(lv)
-                if not self._filter_ok(code, j - 1, d, px, n):
-                    e.disarm_entry(d)
+                plan = dec.get("plan") or {}
+                for d, keys in ((1, ("long", "fs_long")),
+                                (-1, ("short", "fs_short"))):
+                    lv = [plan[k] for k in keys if plan.get(k) is not None]
+                    if not lv:
+                        continue
+                    px = min(lv) if d > 0 else max(lv)
+                    if not self._filter_ok(code, j - 1, d, px, n):
+                        e.disarm_entry(d)
 
     def _h1_slots(self, d: int) -> list:
         """当日全部品种的 h1 bar 槽位, 按 (label, 配置序) 升序。"""
@@ -840,67 +1173,78 @@ class PortfolioSim:
         return slots
 
     def _run_h1_day_close(self, d: int, slots: list):
-        """h1 close 模式单日: 按桶分组 (同桶跨品种), 组内 exit→entry→add。
-
-        与 d1 close 的两段式同构, 只是决策粒度从"日"细化到"小时桶";
-        mark 随每根 bar 收盘更新 (决策价=桶收盘, 与 d1 的"mark=日收盘"
-        同口径无前视)。"""
-        need = need_bars(self.base)
+        """h1 close 模式单日: 按桶分组 (同桶跨品种 × profile), 组内
+        exit→entry→add；confirm 后立即同步预算。"""
         for _label, grp in groupby(slots, key=lambda x: x[0]):
-            pending = []
-            for _l, _o, code, i in grp:
+            exits, entries, adds = [], [], []
+            for cfg_order, (_l, _o, code, i) in enumerate(grp):
+                need = self.required[code]
                 bars = self.data[code]
                 if i < need:
                     continue
                 n = float(self.chans[code]["atr"][i])
                 if not np.isfinite(n) or n <= 0:
                     continue
-                chan = channel_at(self.chans[code]["chan"], i)
-                if any(not np.isfinite(v) for v in chan.values()):
-                    continue
                 self.marks[code] = float(bars["closes"][i])
-                decs = self.engines[code].on_bar(
-                    float(bars["highs"][i]), float(bars["lows"][i]),
-                    float(bars["closes"][i]), float(bars["closes"][i - 1]),
-                    n, chan, open=float(bars["opens"][i]))
-                pending.append((code, i, n, decs))
-            for code, i, _n, decs in pending:
-                for dec in decs:
-                    if dec.get("decision") == "exit":
-                        self._exit(code, i, dec, tdate=d)
-            entries = []
-            for code, i, n, decs in pending:
-                for dec in decs:
-                    if dec.get("decision") == "enter":
-                        entries.append((self._strength(code, i, n, dec),
-                                        code, i, n, dec))
+                for pidx, sub in enumerate(self.subs[code]):
+                    chan = channel_at(self._channels(code, sub["key"]), i)
+                    if any(not np.isfinite(v) for v in chan.values()):
+                        continue
+                    decs = sub["engine"].on_bar(
+                        float(bars["highs"][i]), float(bars["lows"][i]),
+                        float(bars["closes"][i]),
+                        float(bars["closes"][i - 1]),
+                        n, chan, open=float(bars["opens"][i]))
+                    for dec in decs:
+                        item = (cfg_order, pidx, code, sub["key"], i, n, dec)
+                        if dec.get("decision") == "exit":
+                            exits.append(item)
+                        elif dec.get("decision") == "enter":
+                            entries.append(item)
+                        elif dec.get("decision") == "add":
+                            adds.append(item)
+            for _o, _p, code, key, i, _n, dec in exits:
+                self._exit(code, i, dec, tdate=d, key=key)
             if self.priority == "strength":
-                entries.sort(key=lambda x: (-x[0], x[1]))
-            for _s, code, i, n, dec in entries:
-                self._entry(code, i, dec, n)
-            for code, i, n, decs in pending:
-                for dec in decs:
-                    if dec.get("decision") == "add":
-                        self._add(code, i, dec, n)
+                entries.sort(key=lambda x: (-self._strength(
+                    x[2], x[4], x[5], x[6], x[3]), x[0], x[1], x[2]))
+            for _o, _p, code, key, i, n, dec in entries:
+                self._entry(code, i, dec, n, key=key)
+            for _o, _p, code, key, i, n, dec in adds:
+                self._add(code, i, dec, n, key=key)
+            touched = {x[2] for x in exits + entries + adds}
+            for code in touched:
+                self._settle_broker(code)
 
     def _run_h1_day_trigger(self, d: int, slots: list):
-        """h1 trigger 模式单日: 每根 bar 前先补武装 (catch-up 跨日连续),
-        再 check_bar 触碰仿真; 决策与确认同 bar 完成 (pending 不跨 bar)。"""
-        need = need_bars(self.base)
+        """h1 trigger 模式单日: 每根 bar 前先逐 profile 补武装，再按
+        check_bar 触碰；同 bar 出场优先，决策与确认同 bar 完成。"""
         for _l, _o, code, i in slots:
-            e = self.engines[code]
+            need = self.required[code]
             upto = self._armed_upto.get(code, need)
             for k in range(max(upto, need), i):
                 self._arm_h1(code, k)
             self._armed_upto[code] = max(upto, i)
             bars = self.data[code]
+            self.marks[code] = float(bars["opens"][i])
+            dec_map = []
+            for sub in self.subs[code]:
+                for dec in sub["engine"].check_bar(
+                        float(bars["opens"][i]), float(bars["highs"][i]),
+                        float(bars["lows"][i]), float(bars["closes"][i])):
+                    dec_map.append((sub["key"], dec))
+            for key, dec in dec_map:
+                if dec.get("decision") == "exit":
+                    self._dispatch_trigger(code, i, d, dec, key=key)
+            for key, dec in dec_map:
+                if dec.get("decision") in ("enter", "add"):
+                    self._dispatch_trigger(code, i, d, dec, key=key)
+            for sub in self.subs[code]:
+                if sub["engine"]._pending is not None:
+                    sub["engine"].clear_pending()
+            if dec_map:
+                self._settle_broker(code)
             self.marks[code] = float(bars["closes"][i])
-            decs = e.check_bar(float(bars["opens"][i]),
-                               float(bars["highs"][i]),
-                               float(bars["lows"][i]),
-                               float(bars["closes"][i]))
-            for dec in decs:
-                self._dispatch_trigger(code, i, d, dec)
 
     def _run_h1(self, start: int, end: int) -> dict:
         all_days = sorted({int(t) for b in self.data.values()
@@ -908,6 +1252,7 @@ class PortfolioSim:
         eval_days = [d for d in all_days if start <= d <= end]
         daily = []
         for d in eval_days:
+            self._apply_rolls(d)
             slots = self._h1_slots(d)
             if self.entry_mode == "trigger":
                 self._run_h1_day_trigger(d, slots)
@@ -922,12 +1267,17 @@ class PortfolioSim:
             "realized": self.realized,
             "fees": self.fee_paid,
             "trades": self.trades,
+            "orders": self.orders,
+            "book_mode": "gross_profile",
+            "fee_mode": "gross_per_sub",
             "rejected": self.rejected,
             "margin_peak": self.margin_peak,
             "margin_breach_days": self.margin_breach_days,
             "capital": self.capital,
             "unconstrained": self.unconstrained,
             "entry_mode": self.entry_mode,
+            "rolls": list(self.rolls),
+            "roll_calendar_products": len(self.roll_calendar),
         }
 
     def _record_day(self, d: int, daily: list):
@@ -943,8 +1293,8 @@ class PortfolioSim:
             "pnl": eq - self.capital,
             "margin": margin,
             "active_units": self.risk.open_units,
-            "positions": sum(1 for e in self.engines.values()
-                             if e.direction != 0),
+            "positions": sum(1 for pos in self.broker_pos.values()
+                             if pos != 0),
         })
 
     def run(self, start: int, end: int) -> dict:
@@ -955,15 +1305,23 @@ class PortfolioSim:
         eval_dates = [d for d in all_dates if start <= d <= end]
         daily = []
         for d in eval_dates:
-            # 先按当日收盘更新 mark (无当日 bar 的品种保留上一 mark)
-            for code, bars in self.data.items():
-                i = bars["index"].get(d)
-                if i is not None:
-                    self.marks[code] = float(bars["closes"][i])
+            self._apply_rolls(d)
             if self.entry_mode == "trigger":
+                # 盘中只能使用事件发生时的 mark；当日 d1 close 在全部
+                # 事件结束后才可用于日终记账，严禁早盘前视。
                 self._run_trigger_date(d)
             else:
+                # close 决策本身发生在收盘，当根 close 可用于该时点。
+                for code, bars in self.data.items():
+                    i = bars["index"].get(d)
+                    if i is not None:
+                        self.marks[code] = float(bars["closes"][i])
                 self._run_close_date(d)
+            if self.entry_mode == "trigger":
+                for code, bars in self.data.items():
+                    i = bars["index"].get(d)
+                    if i is not None:
+                        self.marks[code] = float(bars["closes"][i])
             self._record_day(d, daily)
         return {
             "daily": daily,
@@ -975,12 +1333,17 @@ class PortfolioSim:
             "realized": self.realized,
             "fees": self.fee_paid,
             "trades": self.trades,
+            "orders": self.orders,
+            "book_mode": "gross_profile",
+            "fee_mode": "gross_per_sub",
             "rejected": self.rejected,
             "margin_peak": self.margin_peak,
             "margin_breach_days": self.margin_breach_days,
             "capital": self.capital,
             "unconstrained": self.unconstrained,
             "entry_mode": self.entry_mode,
+            "rolls": list(self.rolls),
+            "roll_calendar_products": len(self.roll_calendar),
         }
 
 
@@ -1001,6 +1364,40 @@ def _hash_file(path: str) -> str:
             return hashlib.sha256(f.read()).hexdigest()
     except OSError:
         return ""
+
+
+def _code_version() -> str:
+    try:
+        head = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                              cwd=ROOT, capture_output=True, text=True,
+                              timeout=5)
+        if head.returncode != 0:
+            return "unknown"
+        dirty = subprocess.run(["git", "status", "--porcelain", "--", "."],
+                               cwd=ROOT, capture_output=True, text=True,
+                               timeout=5)
+        return head.stdout.strip() + ("+dirty" if dirty.stdout.strip() else "")
+    except Exception:
+        return "unknown"
+
+
+def _input_manifest(config_path: str, common_dir: str, sim) -> dict:
+    """配置/费率/合约/hots/实际数据与代码版本，供结果审计复现。"""
+    inputs = {}
+    for label, path in {
+            "config": config_path,
+            "fees": os.path.join(common_dir, "fees.json"),
+            "commodities": os.path.join(common_dir, "commodities.json"),
+            "hots": os.path.join(common_dir, "hots.json")}.items():
+        inputs[label] = _hash_file(path)
+    data = {}
+    for code in sorted(sim.data):
+        data[f"{code}_d.csv"] = _hash_file(
+            os.path.join(sim.csv_dir, f"{code}_d.csv"))
+        m5 = os.path.join(sim.csv_dir, f"{code}_m5.csv")
+        if os.path.exists(m5):
+            data[f"{code}_m5.csv"] = _hash_file(m5)
+    return {"code_version": _code_version(), "inputs": inputs, "data": data}
 
 
 def main():
@@ -1072,6 +1469,9 @@ def main():
                             entry_mode=args.entry_mode,
                             period=args.period, codes=codes)
     base_sim.priority = args.priority
+    if not base_sim.roll_calendar:
+        print("[pbt] WARN: hots.json 无换月日历；跨换月持仓盈亏未覆盖，"
+              "结果仅供研究，不得视为实盘可达")
     base = base_sim.run(args.start, args.end)
     unc_sim = PortfolioSim(cfg, contracts, fees, args.capital,
                            args.margin_usage, args.slippage,
@@ -1103,6 +1503,7 @@ def main():
     summary = {
         "config": os.path.abspath(args.config),
         "config_sha256": _hash_file(args.config),
+        "manifest": _input_manifest(args.config, common, base_sim),
         "capital": args.capital,
         "start": args.start, "end": args.end,
         "eval_start": base["eval_start"], "eval_end": base["eval_end"],
@@ -1117,6 +1518,10 @@ def main():
         "gap_stop": cfg.base.gap_stop,
         "arm_exclude_signal": cfg.base.arm_exclude_signal,
         "priority": args.priority,
+        "multi_profile_products": sum(1 for ps in base_sim.profiles.values()
+                                      if len(ps) > 1),
+        "book_mode": base["book_mode"],
+        "fee_mode": base["fee_mode"],
         "max_units_total": (cfg.risk.max_units_total
                             if args.max_units is None else args.max_units),
         "max_units_per_group": (cfg.risk.max_units_per_group
@@ -1124,21 +1529,27 @@ def main():
                                 else args.max_group),
         "constrained": {
             "metrics": _metrics(base["daily"], args.capital),
-            "trades": base["trades"], "rejected": base["rejected"],
+            "trades": base["trades"], "orders": base["orders"],
+            "rejected": base["rejected"],
             "fees": round(base["fees"], 2),
             "realized": round(base["realized"], 2),
             "margin_peak": round(base["margin_peak"], 2),
             "margin_breach_days": base["margin_breach_days"],
+            "roll_events": len(base["rolls"]),
+            "roll_calendar_products": base["roll_calendar_products"],
             "final_equity": round(base["daily"][-1]["equity"], 2)
             if base["daily"] else None,
         },
         "unconstrained": {
             "metrics": _metrics(unc["daily"], args.capital),
-            "trades": unc["trades"], "rejected": unc["rejected"],
+            "trades": unc["trades"], "orders": unc["orders"],
+            "rejected": unc["rejected"],
             "fees": round(unc["fees"], 2),
             "realized": round(unc["realized"], 2),
             "margin_peak": round(unc["margin_peak"], 2),
             "margin_breach_days": unc["margin_breach_days"],
+            "roll_events": len(unc["rolls"]),
+            "roll_calendar_products": unc["roll_calendar_products"],
             "final_equity": round(unc["daily"][-1]["equity"], 2)
             if unc["daily"] else None,
         },

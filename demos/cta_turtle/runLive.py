@@ -19,8 +19,9 @@ from wtpy import WtEngine, EngineType
 from wtpy.monitor import WtMonSvr
 
 from StraTurtle import StraTurtle
-from core.ConfigLoader import ConfigLoader
+from core.ConfigLoader import ConfigLoader, register_allocated_capital
 from core.RiskManager import RiskManager
+from core.profiles import resolve_profiles, describe_profiles
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -39,23 +40,73 @@ def _build_notifier(cfg):
         return None
 
 
+def _resolve_preflight_mode(value) -> str:
+    """解析 WT_PREFLIGHT; 仅缺省值回退 warn, 非法值不得关闭门禁。"""
+    if value is None:
+        return "warn"
+    if not isinstance(value, str):
+        raise ValueError(f"invalid WT_PREFLIGHT={value!r}; "
+                         "expected off, warn or strict")
+    mode = value.strip().lower()
+    if mode not in ("off", "warn", "strict"):
+        raise ValueError(f"invalid WT_PREFLIGHT={value!r}; "
+                         "expected off, warn or strict")
+    return mode
+
+
+def _preflight_failure(mode: str, stage: str, exc: Exception):
+    """纯失败策略: 返回 (是否阻断, 说明), 不执行日志或退出操作。"""
+    if mode not in ("warn", "strict"):
+        raise ValueError(f"no preflight failure policy for mode {mode!r}")
+    abort = mode == "strict"
+    action = "refusing startup" if abort else "continuing with incomplete checks"
+    return abort, (f"{stage} failed: {exc}; WT_PREFLIGHT={mode}, "
+                   f"{action}")
+
+
+def _handle_preflight_failure(mode: str, stage: str, exc: Exception):
+    abort, message = _preflight_failure(mode, stage, exc)
+    if abort:
+        raise SystemExit(f"[preflight] FATAL: {message}") from exc
+    print(f"[preflight] WARNING: {message}", file=sys.stderr)
+
+
+def _run_preflight_step(mode: str, stage: str, operation):
+    """执行一个预检阶段; SystemExit 永远原样向上传递。"""
+    try:
+        return operation()
+    except SystemExit:
+        raise
+    except Exception as exc:
+        _handle_preflight_failure(mode, stage, exc)
+        return None
+
+
 def _preflight(cfg, mode: str = "warn", cfg_path: str = ""):
     """启动前数据完整性门禁: hots键/K线健康/暖机深度 (+journal自动回补)
 
-    cfg_path: 实际生效的配置文件路径 (默认 config/turtle_config.yaml)。
-    回补子进程必须用同一个配置, 否则 --config 指定的非默认配置会被忽略
-    (P2 修复)。
+    off 跳过全部预检; warn 降级时输出醒目警告; strict 任一阶段异常即
+    阻断启动。cfg_path 是实际生效的配置文件路径, 回补子进程必须复用它。
     """
-    if mode not in ("warn", "strict"):
+    mode = _resolve_preflight_mode(mode)
+    if mode == "off":
         return
     try:
-        from core import DataChecker
+        def _load_checker():
+            from core import DataChecker
+            return DataChecker
+
+        DataChecker = _run_preflight_step(
+            mode, "import DataChecker", _load_checker)
+        if DataChecker is None:  # warn 下导入失败, 后续检查无从执行
+            return
         common = os.path.abspath(os.path.join(HERE, "..", "common"))
         storage = os.path.abspath(os.path.join(HERE, "..", "storage"))
+
         # 自动回补: journal 尾部合并到 storage/csv (WT_AUTO_REPAIR=1)
         jdir = getattr(cfg.base, "journal_dir", "")
         if os.environ.get("WT_AUTO_REPAIR") == "1" and jdir:
-            try:
+            def _repair():
                 import subprocess as _sp
                 r = _sp.run([sys.executable,
                              os.path.join(HERE, "scripts",
@@ -64,12 +115,23 @@ def _preflight(cfg, mode: str = "warn", cfg_path: str = ""):
                              "--common", common,
                              "--storage", storage,
                              "--repair-journal", jdir],
-                            capture_output=True, text=True, timeout=120)
+                            capture_output=True, text=True, timeout=120,
+                            check=True)
                 print(r.stdout.strip() or "[repair] no output")
-            except Exception as e:
-                print(f"[repair] skipped: {e}")
-        issues = DataChecker.check_config(cfg, common, storage,
-                                          live=True)
+
+            _run_preflight_step(mode, "automatic repair", _repair)
+
+        issues = _run_preflight_step(
+            mode, "check_config",
+            lambda: DataChecker.check_config(cfg, common, storage, live=True))
+        if issues is None:
+            issues = []
+        stale = _run_preflight_step(
+            mode, "check_staleness",
+            lambda: DataChecker.check_staleness(cfg, common, storage))
+        if stale is not None:
+            issues.extend(stale)
+
         n_err = 0
         for i in issues:
             if i.level == "info":
@@ -83,8 +145,8 @@ def _preflight(cfg, mode: str = "warn", cfg_path: str = ""):
                 f"=strict); 先运行 scripts/prepare_data.py 修复")
     except SystemExit:
         raise
-    except Exception as e:
-        print(f"[precheck] skipped: {e}")
+    except Exception as exc:
+        _handle_preflight_failure(mode, "preflight", exc)
 
 
 def _cfg_path():
@@ -98,28 +160,24 @@ def main():
     ap.add_argument("--port", type=int, default=8080)
     args = ap.parse_args()
 
+    preflight_mode = _resolve_preflight_mode(os.environ.get("WT_PREFLIGHT"))
     cfg = ConfigLoader.load(args.config)
 
     # === 数据完整性预检 (P1 运维) ===
-    # WT_PREFLIGHT=off|warn|strict (默认 warn); strict 时 error 阻断启动
-    _preflight(cfg, mode=os.environ.get("WT_PREFLIGHT", "warn").lower(),
-               cfg_path=args.config)
+    # off=跳过; warn=异常醒目告警后继续; strict=异常或数据 error 阻断启动
+    _preflight(cfg, mode=preflight_mode, cfg_path=args.config)
 
     engine = WtEngine(EngineType.ET_CTA)
     engine.init('../common/', "config.yaml")
 
     # 组合级风险预算: 多品种共享同一实例 (单位限制/总敞口跨品种生效)
     risk_mgr = RiskManager(cfg.risk)
-    if cfg.risk.portfolio_capital > 0:
-        from core.ConfigLoader import allocated_capital
-        codes = [i.code for i in cfg.instruments]
+    allocations = register_allocated_capital(risk_mgr, cfg)
+    if allocations:
         print(f"[runLive] 资金分配: portfolio_capital="
               f"{cfg.risk.portfolio_capital:,.0f} → 每策略权益基数")
-        for i in cfg.instruments:
-            name0 = f"turtle_{i.code.replace('.', '_')}"
-            alloc = allocated_capital(cfg.risk, i.code, codes)
-            risk_mgr.set_sid_capital(name0, alloc)
-            print(f"[runLive]   {i.code}: {alloc:,.0f}")
+        for code, (_name, alloc) in allocations.items():
+            print(f"[runLive]   {code}: {alloc:,.0f}")
     notifier = _build_notifier(cfg)
     if notifier is not None:
         print(f"[runLive] notify: {cfg.notify.type} "
@@ -130,7 +188,8 @@ def main():
                           notify=notifier)
         engine.add_cta_strategy(stra)
         print(f"[runLive] add strategy {name}: {inst.period} "
-              f"{inst.system} units={inst.units} dir={inst.direction}")
+              f"units={inst.units} dir={inst.direction} profiles="
+              f"{describe_profiles(resolve_profiles(inst, cfg.base))}")
 
     engine.commitConfig()
     engine.run(bAsync=True)

@@ -55,6 +55,18 @@ def _daily_np(res: dict):
     return dates, eq
 
 
+def _clip_result(res: dict, days: list) -> dict:
+    """把模拟结果限制到共同交易日，重算评估区间，禁止末端冻结。"""
+    wanted = set(int(d) for d in days)
+    out = dict(res)
+    out["daily"] = [row for row in res["daily"]
+                    if int(row["date"]) in wanted]
+    out["eval_start"] = out["daily"][0]["date"] if out["daily"] else None
+    out["eval_end"] = out["daily"][-1]["date"] if out["daily"] else None
+    out["n_days"] = len(out["daily"])
+    return out
+
+
 def _align_returns(dates_a, eq_a, dates_b, eq_b):
     """两条日权益序列 → 交集日期上的日收益对 (ret_a, ret_b)。"""
     ia = {int(d): k for k, d in enumerate(dates_a)}
@@ -100,6 +112,8 @@ def main():
     fees = load_fees(common)
 
     h1_frac = float(args.mix_frac_h1)
+    if not 0.0 <= h1_frac <= 1.0:
+        raise SystemExit("[h1mix] --mix-frac-h1 需在 [0,1] 内")
     d1_cap = args.capital * (1.0 - h1_frac)
     h1_cap = args.capital * h1_frac
 
@@ -110,6 +124,16 @@ def main():
     res_d1_full = _run(cfg, contracts, fees, args.capital, args, "d1") \
         if h1_frac else res_d1
 
+    dates_d, eq_d = _daily_np(res_d1)
+    dates_h, eq_h = _daily_np(res_h1)
+    common_days = sorted(set(int(d) for d in dates_d)
+                         & set(int(d) for d in dates_h))
+    if not common_days:
+        raise SystemExit("[h1mix] d1/h1 无共同交易日，无法比较")
+    # 三条曲线及混合全部使用同一交集；禁止 h1 到期后继续冻结其权益。
+    res_d1 = _clip_result(res_d1, common_days)
+    res_h1 = _clip_result(res_h1, common_days)
+    res_d1_full = _clip_result(res_d1_full, common_days)
     dates_d, eq_d = _daily_np(res_d1)
     dates_h, eq_h = _daily_np(res_h1)
     ra, rb, common_days = _align_returns(dates_d, eq_d, dates_h, eq_h)
@@ -123,10 +147,9 @@ def main():
         except Exception:
             spearman = None
 
-    # 混合曲线: 半资金 d1 + 半资金 h1 逐日权益相加 (并集日期,
-    # 缺失侧沿用该侧末日权益)
-    all_days = sorted(set(int(d) for d in dates_d)
-                      | set(int(d) for d in dates_h))
+    # 混合曲线: 半资金 d1 + 半资金 h1 逐日权益相加，仅共同交易日；
+    # 不向后延伸任何一侧的期末权益。
+    all_days = list(common_days)
     id_map = {int(d): k for k, d in enumerate(dates_d)}
     ih_map = {int(d): k for k, d in enumerate(dates_h)}
     mix_daily = []
@@ -189,9 +212,10 @@ def main():
     print(f"[h1mix] d1@{d1_cap:.0f} {out['d1_mix_share']['metrics']}")
     print(f"[h1mix] h1@{h1_cap:.0f} {out['h1_mix_share']['metrics']}")
     print(f"[h1mix] 混合   {out['mix']['metrics']}")
-    print(f"[h1mix] 日收益相关 pearson={c['pearson']:.3f} "
-          f"spearman={c['spearman']:.3f} (n={c['n_days']}) "
-          f"-> {args.out}")
+    p_txt = f"{c['pearson']:.3f}" if c['pearson'] is not None else "nan"
+    s_txt = f"{c['spearman']:.3f}" if c['spearman'] is not None else "nan"
+    print(f"[h1mix] 日收益相关 pearson={p_txt} spearman={s_txt} "
+          f"(n={c['n_days']}) -> {args.out}")
     # 判读提示 (plan §S3 步骤 2/3 门槛): 相关 <0.7 且混合夏普 >
     # 单速度夏普 → 值得影子仓; 否则 h1 速度在该篮子无分散化价值
     mix_shp = out["mix"]["metrics"].get("sharpe_ratio")

@@ -32,7 +32,7 @@ for _p in (HERE, os.path.join(HERE, 'core')):
 from wtpy import WtEngine, EngineType
 
 from StraTurtle import StraTurtle
-from core.ConfigLoader import ConfigLoader
+from core.ConfigLoader import ConfigLoader, register_allocated_capital
 from core.CsvDataLoader import CsvDataLoader
 
 
@@ -44,8 +44,53 @@ def _storage_csv_dir() -> str:
     return os.path.join(_storage_path, 'csv')
 
 
-def _auto_repair(cfg, csv_dir: str):
-    """journal → storage/csv 增量回补 (幂等; 兜底宕机丢失的会话内K线)"""
+def _resolve_preflight_mode(value) -> str:
+    """解析 WT_PREFLIGHT; 仅缺省值回退 warn, 非法值不得关闭门禁。"""
+    if value is None:
+        return 'warn'
+    if not isinstance(value, str):
+        raise ValueError(f"invalid WT_PREFLIGHT={value!r}; "
+                         "expected off, warn or strict")
+    mode = value.strip().lower()
+    if mode not in ('off', 'warn', 'strict'):
+        raise ValueError(f"invalid WT_PREFLIGHT={value!r}; "
+                         "expected off, warn or strict")
+    return mode
+
+
+def _preflight_failure(mode: str, stage: str, exc: Exception):
+    """纯失败策略: 返回 (是否阻断, 说明), 不执行日志或退出操作。"""
+    if mode not in ('warn', 'strict'):
+        raise ValueError(f"no preflight failure policy for mode {mode!r}")
+    abort = mode == 'strict'
+    action = 'refusing startup' if abort else 'continuing with incomplete checks'
+    return abort, (f"{stage} failed: {exc}; WT_PREFLIGHT={mode}, "
+                   f"{action}")
+
+
+def _handle_preflight_failure(mode: str, stage: str, exc: Exception):
+    abort, message = _preflight_failure(mode, stage, exc)
+    if abort:
+        raise SystemExit(f"[turtle][preflight] FATAL: {message}") from exc
+    print(f"[turtle][preflight] WARNING: {message}", file=sys.stderr)
+
+
+def _run_preflight_step(mode: str, stage: str, operation):
+    """执行一个预检阶段; SystemExit 永远原样向上传递。"""
+    try:
+        return operation()
+    except SystemExit:
+        raise
+    except Exception as exc:
+        _handle_preflight_failure(mode, stage, exc)
+        return None
+
+
+def _auto_repair(cfg, csv_dir: str, mode: str = 'warn'):
+    """journal → storage/csv 增量回补; 失败策略与数据预检一致。"""
+    mode = _resolve_preflight_mode(mode)
+    if mode == 'off':
+        return
     try:
         from core.BarJournal import BarJournal
         jdir = getattr(cfg.base, 'journal_dir', '')
@@ -66,28 +111,42 @@ def _auto_repair(cfg, csv_dir: str):
                     os.path.join(csv_dir, f"{inst.code}_{sfx}.csv"))
                 total += n
         print(f"[turtle] journal repair: +{total} bars -> {csv_dir}")
-    except Exception as e:
-        print(f"[turtle] journal repair skipped: {e}")
+    except SystemExit:
+        raise
+    except Exception as exc:
+        _handle_preflight_failure(mode, 'automatic repair', exc)
 
 
-def _preflight(cfg, csv_dir: str):
-    """数据门禁: hots键/K线健康/暖机深度。strict 模式 error 即退出,
-    WatchDog 按 span 拉起重试 — 形成"数据未就绪不交易"的自愈闭环。"""
-    mode = os.environ.get('WT_PREFLIGHT', 'warn').lower()
-    if mode not in ('warn', 'strict'):
+def _preflight(cfg, csv_dir: str, mode=None):
+    """数据门禁: off 跳过, warn 醒目降级, strict 异常/error 即退出。"""
+    if mode is None:
+        mode = os.environ.get('WT_PREFLIGHT')
+    mode = _resolve_preflight_mode(mode)
+    if mode == 'off':
         return
     try:
-        from core import DataChecker
+        def _load_checker():
+            from core import DataChecker
+            return DataChecker
+
+        DataChecker = _run_preflight_step(
+            mode, 'import DataChecker', _load_checker)
+        if DataChecker is None:  # warn 下导入失败, 后续检查无从执行
+            return
         common = _common_dir()
         storage = os.path.abspath(os.path.join(csv_dir, '..'))
-        issues = DataChecker.check_config(cfg, common, storage,
-                                          live=True)
-        # 时效断言 (P1-4): 2026-09 HOT 日线冻结 16 天而预检无感 —
-        # 按日历推导"数据应该到哪天", 滞后只告警 (可能早于 20:40 定时器)
-        try:
-            issues.extend(DataChecker.check_staleness(cfg, common, storage))
-        except Exception as e:
-            print(f"[turtle] staleness check skipped: {e}")
+        issues = _run_preflight_step(
+            mode, 'check_config',
+            lambda: DataChecker.check_config(cfg, common, storage, live=True))
+        if issues is None:
+            issues = []
+        # 时效断言: 滞后通常只产生 warn, 但检查自身异常在 strict 下阻断。
+        stale = _run_preflight_step(
+            mode, 'check_staleness',
+            lambda: DataChecker.check_staleness(cfg, common, storage))
+        if stale is not None:
+            issues.extend(stale)
+
         n_err = 0
         for i in issues:
             if i.level == 'info':
@@ -101,8 +160,8 @@ def _preflight(cfg, csv_dir: str):
                 f"exiting for watchdog retry")
     except SystemExit:
         raise
-    except Exception as e:
-        print(f"[turtle] preflight skipped: {e}")
+    except Exception as exc:
+        _handle_preflight_failure(mode, 'preflight', exc)
 
 
 def _common_dir() -> str:
@@ -141,6 +200,7 @@ def _sync_contracts(common: str):
 
 
 def main():
+    preflight_mode = _resolve_preflight_mode(os.environ.get('WT_PREFLIGHT'))
     cfg_path = os.path.join(HERE, 'config', 'turtle_config.yaml')
     cfg = ConfigLoader.load(cfg_path)
 
@@ -148,9 +208,10 @@ def main():
     if os.environ.get('WT_CONTRACT_SYNC', '1') != '0':
         _sync_contracts(_common_dir())
     csv_dir = _storage_csv_dir()
-    if os.environ.get('WT_AUTO_REPAIR', '0') == '1':
-        _auto_repair(cfg, csv_dir)
-    _preflight(cfg, csv_dir)
+    if preflight_mode != 'off' and os.environ.get(
+            'WT_AUTO_REPAIR', '0') == '1':
+        _auto_repair(cfg, csv_dir, mode=preflight_mode)
+    _preflight(cfg, csv_dir, mode=preflight_mode)
 
     engine = WtEngine(EngineType.ET_CTA)
 
@@ -175,6 +236,12 @@ def main():
     # 组合级共享: 风控账本 + webhook 推送 (多品种协同必需)
     from core.RiskManager import RiskManager
     risk_mgr = RiskManager(cfg.risk)
+    allocations = register_allocated_capital(risk_mgr, cfg)
+    if allocations:
+        print(f"[turtle] 资金分配: portfolio_capital="
+              f"{cfg.risk.portfolio_capital:,.0f}")
+        for code, (_name, alloc) in allocations.items():
+            print(f"[turtle]   {code}: {alloc:,.0f}")
     notifier = None
     if getattr(cfg, 'notify', None) and cfg.notify.enabled:
         try:

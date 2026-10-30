@@ -209,6 +209,7 @@ def test_first_call_builds_baseline_without_orders():
 def test_intrabar_stop_exits_immediately():
     stra = _make_stra()
     ctx = MultiCtx()
+    ctx.is_backtest = True          # 回测即时成交；实盘等待见 exit_pending
     d1 = ctx.add_store("d1")
     last = _fill_daily(d1)
     m5 = ctx.add_store("m5")

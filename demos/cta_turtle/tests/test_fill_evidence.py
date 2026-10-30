@@ -48,7 +48,8 @@ class _Journal:
     def cursor(self):
         return self.cursor_val
 
-    def layer_price(self, code, cursor, lots, skip=0.0):
+    def layer_price(self, code, cursor, lots, skip=0.0,
+                    side=None, offset=None):
         return self.fills_price
 
 
@@ -104,18 +105,17 @@ class TestFillConfirmed:
         assert ok is False
         assert src == "framework"
 
-    def test_timeout_releases_when_truth_stale(self):
-        """真值陈旧 + 无成交 → 2x 超时后放行 (窗口不永久挂起)"""
+    def test_timeout_does_not_fake_confirm_when_truth_stale(self):
+        """真值已配置时，墙钟超时不能把信号口径 fees 当成真实成交。"""
         stra = _make_stra()
         stra._trade_journal = _Journal(fills_price=None)
         ctx = _FillCtx(pos=-159, fees=200.0)
         fp = _fp(47)
         ok, _, _ = stra._fill_confirmed(ctx, fp, "SHFE.rb.HOT", -159)
         assert ok is False
-        fp["ts"] -= 1300                          # 越过 2x600s
+        fp["ts"] -= 1300                          # 越过 2x600s 仍不得假确认
         ok, _, _ = stra._fill_confirmed(ctx, fp, "SHFE.rb.HOT", -159)
-        assert ok is True
-        assert any("fills unverified" in t for _, t in ctx.logs)
+        assert ok is False
 
     def test_fees_trusted_when_truth_not_configured(self):
         """真值未配置 (off/缺失) → fees 代理维持旧行为 (bt/无部署环境)"""

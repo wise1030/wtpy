@@ -49,6 +49,21 @@ def sha256_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
+def _input_hashes() -> dict:
+    """黄金回测输入数据/费率/合约/hots 指纹（基线缺字段时兼容旧档）。"""
+    paths = {
+        "rb_d1": os.path.join(ROOT, "..", "storage", "csv",
+                              "SHFE.rb.HOT_d.csv"),
+        "rb_m5": os.path.join(ROOT, "..", "storage", "csv",
+                              "SHFE.rb.HOT_m5.csv"),
+        "fees": os.path.join(ROOT, "..", "common", "fees.json"),
+        "commodities": os.path.join(ROOT, "..", "common", "commodities.json"),
+        "hots": os.path.join(ROOT, "..", "common", "hots.json"),
+    }
+    return {k: sha256_file(v) if os.path.exists(v) else None
+            for k, v in paths.items()}
+
+
 def collect(out_dir: str = OUT_DIR) -> dict:
     """采集当前回测产物指纹 (纯函数, 可单测)"""
     hashes = {}
@@ -109,21 +124,29 @@ def main():
     cur = collect()
     cur["spec"] = dict(GOLDEN)
     cur["config_sha256"] = config_sha
+    cur["input_hashes"] = _input_hashes()
 
-    if args.update or not os.path.exists(BASELINE):
+    if args.update:
         os.makedirs(os.path.dirname(BASELINE), exist_ok=True)
         with open(BASELINE, "w", encoding="utf-8") as f:
             json.dump(cur, f, ensure_ascii=False, indent=2)
         print(f"[golden] baseline written -> {BASELINE}")
         print(f"[golden] summary: {cur['summary']}")
         return
-
+    if not os.path.exists(BASELINE):
+        raise SystemExit("[golden] 基线缺失；仅允许显式 --update 建立，"
+                         "不得默认接受当前输出")
     with open(BASELINE, encoding="utf-8") as f:
         base = json.load(f)
     if base.get("config_sha256") != config_sha:
-        print("[golden] NOTE: config 哈希变化 "
-              f"({base.get('config_sha256', '')[:12]}.. → "
-              f"{config_sha[:12]}..), 若属预期请 --update", file=sys.stderr)
+        raise SystemExit(
+            "[golden] FAILED: 配置哈希变化 "
+            f"({base.get('config_sha256', '')[:12]}.. → "
+            f"{config_sha[:12]}..)；仅允许显式 --update 并声明口径变更")
+    if base.get("input_hashes") and \
+            base["input_hashes"] != cur["input_hashes"]:
+        raise SystemExit("[golden] FAILED: 输入数据/费率/合约/hots 指纹变化；"
+                         "仅允许显式 --update 并声明数据口径变化")
     diffs = diff_baseline(base, cur)
     if diffs:
         print("[golden] FAILED: 回测链路漂移")

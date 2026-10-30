@@ -9,6 +9,7 @@ from schemas import (TurtleConfig, TurtleBaseConfig, InstrumentConfig,
                      VALID_DIRECTIONS, VALID_SYSTEMS, VALID_PERIODS,
                      VALID_SUB_PERIODS)
 from filters.base import get_filter_class
+from core.profiles import required_bars, describe_profiles, resolve_profiles
 
 # 顶层段与 instruments[] 项的合法键 (P1-6 加固: 此前拼错的键如
 # untis/drection 会被静默忽略回默认值, 与 base/risk/notify 的不对称
@@ -28,6 +29,24 @@ def allocated_capital(risk, code: str, codes: list) -> float:
     if tot <= 0:
         return float(risk.fallback_capital)
     return float(risk.portfolio_capital) * float(w.get(code, 1.0)) / tot
+
+
+def register_allocated_capital(risk_mgr, cfg) -> dict:
+    """runLive/deploy 共用的 sid 资金分配注册；返回 {code: (sid, 金额)}。
+
+    portfolio_capital=0 时仅返回空表，不改变旧 fallback 行为。集中此
+    函数是为了防止生产模板漏注册而静默回退到每策略 fallback_capital。
+    """
+    out = {}
+    if cfg.risk.portfolio_capital <= 0:
+        return out
+    codes = [i.code for i in cfg.instruments]
+    for inst in cfg.instruments:
+        name = f"turtle_{inst.code.replace('.', '_')}"
+        alloc = allocated_capital(cfg.risk, inst.code, codes)
+        risk_mgr.set_sid_capital(name, alloc)
+        out[inst.code] = (name, alloc)
+    return out
 
 
 def risk_coherence_warning(base, risk, capital: float = None) -> str:
@@ -146,8 +165,16 @@ class ConfigLoader:
         if unknown:
             raise ValueError(f"notify 配置含未知字段: {unknown}")
         notify = NotifyConfig(**notify_raw)
+        if not isinstance(notify.enabled, bool):
+            raise ValueError("notify.enabled 需为 bool")
         if notify.type not in ("wechat", "dingtalk", "generic"):
             raise ValueError(f"notify.type 非法 '{notify.type}'")
+        if not isinstance(notify.urls, list) or \
+                any(not isinstance(u, str) or not u.strip()
+                    for u in notify.urls):
+            raise ValueError("notify.urls 需为非空字符串 URL 列表")
+        if notify.enabled and not notify.urls:
+            raise ValueError("notify.enabled=true 时 urls 不能为空")
 
         instruments = []
         seen_codes = set()
@@ -183,17 +210,33 @@ class ConfigLoader:
                 raise ValueError(
                     f"{code}: units 需为正整数, 当前 {units!r} "
                     f"(1.5 之类的值会被静默截断, 故拒绝)")
+            intrabar_stop = item.get('intrabar_stop', False)
+            if not isinstance(intrabar_stop, bool):
+                raise ValueError(f"{code}: intrabar_stop 需为 bool")
             filters = ConfigLoader._parse_filters(code, item.get('filters'))
-            speeds = ConfigLoader._parse_speeds(code, item.get('speeds'))
+            speeds = ConfigLoader._parse_speeds(
+                code, item.get('speeds'), default_fs=base.s2_entry)
             instruments.append(InstrumentConfig(
                 code=code, period=period, system=system,
                 units=units, direction=direction,
                 group=group, filters=filters,
                 speeds=speeds,
-                intrabar_stop=bool(item.get('intrabar_stop', False))))
+                intrabar_stop=intrabar_stop))
 
         if not instruments:
             raise ValueError("instruments 为空")
+        # 暖机深度必须按**实际 profiles**校验：此前只看 base 窗口，
+        # 120/60、250/125 等 speed 会在 bar_cnt=120 下永久 NaN 空转。
+        for inst in instruments:
+            need = required_bars(inst, base)
+            if base.bar_cnt < need:
+                raise ValueError(
+                    f"{inst.code}: bar_cnt({base.bar_cnt}) 小于实际 profiles "
+                    f"所需 {need} 根 (含全部 entry/exit/fs 与 prev 余量); "
+                    f"请增大 bar_cnt 或缩短窗口")
+            if inst.speeds or inst.system == "S1+S2":
+                print(f"[ConfigLoader] {inst.code} profiles: "
+                      f"{describe_profiles(resolve_profiles(inst, base))}")
         if risk.alloc_weights:
             codes = {i.code for i in instruments}
             unknown_w = set(risk.alloc_weights) - codes
@@ -214,31 +257,44 @@ class ConfigLoader:
         return cfg
 
     @staticmethod
-    def _parse_speeds(code: str, raw_list) -> list:
-        """解析 instruments[].speeds (多速度); 份额之和须为 1"""
+    def _parse_speeds(code: str, raw_list, default_fs: int = 55) -> list:
+        """解析 instruments[].speeds (多速度); 份额之和须为 1。
+
+        多档必须显式 name/system：name 是快照身份，system 决定 S1/S2
+        语义；仅靠 55/20 或 name=S2 不能推断语义。fs 缺省跟随
+        base.s2_entry，而不是写死 55。
+        """
         if raw_list is None:
             return []
         if not isinstance(raw_list, list) or not raw_list:
             raise ValueError(f"{code}: speeds 需为非空列表")
+        allowed = {"name", "entry", "exit", "share", "fs", "system"}
         out, names, total = [], set(), 0.0
         for j, sp in enumerate(raw_list):
             if not isinstance(sp, dict):
                 raise ValueError(f"{code}: speeds[{j}] 需为映射")
+            unknown = set(sp) - allowed
+            if unknown:
+                raise ValueError(
+                    f"{code}: speeds[{j}] 含未知字段 {sorted(unknown)} "
+                    f"(合法: {sorted(allowed)})")
             name = str(sp.get("name") or f"V{j}")
             if name in names:
                 raise ValueError(f"{code}: speeds 名称重复 {name}")
             names.add(name)
-            try:
-                entry, exit_ = int(sp["entry"]), int(sp["exit"])
-            except (KeyError, TypeError, ValueError):
-                raise ValueError(
-                    f"{code}: speeds[{j}] 缺 entry/exit 或非整数") from None
+            for field in ("entry", "exit", "fs"):
+                value = sp.get(field, default_fs if field == "fs" else None)
+                if not isinstance(value, int) or isinstance(value, bool):
+                    raise ValueError(
+                        f"{code}: speeds[{j}].{field} 需为整数，"
+                        "禁止浮点/字符串静默截断")
+            entry, exit_ = sp["entry"], sp["exit"]
             if entry < 2 or exit_ < 2:
                 raise ValueError(f"{code}: speeds[{j}] entry/exit 需 >= 2")
             share = float(sp.get("share", 1.0 / len(raw_list)))
             if not 0 < share <= 1:
                 raise ValueError(f"{code}: speeds[{j}] share 需在 (0,1]")
-            fsp = int(sp.get("fs", 55))
+            fsp = sp.get("fs", default_fs)
             if fsp < 2:
                 raise ValueError(f"{code}: speeds[{j}] fs 需 >= 2")
             # 引擎语义与展示名解耦 (2026-10-20): name 可为 fast/slow,
@@ -253,6 +309,13 @@ class ConfigLoader:
                                    share=share, fs=fsp, system=system))
         if abs(total - 1.0) > 1e-6:
             raise ValueError(f"{code}: speeds share 之和需为 1 (当前 {total})")
+        if len(raw_list) > 1:
+            for j, sp in enumerate(raw_list):
+                for field in ("name", "system"):
+                    if not sp.get(field):
+                        raise ValueError(
+                            f"{code}: 多档 speeds[{j}] 必须显式配置 {field}; "
+                            "name 是快照身份, system 决定 S1/S2 语义")
         return out
 
     @staticmethod

@@ -48,6 +48,8 @@ S1 过滤器口径(复核确认):
 - 被跳过的信号记为 sim 单 + _fs_armed; sim 止损/出场后过滤器与 fail-safe 一并解除
 - trigger 模式下 sim 单由盘中价格推进 (touch 口径), 与实单一致
 """
+import copy
+
 
 DEC_ENTER = "enter"
 DEC_ADD = "add"
@@ -84,11 +86,8 @@ class TurtleEngine:
         #            加仓位单调向有利方向): 保留 N 收缩时的动态收紧,
         #            同时保证单层最大亏损不超过首次锚定的 2N
         self.stop_n_mode = stop_n_mode
-        # S4-1 (2026-10-24): trigger 武装位口径。
-        #   True (默认, 旧行为) = 包络: max(通道, 当根 high/low), 即
-        #     "含当根"的 N 日通道 — 已突破日的次日挂在今日极值;
-        #   False = channel_only: 纯突破前 N 日通道 (经典海龟语义)。
-        #   两者差异集中在趋势初段的入场质量, 用 run_caliber_ab 量化。
+        # 非 arm_exclude 的旧包络开关；next_* 已含刚闭合 bar 时通常
+        # 恒等。arm_exclude=True 时忽略该开关，防止信号根被重新加入。
         self.trigger_envelope = bool(trigger_envelope)
         # S4-2: 同 bar 反转。close 模式本 bar 决策出场后是否继续评估
         # 入场 (旧行为=True); trigger 模式结构性不允许 (check_bar 路径
@@ -100,14 +99,9 @@ class TurtleEngine:
         # 组合回测 sim 层早按 min(open,stop) 处理, 引擎层补齐后
         # close 基线才诚实地差于 trigger)。None/未传 = 旧行为。
         self.gap_stop = bool(gap_stop)
-        # S4-1b (2026-10-24, 实证见 matrix_results/caliber_ab.json):
-        # trigger 武装位的通道归属。True (默认, 2026-10-24 用户拍板
-        #   启用) = 严格经典: 用 prev_* 通道 (突破前 N 日高低点, 完全
-        #   排除信号 bar) —— A/B 实证 +53.9pp 收益/+0.124 Sharpe
-        #   (12 品种组合 trigger, 2019-2026), 入场更少而优 (避免追涨
-        #   已自我延伸通道的入场); False = 旧行为, 通道含信号 bar
-        #   (chan[i] 不含 bar i, 但武装用 bar T-1 恰在窗口内 →
-        #   trigger_envelope 的"包络"实为恒等操作)。
+        # arm_exclude_signal=True：使用 current 通道（已排除刚闭合信号
+        # bar）并跳过 envelope；False 使用 next_* 次日常规通道。旧实现
+        # 取 prev_* 后再包络当根 high/low，既错一根又违背“排除信号根”。
         self.arm_exclude_signal = bool(arm_exclude_signal)
         # 当前有效止损/加仓位 (ratchet 模式的棘轮棘齿; 其余模式=当次算值)
         self._stop_level = None
@@ -130,8 +124,16 @@ class TurtleEngine:
         self._armed = {"long": None, "short": None,
                        "fs_long": None, "fs_short": None,
                        "stop": None, "add": None, "exit": None}
+        self._disarmed = set()      # 当日入场否决方向，rearm/重启不得复活
         self._pending = None      # 已发出未确认的触发决策 {"kind","dir"}
-        self._n = None            # 最近日线评估的 N (武装/触发决策载荷)
+        # 实盘出场未知态: 目标已提交但真实成交未确认。与原 _pending 分离，
+        # 使日评估/重启清理孤儿触发决策时不会误清出场保护。
+        self._exit_pending = None
+        # close 在决策阶段会为同 bar 入场预结清 S1；若策略层改为异步
+        # 出场，begin_exit 用该快照撤销“假设已离场”的过滤状态。
+        self._exit_s1_restore = None
+        self._n = None            # 最近评估 N (武装/触发决策载荷)
+        self._prev_n = None       # 上一评估 N（close 当根持仓管理使用）
         self._entry_ch = None     # (upper, lower) 入场通道
         self._exit_ch = None      # (upper, lower) 出场通道
         self._fs_ch = None        # (upper, lower) fail-safe 通道
@@ -151,18 +153,29 @@ class TurtleEngine:
         通道值不含当前 bar; prev_* 为上一 bar 的通道值 (边沿判定用)。
         open: 当根开盘价 (S4-3 跳空止损用; None=不处理跳空, 旧行为)。
         """
+        if self._exit_pending is not None:
+            return []
+        self._exit_s1_restore = None
         if n is None or n != n or n <= 0:
             return []
         if any(v is None or v != v for v in channels.values()):
             return []
-        # 最近评估 N: close 模式不经 _arm_daily, 在此刷新 (冻结 N 来源)
+        # update_n 已在策略评估前刷新时，_prev_n 才是根前 N；直接
+        # 调用 on_bar 时当前 _n 才是上一根。close 的当根持仓管理只能
+        # 用根前 N，新 N 留给新入场/加仓确认和下一根。
+        previous_n = self._prev_n if self._n == n else self._n
+        self._prev_n = self._n
         self._n = n
 
         if self.entry_mode == "trigger":
             # 盘中触发模式: bar 收盘只做日线评估与价位武装,
             # 入场/加仓/止损/出场全部由 on_price/check_bar 触发。
+            self._prev_n = n
             return self._arm_daily(high, low, n, channels)
 
+        if previous_n is not None and previous_n == previous_n \
+                and previous_n > 0:
+            self._n = previous_n
         decisions = []
         exited_this_bar = False   # 两段式确认: 本 bar 决策出场后按空仓评估入场
 
@@ -197,6 +210,11 @@ class TurtleEngine:
                 # 阶段改写 s1_last (sim 单), 若等到 confirm_exit 才记录
                 # 真实输赢, 结果就永久丢失 (2026-09-14 审计, 两层多仓
                 # 均价 115/出场 112 属 loss, 却按"上一笔盈利"跳过)
+                # 实盘异步出场时 begin_exit 恢复此快照，待真实成交再结清。
+                self._exit_s1_restore = {
+                    "s1_last": copy.deepcopy(self.s1_last),
+                    "fs_armed": self._fs_armed,
+                }
                 self._settle_s1_exit(exit_price)
                 decisions.append({
                     "decision": DEC_EXIT, "reason": exit_reason,
@@ -211,8 +229,12 @@ class TurtleEngine:
                         decisions.append({"decision": DEC_ADD, "price": close})
                     elif self.direction < 0 and close <= add_px:
                         decisions.append({"decision": DEC_ADD, "price": close})
+                self._n = n
+                self._prev_n = n
                 return decisions   # 持仓未出, 不评估入场
 
+        self._n = n                  # 新入场/后续确认使用当根评估 N
+        self._prev_n = n             # 下一次 on_bar 的根前 N
         # === S1 sim 单推进 (独立于持仓) ===
         self._advance_sim(high, low, close, channels)
 
@@ -279,6 +301,37 @@ class TurtleEngine:
     # ------------------------------------------------------------------
     # 确认回调 (策略层执行后调用)
     # ------------------------------------------------------------------
+    def begin_exit(self, reason: str, price: float) -> bool:
+        """登记实盘出场未知态，保留持仓/风险/S1 管理状态。
+
+        返回是否成功登记。调用方仍需提交目标仓并独立保存成交证据游标；
+        只有 confirm_exit 才能清空持仓。trigger 的原 _pending 在此消费，
+        但 _exit_pending 会阻止后续 tick/bar 重发和提前重入。
+        """
+        if self._exit_pending is not None:
+            return True
+        if self.direction == 0 or not self.layers:
+            return False
+        if self._exit_s1_restore is not None:
+            self.s1_last = self._exit_s1_restore["s1_last"]
+            self._fs_armed = self._exit_s1_restore["fs_armed"]
+            self._exit_s1_restore = None
+        self._pending = None
+        self._exit_pending = {
+            "reason": str(reason), "price": float(price),
+            "direction": self.direction,
+            "lots": sum(l for l, _ in self.layers),
+        }
+        return True
+
+    def cancel_exit(self):
+        """目标提交失败时撤销未知态，继续管理原持仓（不代表已平仓）。"""
+        self._exit_pending = None
+        self._exit_s1_restore = None
+        self._pending = None
+        if self.entry_mode == "trigger" and self.direction != 0:
+            self._rearm()
+
     def confirm_enter(self, direction: int, lots: int, price: float,
                       n: float = None):
         """确认入场; n = 本层冻结 N (缺省回退最近评估 N)"""
@@ -314,18 +367,29 @@ class TurtleEngine:
     def confirm_exit(self, price: float):
         if self.direction == 0:
             self._pending = None
+            self._exit_pending = None
+            self._exit_s1_restore = None
             return
         # 实单结果 → S1 过滤器 (按手数加权均价判定输赢)。
         # close 模式已在 on_bar 决策阶段结清 → 此处幂等跳过;
         # trigger 模式无"同 bar 出场+入场"交错, 在此结清;
         # 层数据缺失(脏快照)时跳过滤镜判定, 只做状态复位。
         self._settle_s1_exit(price)
+        # close 同 bar [exit,skip] 会在决策阶段建立新 sim；清空旧仓时
+        # 不得误删该 sim 的 fail-safe。异步 begin_exit 已恢复旧实单，
+        # 此时 settle 后 taken=True，仍会按原逻辑清零。
+        preserve_sim_fs = bool(
+            self.s1_last and not self.s1_last.get("taken")
+            and self.s1_last.get("status") == "open")
         self.direction = 0
         self.layers = []
         self.layer_ns = []
         self._reset_levels()
-        self._fs_armed = 0
+        if not preserve_sim_fs:
+            self._fs_armed = 0
         self._pending = None
+        self._exit_pending = None
+        self._exit_s1_restore = None
         if self.entry_mode == "trigger":
             self._rearm()   # 空仓 → 重新武装入场位 (允许新穿越再入场)
 
@@ -382,8 +446,8 @@ class TurtleEngine:
 
         2026-09-17 CF 事故: 执行单元卡死后 34 手加仓从未到达柜台,
         引擎按 99 手管理风险而券商只有 65 手, 风控预算被虚占、止损
-        按未持仓手数计算。裁剪仅从**尾部**逐层丢弃 (先入场的底层
-        成交确认最充分), 剩余末层的止损/加仓锚按棘轮口径重建。
+        按未持仓手数计算。裁剪从尾部开始，整层可删、末层可部分缩量，
+        确保不因整层取整而越过 target。剩余末层按棘轮口径重建锚点。
 
         仅缩量: target >= 当前手数时不动。target=0 等价 flatten_book。
         不动 S1 过滤器记录 (真实持仓仍在, 输赢判定按剩余层加权)。
@@ -401,10 +465,19 @@ class TurtleEngine:
             return dropped
         dropped = 0
         while self.layers and cur > target:
-            l, _p = self.layers.pop()
-            self.layer_ns.pop()
-            cur -= l
-            dropped += l
+            need = cur - target
+            last_lots = self.layers[-1][0]
+            if last_lots <= need:
+                self.layers.pop()
+                self.layer_ns.pop()
+                cur -= last_lots
+                dropped += last_lots
+            else:
+                # 非层边界目标允许末层部分裁剪，不能为了整层方便而
+                # 多卖真实仓（如 99→66 应裁 33，而不是整层裁到 65）。
+                self.layers[-1][0] -= need
+                cur -= need
+                dropped += need
         self._reset_levels()        # 末层变化 → 锚重建 (ratchet 重新冻结)
         if self.entry_mode == "trigger":
             self._rearm()
@@ -627,22 +700,20 @@ class TurtleEngine:
                    channels: dict) -> list:
         """日线评估: 刷新 N/通道并武装次日触发价位。
 
-        触发位口径 (S4-1, 可配置): trigger_envelope=True (默认) 时
-        Donchian 通道(不含当根) 与当根 high/low 取包络 —— 注意当前
-        管线传入的 channels 窗口已含武装用 bar, 该包络实为恒等操作
-        (实证: 与 channel_only 逐位相同, 见 caliber_ab.json); 真正的
-        经典语义 ("次日挂突破前 N 日高点") 由 arm_exclude_signal=True
-        提供 (用 prev_* 通道, 完全排除信号 bar, A/B 显著更优)。
+        触发位口径：arm_exclude_signal=True 使用 current 通道（已排除
+        刚闭合信号 bar），且不再叠加 high/low 包络；否则使用 next_*
+        次日常规通道（最近 N 根，含刚闭合 bar）。旧调用方未提供 next_*
+        时回退 current，保持直测兼容。trigger_envelope 仅作用于非
+        arm_exclude 的旧包络模式，不能让“排除信号 bar”失效。
         """
         self._n = n
-        # 通道源: arm_exclude_signal → prev_* (突破前 N 日, 严格经典);
-        # 否则当根通道 (旧行为; envelope 包络在窗口已含信号 bar 时
-        # 恒等, 保留开关仅为口径显式)
-        p = "prev_" if self.arm_exclude_signal else ""
+        use_next = not self.arm_exclude_signal and \
+            channels.get("next_entry_upper") is not None
+        p = "next_" if use_next else ""
         eu, el = channels[p + 'entry_upper'], channels[p + 'entry_lower']
         xu, xl = channels[p + 'exit_upper'], channels[p + 'exit_lower']
         fu, fl = channels[p + 'fs_upper'], channels[p + 'fs_lower']
-        if self.trigger_envelope:
+        if self.trigger_envelope and not self.arm_exclude_signal:
             self._entry_ch = (max(eu, high), min(el, low))
             self._exit_ch = (max(xu, high), min(xl, low))
             self._fs_ch = (max(fu, high), min(fl, low))
@@ -650,6 +721,7 @@ class TurtleEngine:
             self._entry_ch = (eu, el)
             self._exit_ch = (xu, xl)
             self._fs_ch = (fu, fl)
+        self._disarmed.clear()       # 每个新评估日重新裁决一次过滤资格
         self._rearm()
         return [{"decision": DEC_ARM, "plan": dict(self._armed), "n": n}]
 
@@ -661,10 +733,11 @@ class TurtleEngine:
         if self.direction == 0:
             if self._n is None or self._entry_ch is None:
                 return
-            a["long"], a["short"] = self._entry_ch
-            if self._fs_armed > 0:
+            a["long"] = self._entry_ch[0] if 1 not in self._disarmed else None
+            a["short"] = self._entry_ch[1] if -1 not in self._disarmed else None
+            if self._fs_armed > 0 and 1 not in self._disarmed:
                 a["fs_long"] = self._fs_ch[0]
-            elif self._fs_armed < 0:
+            elif self._fs_armed < 0 and -1 not in self._disarmed:
                 a["fs_short"] = self._fs_ch[1]
         elif self.layers:
             # 持仓: 止损/加仓只需层数据 + 冻结 N (收养/对账重建后即使
@@ -691,6 +764,7 @@ class TurtleEngine:
         不刷新则 _cur_n() 返回 NaN, 止损判定静默失效。
         """
         if n is not None and n == n and n > 0:
+            self._prev_n = self._n
             self._n = float(n)
             # legacy 层 N 回填: 旧快照/升级前的层没有 layer_ns, 其止损会
             # 一直回退到"当根 N"(棘轮仍防放宽, 但与"逐层冻结"有偏差)。
@@ -707,7 +781,8 @@ class TurtleEngine:
                 self._rearm()
 
     def disarm_entry(self, sig_dir: int):
-        """解除某方向的入场武装 (含 fail-safe): 武装时被过滤器否决的方向"""
+        """解除某方向入场武装，并记住当日否决，防止 rearm/重启复活。"""
+        self._disarmed.add(1 if sig_dir > 0 else -1)
         if sig_dir > 0:
             self._armed["long"] = self._armed["fs_long"] = None
         else:
@@ -732,7 +807,8 @@ class TurtleEngine:
     def on_price(self, px: float) -> list:
         """实盘 tick 驱动: 价格穿越武装位即触发 (边沿语义由武装位本身保证:
         触发后该位即撤除/重武装, pending 期间静默)"""
-        if self.entry_mode != "trigger" or self._n is None:
+        if self.entry_mode != "trigger" or self._n is None \
+                or self._exit_pending is not None:
             return []
         self._advance_sim_price(px)
         if self._pending is not None:
@@ -742,14 +818,14 @@ class TurtleEngine:
         if d != 0:
             if a["stop"] is not None and \
                     (px <= a["stop"] if d > 0 else px >= a["stop"]):
-                return self._emit_exit("stop", a["stop"])
+                return self._emit_exit("stop", px)
             if a["exit"] is not None and \
                     (px <= a["exit"] if d > 0 else px >= a["exit"]):
-                return self._emit_exit("channel", a["exit"])
+                return self._emit_exit("channel", px)
             if a["add"] is not None and len(self.layers) < self.max_layers \
                     and (px >= a["add"] if d > 0 else px <= a["add"]):
                 self._pending = {"kind": "add", "dir": d}
-                return [{"decision": DEC_ADD, "price": a["add"],
+                return [{"decision": DEC_ADD, "price": px,
                          "n": self._n}]
             return []
         if a["long"] is not None and px >= a["long"]:
@@ -768,7 +844,8 @@ class TurtleEngine:
         持仓时按 止损→通道出场→加仓 顺序, 每次调用至多一个决策;
         同 bar 出场后不再评估入场 (路径未知, 防乐观偏差)。
         """
-        if self.entry_mode != "trigger" or self._n is None:
+        if self.entry_mode != "trigger" or self._n is None \
+                or self._exit_pending is not None:
             return []
         self._advance_sim_bar(o, h, l)
         if self._pending is not None:
@@ -889,6 +966,7 @@ class TurtleEngine:
         if p is None:
             return
         if p["kind"] == "enter":
+            self._disarmed.add(p["dir"])
             if p["dir"] > 0:
                 self._armed["long"] = self._armed["fs_long"] = None
             else:
@@ -897,7 +975,12 @@ class TurtleEngine:
             self._armed["add"] = None
 
     def _advance_sim_price(self, px: float):
-        """trigger 模式 sim 单盘中推进 (touch 口径, 与实单一致)"""
+        """trigger 模式 sim 单盘中推进 (touch 口径, 与实单一致)。
+
+        通道出场按实际触发价判定输赢，不能用理想通道位：跳空后真实
+        成交价可能远低于/高于通道，若仍按通道判断会把实际亏损 sim
+        误记为盈利，污染 S1 盈利跳过过滤器。
+        """
         last = self.s1_last
         if last is None or last.get("taken") or last["status"] != "open":
             return
@@ -911,7 +994,7 @@ class TurtleEngine:
                 closed = True
             elif self._exit_ch and px <= self._exit_ch[1]:
                 last["status"] = "closed"
-                last["result"] = "win" if self._exit_ch[1] > e else "loss"
+                last["result"] = "win" if px > e else "loss"
                 closed = True
         else:
             if px >= e + self.stop_mult * n0:
@@ -919,14 +1002,14 @@ class TurtleEngine:
                 closed = True
             elif self._exit_ch and px >= self._exit_ch[0]:
                 last["status"] = "closed"
-                last["result"] = "win" if self._exit_ch[0] < e else "loss"
+                last["result"] = "win" if px < e else "loss"
                 closed = True
         if closed:
             self._fs_armed = 0
             self._armed["fs_long"] = self._armed["fs_short"] = None
 
     def _advance_sim_bar(self, o: float, h: float, l: float):
-        """check_bar 版 sim 推进: 止损优先 (悲观), 再通道出场"""
+        """check_bar 版 sim 推进: 止损优先 (悲观), 再按真实跳空口径通道出场。"""
         last = self.s1_last
         if last is None or last.get("taken") or last["status"] != "open":
             return
@@ -934,22 +1017,24 @@ class TurtleEngine:
         d = last["direction"]
         e = last["entry_price"]
         closed = False
+        exit_px = None
         if d > 0:
             if l <= e - self.stop_mult * n0:
                 last["status"], last["result"] = "closed", "loss"
                 closed = True
             elif self._exit_ch and l <= self._exit_ch[1]:
-                last["status"] = "closed"
-                last["result"] = "win" if self._exit_ch[1] > e else "loss"
-                closed = True
+                # 与 check_bar 一致: 开盘已越过出场位按 open，否则按通道位。
+                exit_px = o if o <= self._exit_ch[1] else self._exit_ch[1]
         else:
             if h >= e + self.stop_mult * n0:
                 last["status"], last["result"] = "closed", "loss"
                 closed = True
             elif self._exit_ch and h >= self._exit_ch[0]:
-                last["status"] = "closed"
-                last["result"] = "win" if self._exit_ch[0] < e else "loss"
-                closed = True
+                exit_px = o if o >= self._exit_ch[0] else self._exit_ch[0]
+        if exit_px is not None:
+            last["status"] = "closed"
+            last["result"] = "win" if (exit_px - e) * d > 0 else "loss"
+            closed = True
         if closed:
             self._fs_armed = 0
             self._armed["fs_long"] = self._armed["fs_short"] = None
@@ -970,14 +1055,24 @@ class TurtleEngine:
             "fs_armed": self._fs_armed,
             # trigger 模式武装状态 (v4): 崩溃重启后立即恢复触发能力
             "armed": dict(self._armed),
+            "disarmed": sorted(self._disarmed),
             "pending": self._pending,
+            "exit_pending": self._exit_pending,
             "n": self._n,
+            "prev_n": self._prev_n,
             "entry_ch": self._entry_ch,
             "exit_ch": self._exit_ch,
             "fs_ch": self._fs_ch,
         }
 
     def restore(self, state: dict):
+        # system 决定 s1_last/sim/fail-safe 的解释。旧实现虽把 system
+        # 写入快照却从不校验，同名 S1→S2 会静默继承旧过滤与武装状态。
+        saved_system = state.get("system")
+        if saved_system is not None and saved_system != self.system:
+            raise ValueError(
+                f"引擎快照 system 不匹配: saved={saved_system} "
+                f"current={self.system}; 请显式迁移快照")
         self.direction = state.get("direction", 0)
         self.layers = [list(x) for x in state.get("layers", [])]
         # 旧快照无 layer_ns → 补 None (由 _layer_n 回退最近评估 N, 行为
@@ -996,8 +1091,12 @@ class TurtleEngine:
         if armed:
             for k in self._armed:
                 self._armed[k] = armed.get(k)
+        self._disarmed = set(state.get("disarmed") or [])
         self._pending = state.get("pending")
+        self._exit_pending = state.get("exit_pending")
+        self._exit_s1_restore = None
         self._n = state.get("n")
+        self._prev_n = state.get("prev_n", state.get("n"))
         self._entry_ch = state.get("entry_ch")
         self._exit_ch = state.get("exit_ch")
         self._fs_ch = state.get("fs_ch")

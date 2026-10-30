@@ -71,7 +71,7 @@ def test_persistent_mismatch_rebuilds_from_broker():
     assert stra._engine.direction == 1
     assert stra._engine.layers == [[64, 3460.0]]
     assert stra._risk.has_position("SHFE.rb.HOT")
-    assert stra._risk._book["SHFE.rb.HOT"]["lots"] == 64
+    assert stra._risk.entry("SHFE.rb.HOT", "S1")["lots"] == 64
     warn = [t for lv, t in ctx.logs if lv >= 3 and "RECONCILE" in t]
     assert len(warn) == 1
 

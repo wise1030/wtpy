@@ -226,6 +226,7 @@ def test_filter_exception_policy_allow_or_deny():
 
 def test_exit_executes_and_records_result():
     stra = _make_stra()
+    stra._is_backtest = True       # 回测即时成交；实盘等待见 exit_pending
     ctx = FakeCtx(pos=100, avgpx=3400.0)
     stra._engine.confirm_enter(1, 100, 3400.0)
     dec = {"decision": DEC_EXIT, "reason": "stop", "price": 3340.0}

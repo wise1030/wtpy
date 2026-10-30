@@ -155,7 +155,7 @@ def test_margin_scoped_per_strategy_planB():
     # > 15M×10%=150 万 → A 自身再加仓 margin cap=0 (自身额度用尽是正确行为)
     rm.on_rebuilt("CZCE.CF.HOT", -1, 159, 16047.45, 100.0, 5.0, 2.0,
                   sid="strat_A")
-    assert rm._book["CZCE.CF.HOT"]["sid"] == "strat_A"
+    assert rm.entry("CZCE.CF.HOT")["sid"] == "strat_A"
     lots, reasons = rm.cap_entry("CZCE.CF.HOT", lots=10, n=100, volscale=5,
                                  price=16000, stop_mult=2.0, equity=15e6,
                                  sid="strat_A")
@@ -173,7 +173,7 @@ def test_margin_scoped_per_strategy_planB():
     # sync_position 的 sid 透传
     rm.sync_position("SHFE.rb.HOT", -1, 2, 3072.0, 30.24, 10.0, 2.0,
                      risk=1209.6, sid="strat_B")
-    assert rm._book["SHFE.rb.HOT"]["sid"] == "strat_B"
+    assert rm.entry("SHFE.rb.HOT")["sid"] == "strat_B"
 
 
 def test_no_veto_when_within_budget():
@@ -228,10 +228,10 @@ def test_empty_group_skips_group_limit_but_respects_total():
 def test_on_filled_accumulates_and_closes():
     rm = RiskManager()
     rm.on_filled("X", 1, 100, 3400, n=30, volscale=10, stop_mult=2)
-    e = rm._book["X"]
+    e = rm.entry("X")
     assert e["lots"] == 100 and e["risk"] == 100 * 30 * 10 * 2
     rm.on_filled("X", 1, 60, 3500, n=32, volscale=10, stop_mult=2)
-    e = rm._book["X"]
+    e = rm.entry("X")
     assert e["lots"] == 160
     assert abs(e["price"] - (3400 * 100 + 3500 * 60) / 160) < 1e-9
     assert e["risk"] == 100 * 30 * 10 * 2 + 60 * 32 * 10 * 2
@@ -243,7 +243,7 @@ def test_on_filled_direction_flip_replaces_entry():
     rm = RiskManager()
     rm.on_filled("X", 1, 100, 3400, n=30, volscale=10, stop_mult=2)
     rm.on_filled("X", -1, 50, 3300, n=28, volscale=10, stop_mult=2)
-    e = rm._book["X"]
+    e = rm.entry("X")
     assert e["dir"] == -1 and e["lots"] == 50   # 反向视为新开替换
 
 
@@ -253,7 +253,7 @@ def test_per_market_cumulative_cap_blocks_adds():
                      max_risk_per_market=0.04)
     rm = RiskManager(cfg)
     rm.on_filled("A", 1, 300, 3400, n=50, volscale=10, stop_mult=2)
-    assert rm._book["A"]["risk"] == 300_000
+    assert rm.entry("A")["risk"] == 300_000
     lots, reasons = rm.cap_entry("A", lots=10, n=50, volscale=10,
                                  price=3400, stop_mult=2.0,
                                  equity=5_000_000)
@@ -273,7 +273,7 @@ def test_per_market_cumulative_allows_four_layers():
                                      equity=5_000_000)
         assert lots == 100, (i, reasons)
         rm.on_filled("A", 1, 100, 3400, n=50, volscale=10, stop_mult=2)
-    assert rm._book["A"]["risk"] == 400_000
+    assert rm.entry("A")["risk"] == 400_000
     lots, reasons = rm.cap_entry("A", lots=100, n=50, volscale=10,
                                  price=3400, stop_mult=2.0,
                                  equity=5_000_000)
@@ -285,7 +285,7 @@ def test_on_rebuilt_overwrites_book():
     rm = RiskManager()
     rm.on_filled("X", 1, 500, 3400, n=30, volscale=10, stop_mult=2)
     rm.on_rebuilt("X", 1, 120, 3410, n=29, volscale=10, stop_mult=2)
-    e = rm._book["X"]
+    e = rm.entry("X")
     assert e["lots"] == 120 and e["risk"] == 120 * 29 * 10 * 2
     rm.on_rebuilt("X", 0, 0, 0, n=29, volscale=10, stop_mult=2)
     assert not rm.has_position("X")
@@ -312,7 +312,7 @@ def test_units_count_is_not_code_count():
                                  price=1.0, stop_mult=1,
                                  equity=10_000_000)
     assert lots == 0
-    assert any("total_units(2>=2)" in r for r in reasons)
+    assert any("total_units(3>2)" in r for r in reasons)
 
 
 def test_group_units_count_units():
@@ -326,4 +326,108 @@ def test_group_units_count_units():
                                  price=1.0, stop_mult=1,
                                  equity=10_000_000, group="g")
     assert lots == 0
-    assert any("group_units(g=2>=2)" in r for r in reasons)
+    assert any("group_units(g=3>2)" in r for r in reasons)
+
+
+def test_new_market_units_capacity_is_checked_before_fill():
+    """已占 5/上限 6/新市场 units=2：不能放行后变成 7。"""
+    cfg = RiskConfig(max_units_total=6, max_units_per_group=0,
+                     max_total_risk_frac=1.0, max_margin_usage=1.0)
+    rm = RiskManager(cfg)
+    rm.on_filled("A", 1, 1, 1.0, n=1, volscale=1, stop_mult=1,
+                 units=5.0)
+    lots, reasons = rm.cap_entry("B", lots=1, n=1, volscale=1,
+                                 price=1.0, stop_mult=1,
+                                 equity=10_000_000, units=2.0)
+    assert lots == 0
+    assert any("total_units(7>6)" in r for r in reasons)
+    # 新市场 units=1 后投影恰好到上限，应允许
+    lots, reasons = rm.cap_entry("B", lots=1, n=1, volscale=1,
+                                 price=1.0, stop_mult=1,
+                                 equity=10_000_000, units=1.0)
+    assert lots == 1, reasons
+
+
+# ---------- 多 profile 分账 (S1+S2 / speeds) ----------
+
+def test_profile_cumulative_risk_uses_code_share_without_double_deduction():
+    """旧错配：profile B 用 0.5×code 累计预算扣全 code 已占风险。
+    新口径：本笔按 profile share，累计按 code_share=1 全额预算扣全 code。"""
+    cfg = RiskConfig(max_units_total=0, max_units_per_group=0,
+                     max_risk_per_mkt=0.02, max_risk_per_market=0.08,
+                     max_margin_usage=1.0)
+    rm = RiskManager(cfg)
+    # profile S1 已占 180k；code 全额累计预算 = 5M×8%=400k。
+    rm.on_rebuilt("A", 1, 180, 3400, 50, 10, 2,
+                  risk=180_000, profile="S1")
+    lots, reasons = rm.cap_entry(
+        "A", lots=50, n=50, volscale=10, price=3400, stop_mult=2.0,
+        equity=5_000_000, share=0.5, code_share=1.0, profile="S2")
+    # 本笔 cap=5M×0.5×2%/(50×10×2)=50；累计余量=(400k-180k)/1000=220。
+    assert lots == 50
+    assert not any("per_market_cum" in r for r in reasons)
+
+
+def test_profile_margin_consumes_own_share_without_first_profile_starving():
+    """保证金预算按本 profile share，扣本 profile 占用；份额合计仍等于
+    code 全额预算，避免首个 profile 挤占后续 profile。"""
+    cfg = RiskConfig(max_margin_usage=0.10, max_units_total=0,
+                     max_units_per_group=0, max_total_risk_frac=1.0)
+    rm = RiskManager(cfg)
+    # 单手保证金 = 4000×10×0.12=4800；S1 占 100 手=480k。
+    rm.on_rebuilt("X", 1, 100, 4000, 20, 10, 2, sid="sA",
+                  profile="S1")
+    lots, reasons = rm.cap_entry(
+        "X", lots=500, n=20, volscale=10, price=4000, stop_mult=2.0,
+        equity=15e6, share=0.5, code_share=1.0, sid="sA",
+        profile="S2")
+    # S2 只消费自己的 0.5 份额预算 750k，扣本 profile 占用 0；
+    # 两 profile 份额合计仍等于 code 全额预算，但 S1 不能把 S2 份额用掉。
+    assert lots == int(15e6 * 0.5 * 0.10 // 4800)
+    assert any(r.startswith("margin(") for r in reasons)
+    # 跨 sid 隔离仍生效：策略 sB 看不到 sA 的保证金占用。
+    lots2, _reasons2 = rm.cap_entry(
+        "X", lots=500, n=20, volscale=10, price=4000, stop_mult=2.0,
+        equity=15e6, sid="sB")
+    assert lots2 == int(15e6 * 0.10 // 4800)
+
+
+def test_profile_entries_do_not_mix_prices_or_risk():
+    rm = RiskManager()
+    rm.on_filled("X", 1, 100, 3400, n=30, volscale=10, stop_mult=2,
+                 profile="S1")
+    rm.on_filled("X", 1, 60, 3500, n=32, volscale=10, stop_mult=2,
+                 profile="S2")
+    e1, e2 = rm.entry("X", "S1"), rm.entry("X", "S2")
+    assert e1["price"] == 3400 and e1["risk"] == 100 * 30 * 10 * 2
+    assert e2["price"] == 3500 and e2["risk"] == 60 * 32 * 10 * 2
+    assert rm.open_risk() == e1["risk"] + e2["risk"]
+    # 同 profile 同向累加，不影响另一 profile。
+    rm.on_filled("X", 1, 40, 3600, n=33, volscale=10, stop_mult=2,
+                 profile="S1")
+    assert rm.entry("X", "S1")["lots"] == 140
+    assert rm.entry("X", "S2")["lots"] == 60
+
+
+def test_profile_close_is_scoped_and_units_count_code_once():
+    cfg = RiskConfig(max_units_total=1, max_units_per_group=0,
+                     max_total_risk_frac=1.0, max_margin_usage=1.0)
+    rm = RiskManager(cfg)
+    rm.on_filled("A", 1, 1, 1.0, n=1, volscale=1, stop_mult=1,
+                 units=1.0, profile="S1")
+    rm.on_filled("A", 1, 1, 1.0, n=1, volscale=1, stop_mult=1,
+                 units=1.0, profile="S2")
+    assert rm.open_units == 1.0                 # 同 code 多 profile 不双计
+    # 第二 profile 不算新市场，不触发单位容量前置检查。
+    lots, reasons = rm.cap_entry(
+        "A", lots=1, n=1, volscale=1, price=1.0, stop_mult=1.0,
+        equity=10e6, profile="S2")
+    assert lots == 1 and not any("total_units" in r for r in reasons)
+
+    rm.on_closed("A", profile="S1")
+    assert not rm.has_position_profile("A", "S1")
+    assert rm.has_position_profile("A", "S2")
+    assert rm.open_units == 1.0
+    # code 级出场语义（profile=None）清全部。
+    rm.on_closed("A")
+    assert not rm.has_position("A") and rm.open_units == 0

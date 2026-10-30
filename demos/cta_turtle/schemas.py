@@ -143,13 +143,13 @@ class TurtleBaseConfig:
     #   alert  = 只观测/告警 (默认)。券商持仓是**账户级、非策略级**,
     #            共享账户下同一合约可能含其他策略仓位, 无法归属 → 不得
     #            用它重建/收养我们自己的持仓 (实测 TA: 账户 112 vs 我们 64)
-    #   rebuild= 允许按真值对账重建/收养 (仅当本策略独占该账户时使用)
+    #   rebuild= 允许按真值对账重建/收养、账户净增量成交确认及
+    #            ghost 自动裁剪 (仅当本策略独占该账户时使用)。
+    #   alert 下不使用账户净增量证明本策略成交，也不按绝对净仓自动裁剪；
+    #   只接受本通道方向匹配的逐笔成交，异常转人工。
     truth_rebuild_mode: str = "alert"
-    # ghost_fill 自愈 (2026-09-17 CF 34 手幽灵仓事故):
-    #   真值源确认"订单未到柜台"后, 自动把信号层从尾部裁剪到与券商
-    #   实际持仓同向且不超过它的手数 (只缩量绝不放大, 对共享账户
-    #   安全: 只丢弃本策略未确认的层, 不按券商绝对值建仓)。
-    #   True=自动裁剪+告警; False=只告警 (旧行为, 人工处置)
+    # ghost_fill 自愈开关: True 仅在 rebuild/独占账户自动裁剪+告警；
+    # alert/共享账户即使 True 也只告警人工处置，防止误裁其他策略仓位。
     ghost_auto_trim: bool = True
     # 涨跌停锁死检测 (秒, 0=关闭): tick 价格钉住不动超过该时长且
     # 存在未闭合成交窗口时, 判定疑似锁死 → 告警并暂停该品种加仓
@@ -158,14 +158,13 @@ class TurtleBaseConfig:
     limit_lock_secs: int = 120
     # --- S4 信号口径 A/B (2026-10-24, 详见 docs/OPTIMIZATION_PLAN
     #     §S4 与 matrix_results/caliber_ab.json) ---
-    # S4-1: trigger 武装位包络 (True=含当根 high/low 包络, 默认旧行为;
-    #       False=纯突破前 N 日通道, 经典海龟语义)
+    # S4-1: 非 arm_exclude 时的旧包络开关。next_* 已含刚闭合 bar，
+    #       包络通常恒等；arm_exclude=True 时该开关被忽略，防止信号根
+    #       被重新加入（2026-10-26 语义修正）。
     trigger_envelope: bool = True
-    # S4-1b: trigger 武装位通道归属。True (2026-10-24 起默认, 用户
-    #        拍板启用) = 突破前 N 日通道, 严格经典, 排除信号 bar —
-    #        A/B +53.9pp/+0.124 Sharpe (caliber_ab.json, 约束/无约束
-    #        同向改善); False = 旧行为 (通道含信号 bar)。
-    #        注意: 翻默认已同步刷新黄金基线 (声明式口径变更)。
+    # S4-1b: True=使用 current 通道（已排除刚闭合信号 bar），并跳过
+    #        envelope；False=使用 next_* 次日常规通道（最近 N 根含闭合
+    #        bar）。生产与研究通过 next_* 字段统一窗口，不再错一根。
     arm_exclude_signal: bool = True
     # S4-2: close 模式同 bar 出场后允许再入场 (默认旧行为 True;
     #       trigger 模式结构性不允许, 本字段仅作用于 close)
@@ -182,15 +181,17 @@ class SpeedConfig:
     多速度设计 (Man AHL & 文献): 每档速度 = 一个独立子系统, 各自通道窗口,
     共享该品种的风险预算 (share 之和 = 1), 框架层净额化后一次下单。
     """
-    name: str                        # 唯一标识 (日志/快照键)
+    name: str                        # 唯一标识 (日志/快照键; 多档 YAML 必填)
     entry: int                       # 入场通道窗口
     exit: int                        # 出场通道窗口
     share: float = 1.0               # 该速度占品种风险预算的份额
-    fs: int = 55                     # fail-safe 通道 (S1 过滤器强制入场)
+    fs: int = 55                     # fail-safe 通道 (仅 S1 语义使用;
+                                     # YAML 缺省跟随 base.s2_entry,
+                                     # 直接 dataclass 实例化默认仍为 55)
     # 引擎语义 (2026-10-20): name 只作展示/快照键, 不再直接当
     # TurtleEngine.system 用 — 否则 speeds 取名 fast/slow 会触发
     # `assert system in ("S1","S2")`。system 决定 S1 过滤器/fail-safe
-    # 语义, 默认 S1 (与速度研究口径一致)。
+    # 语义；多档 YAML 必填，单档/dataclass 缺省仍为 S1。
     system: str = "S1"               # S1 | S2
 
 
@@ -199,14 +200,15 @@ class InstrumentConfig:
     """单品种配置"""
     code: str                        # e.g. SHFE.rb.HOT
     period: str = "d1"               # d1 | h1
-    system: str = SYSTEM_S1          # S1 | S2 | S1+S2 (双系统各半 units 并行)
+    system: str = SYSTEM_S1          # S1 | S2 | S1+S2 (双系统 ceil/floor units)
     units: int = 1                   # 期望交易单位数(每层 VaR = units × unit_var)
     direction: str = DIRECTION_BOTH  # both | long | short
     group: str = ""                  # 相关性组标签(如 black/cheme; 空=不参与组限)
     filters: list = field(default_factory=list)   # list[FilterConfig]
     intrabar_stop: bool = False      # 盘中止损 (主K切换为 base.intrabar_period)
     speeds: list = field(default_factory=list)   # list[SpeedConfig];
-                                     # 非空时忽略 system, 按速度列表装配子系统
+                                     # 非空时忽略 system, 按 core.profiles
+                                     # 展开；多档 YAML 必须显式 name/system
 
     def allows_direction(self, direction: int) -> bool:
         """direction: 1=多, -1=空"""

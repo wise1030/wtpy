@@ -35,6 +35,8 @@ StraTurtle (框架壳)           生命周期/图表/执行/持久化/对账/盘
 对账/mismatch）→ **C++ SimpleRiskMon**（账户级回撤熔断）。实盘 tick 驱动触发，
 状态随触发事件落快照，重启逐字节恢复；每日 20:40 hotdaily 重建 HOT 日线 DSB
 并重启交易进程（reader 缓存无失效 API），顺带重置执行单元 + 复活真值查询链。
+实盘单 profile 出场采用 `exit_pending`：目标仓 0 不等于成交 0，未获平仓证据前
+保留引擎/风险并禁止重入；快照覆盖重启，超时只告警不假确认。
 
 ## 策略逻辑
 
@@ -46,14 +48,16 @@ StraTurtle (框架壳)           生命周期/图表/执行/持久化/对账/盘
 | S1 过滤 | 上次 S1 突破盈利 → 跳过本次；被跳过则武装 fail-safe：价格继续突破 55 周期强制入场；被跳过的模拟单 2N 止损后过滤器解除（`enable_s1_filter` 可关闭） |
 | S2 | 55 周期突破入场 / 20 周期出场，无过滤 |
 | 双系统 | `system: "S1+S2"` 两子系统并行，各分 ceil/floor 半量 units，独立通道/引擎状态，框架净仓=两者之和，品种内风险/保证金预算按 units 占比切分 |
+| 信号 profiles | `system` 与 `speeds` 由 `core/profiles.py` 统一展开：S1/S2 是引擎入场语义，speeds 是窗口/语义/份额组合；多档 speeds 必须显式 `name/system`，legacy 双系统保留 ceil/floor（不机械转 50/50）。ATR、period、过滤链、执行与风控仍为品种级共享；快照携带 profile 身份与语义指纹，改名/改语义不做静默迁移 |
 | 加仓 | 每盈利 0.5N 加一层（可配 `pyramid_step_atr`），上限 `pyramid_layers`（1=不加仓），加仓后整体止损上移至最后加仓价 ∓ 2N；`stop_n_mode=ratchet` 时加仓位只在两次加仓之间单调向不利方向（防 N 缩小时价格未推进就加仓） |
 | 止损 | 2N 硬止损，bar 内 low/high 触碰判定，按止损价离场；`stop_n_mode` 控制 N 口径（默认 ratchet=只收紧不放宽，见「与经典海龟的偏离」）；`intrabar_stop: true` 时主K切换为分钟线（默认 m5）**盘中即时离场**；`entry_mode: trigger` 时止损/加仓/通道出场全部由 tick 武装位盘中触发 |
-| 触发执行 | `entry_mode: trigger`（方案C）：日评估仅武装价位（含当根包络通道），tick 穿越即触发；**过滤器于武装时（收盘）前置裁决，风控于触发时复核当前权益**；否决→当日撤武装防刷屏；实盘日线不闭合（F3）由 session_end 用当日 m5 聚合合成日K评估；回测走 check_bar 触碰仿真（跳空按开盘价/触碰按武装位，填充价=信号bar收盘，与 close 模式同填充模型——纯信号语义 A/B） |
+| 触发执行 | `entry_mode: trigger`：日评估仅武装价位。常规使用 `next_*` 最近 N 根（含刚闭合 bar）；`arm_exclude_signal=true` 使用已排除信号根的 current 通道并忽略 envelope。tick 穿越即触发；过滤器于武装时前置裁决，风控于触发时复核当前权益；实盘日线由 session_end 的 m5 聚合评估；回测走 check_bar 触碰仿真 |
 | 过滤链 | 引擎入场决策后、下单前依次判定：隐式方向闸(`direction`) + `filters:` 显式配置链，任一否决即放弃（不触碰引擎状态） |
-| 组合风控 | 下单前最后闸门（链式，逐项缩量）：本笔 2N 潜亏 ≤ equity×`max_risk_per_mkt`；**单品种累计**已占风险 ≤ equity×`max_risk_per_market`（4 层金字塔不再突破累计预算）；在途总潜亏 ≤ equity×`max_total_risk_frac`（**在途风险按"当前实际止损位"记账**，见下）；预估保证金占用 ≤ equity×`max_margin_usage`（**按策略 sid 分组**，他策略重仓不占本策略额度）；同组/全组合同时持仓品种数限制（按 `units` 累计）；**共享账户可用资金闸门**（`account_gate_mode` off/warn/veto，基数取交易通道真值源的券商口径 available）。归零才否决 |
+| 组合风控 | 下单前最后闸门（链式，逐项缩量）：本笔 2N 潜亏 ≤ equity×profile`share`×`max_risk_per_mkt`；**单品种累计**只扣本 profile 已占风险、预算按本 profile share 切分（多 profile share 合计=code 全额，4 层金字塔不再突破累计预算）；在途总潜亏 ≤ `portfolio_equity`×`max_total_risk_frac`（全局口径；**加仓按共同止损重锚后的 code 全 profile post-risk 预留**，见下）；预估保证金按本 profile share 预算/扣减（**跨策略仍按 sid 分组**，他策略重仓不占本策略额度）；同组/全组合同时持仓品种数限制（code 级 `units` 去重，多 profile 不双计）；**共享账户可用资金闸门**（`account_gate_mode` off/warn/veto，基数取交易通道真值源的券商口径 available）。归零才否决 |
 | 在途风险口径 | `RiskManager` 的在途敞口 = Σ (层价 − **当前武装止损位**) × 方向 × 手数 × 乘数（净额下限 0），即"全部持仓同时被止损打掉"的真实最坏亏损；早期用"每层 2N"口径会虚高数倍（实盘实测 52.7 万 vs 20.4 万）→ 组合预算被占满、加仓全被 `total_risk(cap=0)` 否决（2026-09-16 修复） |
 | 运行时对账 | 实际持仓与引擎层数据连续 `recon_patience` 根 bar 失配 → 告警并按实际持仓重建单层（防部分成交/手工干预脱管）；实际持仓优先取**交易通道真值源** `generated/traders/<id>/rtdata.json`（真值缺失时回退框架信号口径） |
-| 成交确认 | 分批窗口闭合判定优先真值源：真值仓未达目标 → 不回写且 `ghost_fill` 告警（执行单元卡死的直接证据）；真值缺失时用 fees 代理兜底并超时放行（`fill_timeout`）。回写价优先级：逐笔成交 `trades.csv`（每层按手数分配，双系统/连续加仓都精确）→ 净均价反推（仅单层未知时可解） |
+| 入场/加仓成交确认 | 独占账户（`rebuild`）可用账户净仓增量；共享 `alert` 不使用账户增量/绝对净仓做自动确认或裁仓，只接受本通道按品种+open+买卖方向匹配的逐笔成交。无真值环境才用 fees 降级；真值存在时不能用 fees 或超时假确认。回写价优先逐笔成交，净均价仅作单层兜底 |
+| 成交确认 | 实盘 enter/add/exit 全部先 write-ahead 持久化目标意图，再提交绝对目标；出场按 close 方向证据批次确认，enter/add 只在逐笔成交/独占账户真值证据到达后确认，框架目标账到位本身不构成成交证明。部分成交/卡死/超时保留引擎与风险账并封锁重入；跨零反向与多 profile 同批成交由**订单级归因链**确认（`core/OrderAttributor.py`：意图序 × 侧车 localid 订单事件 × trades.csv 兜底 → per-profile 精确 vwap，零 C++ 改动，见 docs/ORDER_ATTRIBUTION_NO_CPP.md）；无订单级证据时保持 UNKNOWN 封锁。回测保留即时成交假设；多 profile 组合 A/B 为负结果（dual_ab.json），生产维持单 profile S1 |
 
 ## VaR 仓位反算
 
@@ -100,6 +104,9 @@ python research/run_portfolio.py --config config/turtle_config.yaml --bt-dir out
 # 共享账本组合回测 (真正的组合约束; close/trigger 双模式)
 #   12 品种共用 RiskManager, 逐日执行单品种/累计/总敞口/保证金/单位上限
 #   默认 --capital 6000 万 = 12×500 万 (旧矩阵口径); 同时输出无约束对照
+#   支持单 profile 与 S1+S2/speeds 多 profile：每 profile 独立引擎/通道/
+#   开仓日期，共享 RiskManager 按 (code, profile) 分账；gross 风险/费用，
+#   broker 净额批末一次结算（summary 记 orders/book_mode/fee_mode）
 python research/run_portfolio_bt.py --config config/turtle_config.yaml \
     --capital 60000000 --start 20190101 --end 20260831 --slippage 1 \
     --priority strength
@@ -125,6 +132,12 @@ python research/run_caliber_ab.py
 python research/run_h1_mix.py --codes rb,IF --capital 60000000 \
     --start 20190101 --end 20260831 --entry-mode close --priority strength
 
+# 固定参数组合 OOS（训练/验证 + close/trigger + 0/1/2 tick 成本）
+python research/run_portfolio_oos.py --train-start 20190101 --train-end 20200101 \
+    --test-start 20210101 --test-end 20230101 --slippages 0,1,2 --tag phase2
+# 生产 webhook 自检（真实推送成功才返回 0）
+python3 scripts/notify_selftest.py
+
 # 滑点敏感性矩阵 (0/1/2/3 tick → outputs_bt/sens/sens_report.csv)
 python research/run_slippage_sens.py --code SHFE.rb.HOT --slippages 0,1,2,3
 
@@ -136,10 +149,14 @@ python research/run_walkforward.py --code SHFE.rb.HOT \
 python3 research/wf_report.py
 
 # 多速度结构研究 (7 档速度海龟信号的相关/混合/饱和曲线 → speed_study.json)
-#   口径: 日PnL=决策前层数×Δclose(含金字塔层数, 2026-10-20 修复);
-#   json 自带 meta.caliber —— 2026-09-16 旧文件为固定 1 单位口径
-#   (total_R/夏普被低估), 跨版本对比前先核对 meta
-python3 research/run_speed_study.py
+#   口径: 日PnL=决策前方向×层数×(估值价-prev_close)，出场 bar 用实际
+#   出场决策价(open/stop/close)，不计止损后的无持仓时段；
+#   默认全部窗口为 S1 语义，55/20 ≠ 生产 S2；--system S2 才做 S2 对照
+#   blend 仅风险归一化日PnL平均，不含 net router/整数手/共享风控；
+#   json 自带完整 meta，跨版本对比前先核对 entry_system/caliber
+python3 research/run_speed_study.py --system S1
+# S2 对照请使用独立产出，避免覆盖 S1 研究基线
+python3 research/run_speed_study.py --system S2 --out speed_study_S2.json
 
 # TqSdk 数据获取 (需 pip install tqsdk + 快期账户, 凭据走 TQ_USER/TQ_PASS)
 python3 scripts/fetch_data_tqsdk.py --periods day min5 --start 20200101
@@ -243,7 +260,10 @@ WT 数据底盘只从 tick 合成 min1/min5/day、**不写 h1**，且 his DSB �
   增量 feed）；live 部署前需在生产环境验证 rt m5 的 date/time 口径与 bt DSB
   一致（夜盘日历日假设，见 `core/aggregate.py` docstring）
 
-## 组合回测成绩（共享账本，当前口径）
+## 组合回测成绩（共享账本，历史口径）
+
+> 下表是 2026-10-26 语义修正前的历史留档。通道、事件估值、post-risk、
+> 费用与换月覆盖已变化，不能直接视为当前结果；请以带 manifest 的新运行为准。
 
 `run_portfolio_bt.py` 让 12 品种共用**一个** `RiskManager`/账本逐日推进，
 新开仓/加仓前真正执行单品种本笔、单品种累计、总敞口、保证金、单位上限
@@ -278,14 +298,12 @@ WT 数据底盘只从 tick 合成 min1/min5/day、**不写 h1**，且 his DSB �
    该口径使 close 组合基线诚实下降 11.8pp（旧口径 +88.9% → 诚实 +77.1%，
    见 matrix_results/caliber_ab.json）——"close 诚实地差于 trigger"的量化。
    实盘 StraTurtle 评估路径已传 open 生效；`base.gap_stop: false` 可回退。
-0.6. **trigger 武装位通道归属**（S4-1/S4-1b，2026-10-24）：`trigger_envelope`
-   在当前管线是**恒等操作**——传入通道窗口已含武装用 bar，max(通道,
-   当根极值) 数学上等于通道（A/B 逐位相同已实证）；严格经典语义由
-   `arm_exclude_signal`（**默认 True，已启用**）提供：武装位=突破前 N 日
-   通道，排除信号 bar。组合 A/B **+53.9pp 收益 / +0.124 Sharpe**（约束与
-   无约束同向改善）；黄金基线已按新口径刷新（rb 5M 单品种口径 35.58%→
-   33.37%/Sharpe 0.258→0.239——单品种略降但组合截面显著改善，rb 单品种
-   成绩不再代表组合口径）。
+0.6. **trigger 武装位通道归属（2026-10-26 语义修正）**：旧实现把
+   `prev_*` 与当根 high/low 再包络，既重新加入信号根，又让生产与研究
+   错一根。现 `arm_exclude_signal=true` 使用已排除信号根的 current
+   通道并忽略 envelope；false 使用 `next_*` 最近 N 根通道。旧“严格经典
+   +139.94%”不再作为决策证据。rb 黄金回归从 33.37% 变为 21.85%，
+   作为声明式口径变更保留差异，未擅自刷新历史基线。
 
 0. **主力连续日线需每日续接**（`scripts/update_hot_daily.py`，2026-09-16 实盘故障）：
    数据底盘（WtDt）每日只写**真实合约**日线（`his/day/<EXCHG>/<contract>.dsb`），
@@ -334,25 +352,20 @@ WT 数据底盘只从 tick 合成 min1/min5/day、**不写 h1**，且 his DSB �
    只写信号（`CtaStraBaseCtx.cpp:1354` → `append_signal`），下一个 tick 由 `on_tick`
    消费信号并直接改写策略持仓簿与累计手续费（`:811` → `do_set_position`，费用累加 `:1469`），
    与券商成交回报无关，故"执行单元卡死但信号仓已达标"的幽灵仓在框架层不可见。
-   现按交易通道落盘的 `generated/traders/<tdtraders.id>/rtdata.json`（真实持仓+账户资金，
-   每根K线收盘与每笔成交后刷新）做对账/成交确认：真值仓未达目标 → 不回写 avgpx 且
-   `ghost_fill` 告警；真值缺失时回退 fees 代理（并超时放行，避免免费品种永久阻塞回写）。
-   回测环境无该文件 → 自动降级为原行为。**用途分档（`truth_rebuild_mode`）**：
-   `alert`（默认）= 只观测告警（券商持仓是账户级、非策略级，共享账户下同一
-   合约含其他策略仓位无法归属 — 实测 CZCE.TA 账户 112 vs 本策略 64），
-   `rebuild` = 允许按真值重建/收养（仅独占账户）；成交确认两种模式都用
-   **下单窗口内账户持仓增量 == 本层手数**判定（对共享账户免疫）。
-   **记账价回写同样优先逐笔成交**
-   （`generated/traders/<id>/trades.csv`）：按确认顺序分配成交手数，
-   每层各自取真实成交均价（净均价方程在多层待回写时欠定，逐笔成交不依赖
-   它）。配套：`account_gate_mode`
+   真值文件为 `generated/traders/<tdtraders.id>/rtdata.json`（账户级持仓+资金），
+   本通道逐笔成交为同目录 `trades.csv`。**用途分档（`truth_rebuild_mode`）**：
+   `rebuild` 仅用于独占账户，允许真值重建、账户净增量确认及 ghost 自动裁剪；
+   默认 `alert` 用于共享/未知归属账户，不用账户增量或绝对净仓做本策略自动确认/
+   裁仓，只接受按品种+open/close+买卖方向匹配的通道逐笔成交。`CNL/CNS` 是平今
+   真实成交而非撤单。无真值环境才允许 fees/超时降级；真值存在时绝不以 fees
+   或墙钟超时假确认。回测在初始化即禁用实盘真值。配套：`account_gate_mode`
    （共享账户可用资金闸门，见组合风控行）与 `WT_EXEC_RECOVER=restart`
    （执行单元卡死的 opt-in 自愈重启，诊断路径见 `docs/DATA_OPS.md` §9）。
 
 ## 测试
 
 ```bash
-python3 -m pytest tests/ -q    # 484 passed (48 个测试文件)
+python3 -m pytest tests/ -q    # 587 passed (59 个测试文件)
 ruff check . --config ruff_cta_turtle.toml    # lint
 ```
 
@@ -374,14 +387,21 @@ avgpx 符号、on_calculate 全链路、**N 口径**（冻结/当根/棘轮单�
 **账户资金闸门**（warn/veto/off、安全垫、无真值降级）、**同 bar 出场结清
 S1 过滤器**（两段式第一阶段）、**双系统 re-anchor/账本口径**（两子系统同持、
 反向并存、层冻结 N 汇总）、`--weights` 解析校验（fail-fast 防组合静默清零）、
-执行单元卡死自愈（重启模式的一天一次闸门）、**逐笔成交记账价**（解析/撤单剔除/
-游标增量/手数分配/同码双笔）、**否决日志逐 key 冷却**（累计次数）、
+执行单元卡死自愈（重启模式的一天一次闸门）、**逐笔成交记账价**（open/close+
+买卖方向匹配、平今 CNL/CNS、游标增量/手数分配/同码双笔）、**实盘 exit_pending**
+（未成交不清风险/不重复出场/不重入、部分成交、超时只告警、快照恢复）、
+**共享账户安全**（alert 不用账户增量确认、不自动 ghost trim）、
+**数据/预检 fail-closed**（无有效主力不写盘、日更失败退出码、strict 异常阻断）、
+**否决日志逐 key 冷却**（累计次数）、
 journal turnover 旁路、`--weights` 之外的矩阵串行模式提醒、**陈旧真值闸门**
 （过期 rtdata.json 不得触发对账重建/资金闸门；实测污染回测基线 335%→76%）、
 **trigger 组合回测**（m5 触碰成交/当仓平今费率/武装时方向闸撤武装/
 无 m5 退化 d1 触碰）、**执行层订单状态机与归因**（生命周期跃迁/at-least-once
 去重/订单缺失 stub 兜底/买卖方向滑点符号/时间窗与方向不匹配）、
-**h1 显式拒绝**、平今费率区分（closetoday/close 回退）。
+**h1 m5 聚合/夜盘映射/评估锚点**、平今费率区分（closetoday/close 回退）。
+**第二阶段**：next/current 通道归属、disarm 持久化、事件估值无未来函数、
+根前 N、tick 跳空实际价、post-risk、组合权益、逐层今昨仓费用、换月日历、
+共同窗口/日期对齐、输入 manifest 与异口径聚合拒绝。
 
 回测工具链可靠性：`run_matrix` 子进程失败即 SystemExit；`run_walkforward` /
 `run_slippage_sens` 先删旧 summary 再跑并检查 rc；`WtBtAnalyst` 失败时
@@ -399,6 +419,9 @@ journal turnover 旁路、`--weights` 之外的矩阵串行模式提醒、**陈�
 | `docs/DEPLOY.md` | 生产部署手册 (WatchDog + WtMonSvr 双进程拓扑) |
 | `docs/STRATEGY_REVIEW_2026-10-20.md` | 策略/工程复核报告 (§9-10 为落地对账) |
 | `docs/OPTIMIZATION_PLAN_2026-10-22.md` | 优化方案 (资金分配/拆分/执行层/过滤器 A/B) |
+| `docs/IMPLEMENTATION_P0_2026-10-26.md` | P0 第一批实施记录（出场证据/共享账户/数据与预检 fail-closed） |
+| `docs/IMPLEMENTATION_PHASE2_2026-10-26.md` | 第二阶段实施记录（通道/时序/组合资金/研究复现） |
+| `docs/IMPLEMENTATION_PHASE3_2026-10-26.md` | 第三阶段实施记录（多 profile/换月连续性/OOS 与告警自检） |
 
 ## 文件结构
 
@@ -406,8 +429,9 @@ journal turnover 旁路、`--weights` 之外的矩阵串行模式提醒、**陈�
 StraTurtle.py            # 策略壳: 生命周期/图表/装配/持久化/对账 (1742 行,
                          #   执行链路已迁出, 见 execution/)
 execution/               # 执行层 (A1 拆分, 2026-10-22; 薄转发保接口兼容)
+  batch.py               # TargetIntent：事件级净目标/净变化与跨零口径
   router.py              # 门控链+单/双系统执行路由+武装裁决
-  fill_tracker.py        # 成交确认证据链/均价回写/幽灵trim/执行单元自愈
+  fill_tracker.py        # enter/add/exit 成交证据链/exit_pending/均价回写/幽灵处理
   truth_monitor.py       # 真值源/运行时对账/共享账户资金闸
   telemetry.py           # 告警落盘/否决日志冷却/fund_live/journal 旁路
   paths.py               # 组合根目录常量
@@ -427,6 +451,7 @@ core/
   DataChecker.py         # 数据可用性预检 (零崩溃降级)
   portfolio.py           # 组合权益合成/指标/贡献分解 (纯函数)
   ConfigLoader.py        # yaml 加载校验 (base/risk/instruments+filters, 未知键拒绝)
+  profiles.py            # system/speeds → ProfileSpec 唯一解析 + 暖机/快照校验
   CsvDataLoader.py       # csv 数据源加载 (当日分区过滤, DSB 绕行方案之一)
   aggregate.py           # m5→h1 聚合 (起始钟点桶+夜盘日历映射, bt/live 同源)
 schemas.py               # 配置 dataclass (唯一权威定义)
@@ -437,6 +462,7 @@ runMonSvr.py             # 监控服务 (WtMonSvr + 内置 WatchDog, token 鉴�
 research/                # 研究/回测分析工具 (独立可执行, 不入生产路径)
   run_portfolio.py       # 组合约束回放 (基于 trades/funds 的事后诊断)
   run_portfolio_bt.py    # 共享账本组合回测 (close/trigger 双模式, 真组合约束)
+  run_portfolio_oos.py   # 固定参数组合 OOS/成本/容量验证与 manifest
   run_walkforward.py     # 滚动窗网格寻优 (wf_results/ + wf_grid.csv)
   run_slippage_sens.py   # 滑点敏感性矩阵 (outputs_bt/sens/)
   run_speed_study.py     # 多速度结构研究 (7 档速度, 含层数口径日PnL)
@@ -456,11 +482,12 @@ scripts/
   convert_csv_to_dsb.py  # csv → DSB (当日分区过滤, WtDataLoader 绕行方案之一)
   pick_hot_sina.py       # 主力判定纯逻辑 (update_hots 复用)
   timer_notify.py        # 定时器失败告警共享 helper
+  notify_selftest.py     # 生产 webhook 自检（真实成功才返回 0）
   exec_journal.py        # 订单/成交事件旁路侧车 (TRD_ORDER/TRADE → JSONL)
   init_monitor_db.py     # 监控库初始化 (双进程调度)
   ctp_loader/            # CTPLoader 配置 (map_future.ini session 覆盖)
 deploy_tpl/              # 生产部署模板 (run.py/runDt.py/dtcfg/解析器/systemd units)
 configbt.yaml            # 回测引擎配置
 config.yaml + tdparsers/tdtraders/executers/actpolicy/filters/logcfg  # 实盘模板
-tests/                   # 48 个测试文件 / 484 例
+tests/                   # 59 个测试文件 / 587 例
 ```

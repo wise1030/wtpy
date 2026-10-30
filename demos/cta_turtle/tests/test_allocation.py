@@ -8,7 +8,8 @@ import dataclasses
 import pytest
 
 from conftest import *  # noqa: F401,F403
-from core.ConfigLoader import ConfigLoader, allocated_capital
+from core.ConfigLoader import (ConfigLoader, allocated_capital,
+                               register_allocated_capital)
 from core.RiskManager import RiskManager
 from schemas import RiskConfig
 from StraTurtle import StraTurtle
@@ -108,3 +109,40 @@ class TestSidCapitalSharedBook:
         rm.set_sid_capital("stra_a", 1_000_000)
         assert rm.equity(Ctx(), sid="stra_a") == pytest.approx(1_100_000)
         assert rm.equity(Ctx()) == pytest.approx(15_100_000)
+
+
+def test_shared_helper_registers_same_allocation_for_live_and_deploy(tmp_path):
+    cfg, _ = _load(tmp_path, 12_000_000)
+    rm = RiskManager(cfg.risk)
+    out = register_allocated_capital(rm, cfg)
+    assert out["SHFE.rb.HOT"][1] == pytest.approx(6_000_000)
+    assert out["DCE.m.HOT"][1] == pytest.approx(6_000_000)
+    assert rm.capital_base("turtle_SHFE_rb_HOT") == pytest.approx(6_000_000)
+    assert rm.capital_base("turtle_DCE_m_HOT") == pytest.approx(6_000_000)
+
+
+def test_total_risk_uses_portfolio_not_caller_allocated_equity():
+    class Ctx:
+        def stra_get_fund_data(self, _flag):
+            return 0.0
+
+    cfg = RiskConfig(
+        fallback_capital=15_000_000, portfolio_capital=10_000_000,
+        max_risk_per_mkt=1.0, max_risk_per_market=1.0,
+        max_total_risk_frac=0.10, max_margin_usage=1.0,
+        max_units_total=0, max_units_per_group=0)
+    rm = RiskManager(cfg)
+    rm.set_sid_capital("A", 1_000_000)
+    rm.set_sid_capital("B", 1_000_000)
+    rm.register_sid_context("A", Ctx())
+    rm.register_sid_context("B", Ctx())
+    rm.on_filled("A", 1, 1, 100.0, n=45_000.0, volscale=1.0,
+                 stop_mult=2.0, sid="A")                # used=90k
+    assert rm.portfolio_equity() == pytest.approx(10_000_000)
+    assert rm.equity(Ctx(), sid="B") == pytest.approx(1_000_000)
+    lots, _ = rm.cap_entry(
+        "B", lots=5000, n=100.0, volscale=1.0, price=100.0,
+        stop_mult=2.0, equity=rm.equity(Ctx(), sid="B"), sid="B",
+        portfolio_equity=rm.portfolio_equity())
+    # 组合预算=1M，余 910k/200=4550；旧口径用 B 的 1M 仅给 50。
+    assert lots == 4550

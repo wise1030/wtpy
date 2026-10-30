@@ -19,6 +19,8 @@
 - 进程内多品种共享同一 RiskManager 实例即可协同 (runLive 装配);
   单品种回测每进程私有实例, 行为等价。
 """
+import math
+
 from schemas import RiskConfig
 
 
@@ -26,11 +28,16 @@ class RiskManager:
     def __init__(self, cfg: RiskConfig = None):
         self.cfg = cfg or RiskConfig()
         self.cfg.validate()
-        # code -> {"dir","lots","price","n","volscale","stop_mult",
-        #          "group","risk"}  risk=该笔 2N 潜亏记账
+        # (code, profile) -> {"dir","lots","price","n","volscale",
+        #                     "stop_mult","group","risk","sid","units"}
+        # profile="" 为缺省单 profile 口径，与旧行为完全等价。
         self._book = {}
+        # code -> {"units","group"}：单位数/相关性组是 code 级属性，
+        # 多 profile 同 code 只计一次，避免 open_units 双计。
+        self._code_meta = {}
         self.last_equity_source = ""   # 观测用: dynamic|fallback
         self._sid_capital = {}   # sid → 分配资金基数 (S1 资金分配)
+        self._sid_contexts = {}  # sid → 策略上下文（组合净盈亏汇总）
 
     # ------------------------------------------------------------------
     # 权益
@@ -48,6 +55,28 @@ class RiskManager:
 
     def capital_base(self, sid: str = None) -> float:
         return self._sid_capital.get(sid, float(self.cfg.fallback_capital))
+
+    def register_sid_context(self, sid: str, context):
+        """登记策略上下文，供分配模式汇总组合净盈亏（on_init 调用）。"""
+        self._sid_contexts[sid] = context
+
+    def portfolio_equity(self, context=None, sid: str = None) -> float:
+        """组合总权益：分配开启时用总池+全部 sid 净盈亏。
+
+        未开启 portfolio_capital 时保留旧的调用方 equity 口径，避免改变
+        既有单资金池行为。分配模式下该值与发起策略 sid 无关。
+        """
+        if self.cfg.portfolio_capital <= 0:
+            return self.equity(context, sid=sid)
+        pnl = 0.0
+        for ctx in self._sid_contexts.values():
+            try:
+                fd = ctx.stra_get_fund_data(0)
+            except Exception:
+                continue
+            if isinstance(fd, (int, float)) and math.isfinite(fd):
+                pnl += float(fd)
+        return float(self.cfg.portfolio_capital) + pnl
 
     def equity(self, context, sid: str = None) -> float:
         """动态权益 = 基准资金 + 净盈亏; 接口不可用时退回基准资金。
@@ -79,15 +108,25 @@ class RiskManager:
     def cap_entry(self, code: str, *, lots: int, n: float, volscale: float,
                   price: float, stop_mult: float, equity: float,
                   group: str = "", share: float = 1.0,
-                  avail: float = None, sid: str = "") -> tuple:
+                  code_share: float = None, avail: float = None,
+                  sid: str = "", units: float = 1.0,
+                  profile: str = "",
+                  post_risk_base: float = None,
+                  post_profile_risk_base: float = None,
+                  post_risk_per_lot: float = None,
+                  portfolio_equity: float = None) -> tuple:
         """对本次入场/加仓手数做缩量或否决。
 
         Args:
-            share: 该笔请求占用的品种内预算份额 (S1+S2 双系统按
-                子系统 units 占比传入, 合计=1.0; 单系统=1.0)。
-                仅缩放"单品种风险预算"与"保证金预算"的权益基数,
-                使双系统公平共享品种额度而不互相挤占;
-                组合总敞口仍为全局口径。
+            share: 该 profile 请求占用的**本笔风险预算**份额 (S1+S2/
+                speeds 按 ProfileSpec.share 传入; 单 profile=1.0)。
+            code_share: 该 code 全部 profile 合计占用的品种预算份额
+                (缺省=share，保持旧单 profile 行为)。份额预算的语义是
+                "每个 profile 消费自己的份额、扣减本 profile 占用"；
+                各 profile share 合计=code_share，因此合计不会突破 code
+                全额预算，且首个 profile 不能挤占后续 profile 份额。
+            profile: 账本分档键；出场/重建可按子系统精确清除。缺省
+                "" 与旧单 profile 行为完全等价。
             sid: 发起策略标识 (方案B)。保证金扣减只计本策略自身持仓
                 (账本按 sid 分组), 其他策略的保证金占用不影响本策略的
                 保证金预算; 组合总敞口/单位限制仍为全局口径不变。
@@ -97,6 +136,16 @@ class RiskManager:
                  与第 3 项的区别: 第 3 项用本策略记账估算保证金, 本项
                  用券商真实可用资金 (已含其他策略占用), 是"资金耗尽"
                  事故 (2026-09-09 p 追单 3357 次被拒) 的防线。
+            units: 新开该市场后将计入账本的名义单位数。单位闸按
+                open_units + units 做容量前置检查，避免旧实现只查
+                open_units >= max，导致已占 5/上限 6/新单位 2 仍放行到 7。
+            post_risk_base: 加仓共同止损重锚后、尚未计新层时的该 code
+                全 profile 风险；用于组合总敞口替换。缺省沿用旧风险。
+            post_profile_risk_base: 同上，但仅当前 profile 的风险；用于
+                本 profile 累计预算。缺省用当前 profile 的旧风险。
+            post_risk_per_lot: 新层每手风险，需与 post_risk_base 同时提供。
+            portfolio_equity: 组合总权益，仅用于总风险预算；缺省沿用
+                equity，兼容单资金池。分配模式下必须显式传入统一组合值。
 
         Returns:
             (final_lots: int, reasons: list[str])
@@ -107,41 +156,72 @@ class RiskManager:
         if lots <= 0 or n <= 0 or volscale <= 0 or price <= 0 \
                 or stop_mult <= 0 or equity <= 0 or not 0 < share <= 1.0:
             return 0, ["invalid_input"]
+        if (post_risk_base is None) != (post_risk_per_lot is None):
+            return 0, ["invalid_post_risk"]
+        if post_risk_base is not None and (
+                not math.isfinite(post_risk_base) or post_risk_base < 0
+                or not math.isfinite(post_risk_per_lot)
+                or post_risk_per_lot <= 0):
+            return 0, ["invalid_post_risk"]
+        if portfolio_equity is not None and (
+                not math.isfinite(portfolio_equity) or portfolio_equity <= 0):
+            return 0, ["invalid_portfolio_equity"]
 
         rpl = n * volscale * stop_mult           # 单手 2N 潜亏
-        new_unit = code not in self._book
+        # code_share 缺省回退 share：单 profile 公式与旧实现逐字等价。
+        cs = share if code_share is None else float(code_share)
+        if not 0 < cs <= 1.0:
+            return 0, ["invalid_code_share"]
+        new_unit = code not in self._code_meta
 
-        # 1. 单品种风险预算 (按份额缩放)
-        #    1a. 本笔上限 (max_risk_per_mkt)
-        #    1b. 品种累计上限 (max_risk_per_market) — 扣该 code 已占风险。
-        #        旧实现只有 1a, 4 层各 2% 可做到 8%, 与"单品种 2%"的
-        #        命名/直觉不符 (2026-10-20 复核)。
+        # 1. 单品种风险预算
+        #    1a. 本笔上限按 profile share；
+        #    1b. 品种累计上限同样只消费本 profile 的 share 份额，并只扣
+        #        本 profile 已占风险。各 profile share 合计=code_share，
+        #        因此总体仍受 code 全额预算约束，但首个 profile 不能挤占
+        #        后续 profile 的份额。
         order_cap = int(equity * share * self.cfg.max_risk_per_mkt // rpl)
-        used_mkt = float(self._book.get(code, {}).get("risk", 0.0))
+        profile_key = (code, str(profile))
+        old_profile_risk = float(self._book.get(profile_key, {})
+                                 .get("risk", 0.0))
+        profile_used = old_profile_risk if post_profile_risk_base is None \
+            else max(0.0, float(post_profile_risk_base))
+        remaining_rpl = rpl if post_risk_per_lot is None \
+            else float(post_risk_per_lot)
         cum_cap = int(max(
             0.0,
-            equity * share * self.cfg.max_risk_per_market - used_mkt) // rpl)
+            equity * share * self.cfg.max_risk_per_market - profile_used)
+            // remaining_rpl)
         mkt_cap = min(order_cap, cum_cap)
 
-        # 2. 组合总敞口预算 (存量记账 + 本次按申请量计)
+        # 2. 组合总敞口预算 (全局口径不变)。加仓提供 code 全 profile
+        # 的 post_risk_base 时，用重锚后的 code 风险替换旧值。
+        old_code_risk = self.code_risk(code)
+        code_used = old_code_risk if post_risk_base is None \
+            else max(0.0, float(post_risk_base))
         used = sum(e["risk"] for e in self._book.values())
-        tot_cap = int(max(0.0, equity * self.cfg.max_total_risk_frac - used)
-                      // rpl)
+        if post_risk_base is not None:
+            used = used - old_code_risk + code_used
+        total_equity = equity if portfolio_equity is None else portfolio_equity
+        tot_cap = int(max(
+            0.0, total_equity * self.cfg.max_total_risk_frac - used)
+            // remaining_rpl)
 
-        # 3. 保证金占用预估 (预算基数按份额缩放; 扣减按策略 sid 收窄)
+        # 3. 保证金占用预估：预算按本 profile share，扣减本 profile 本
+        # sid 持仓。份额预算之和=code 全额预算，避免首 profile 挤占。
         per_lot_margin = price * volscale * self.cfg.margin_rate
         cur_margin = sum(e["lots"] * e["price"] * e["volscale"]
                          * self.cfg.margin_rate
-                         for e in self._book.values()
-                         if e.get("sid", "") == sid)
+                         for k, e in self._book.items()
+                         if k == profile_key and e.get("sid", "") == sid)
         mar_cap = int(max(0.0, equity * share * self.cfg.max_margin_usage
-                          - cur_margin * share) // per_lot_margin)
+                          - cur_margin) // per_lot_margin)
 
         final = min(lots, mkt_cap, tot_cap, mar_cap)
         if mkt_cap < lots:
             if cum_cap < order_cap:
                 reasons.append(
-                    f"per_market_cum(cap={cum_cap},used={used_mkt:.0f})")
+                    f"per_market_cum(cap={cum_cap},used={profile_used:.0f})")
             else:
                 reasons.append(f"per_market_risk(cap={mkt_cap})")
         if tot_cap < lots:
@@ -162,20 +242,23 @@ class RiskManager:
                 if self.cfg.account_gate_mode == "veto":
                     final = max(0, affordable)
 
-        # 4. 市场单位限制 (只约束新开仓)
+        # 4. 市场单位限制 (只约束新开仓)：按**加入后的投影单位数**
+        # 前置检查，而不是只看当前是否已满。units=2 的新市场在
+        # 已占 5/上限 6 时也必须否决，不能放行后到 7。
         if new_unit and lots > 0:
             grp = group or ""
-            total_units = self.open_units
-            grp_units = self.units_in_group(grp)
+            market_units = max(0.0, float(units))
+            total_units = self.open_units + market_units
+            grp_units = self.units_in_group(grp) + market_units
             grp_veto = None
             if grp and self.cfg.max_units_per_group > 0 \
-                    and grp_units >= self.cfg.max_units_per_group:
+                    and grp_units > self.cfg.max_units_per_group:
                 grp_veto = (f"group_units({grp}={grp_units:g}"
-                            f">={self.cfg.max_units_per_group})")
+                            f">{self.cfg.max_units_per_group})")
             elif self.cfg.max_units_total > 0 \
-                    and total_units >= self.cfg.max_units_total:
+                    and total_units > self.cfg.max_units_total:
                 grp_veto = (f"total_units({total_units:g}"
-                            f">={self.cfg.max_units_total})")
+                            f">{self.cfg.max_units_total})")
             if grp_veto:
                 return 0, reasons + [grp_veto]
 
@@ -189,16 +272,18 @@ class RiskManager:
     def on_filled(self, code: str, direction: int, lots_added: int,
                   price: float, n: float, volscale: float,
                   stop_mult: float, group: str = "", sid: str = "",
-                  units: float = 1.0):
-        """成交记账; units = 该市场占用的经典海龟单位数 (2026-10-20)。
+                  units: float = 1.0, profile: str = ""):
+        """成交记账；profile 分档，避免多子系统价格/风险互染。
 
-        旧实现 `open_units` 只数 code 数, units=2/双系统/多速度时
-        一个品种实际占 2 个单位却只计 1, 单位上限被绕过。
+        units 是 code 级经典单位数，存入 `_code_meta`；同 code 多
+        profile 只计一次单位，units=2/双系统/多速度不再被绕过的同时
+        也不会被重复计数。
         """
+        key = (code, str(profile))
         u = max(0.0, float(units))
-        if code in self._book and \
-                self._book[code]["dir"] == direction:
-            e = self._book[code]
+        self._code_meta[code] = {"units": u, "group": group or ""}
+        if key in self._book and self._book[key]["dir"] == direction:
+            e = self._book[key]
             tot = e["lots"] + lots_added
             e["price"] = (e["price"] * e["lots"]
                           + price * lots_added) / tot
@@ -208,61 +293,85 @@ class RiskManager:
             e["units"] = u
             e["risk"] += lots_added * n * volscale * stop_mult
         else:
-            self._book[code] = {
+            self._book[key] = {
                 "dir": direction, "lots": lots_added, "price": price,
                 "n": n, "volscale": volscale, "stop_mult": stop_mult,
                 "group": group or "", "sid": sid, "units": u,
                 "risk": lots_added * n * volscale * stop_mult}
 
-    def on_closed(self, code: str):
-        self._book.pop(code, None)
+    def on_closed(self, code: str, profile: str = None):
+        """清除持仓账。
+
+        profile=None（出场/全平/净仓语义）清除该 code 全部 profile；
+        显式 profile 只清除一条，供多子系统部分出场使用。
+        """
+        if profile is None:
+            self._book = {k: v for k, v in self._book.items()
+                          if k[0] != code}
+            self._code_meta.pop(code, None)
+            return
+        self._book.pop((code, str(profile)), None)
+        if not any(k[0] == code for k in self._book):
+            self._code_meta.pop(code, None)
 
     def on_rebuilt(self, code: str, direction: int, lots: int,
                    price: float, n: float, volscale: float,
                    stop_mult: float, group: str = "", risk: float = None,
-                   sid: str = "", units: float = 1.0):
-        """对账重建: 以实际持仓覆盖式重记账。
+                   sid: str = "", units: float = 1.0, profile: str = ""):
+        """对账重建：覆盖该 (code, profile) 单条账，不动其他 profile。
 
-        risk: 显式 2N 潜亏记账值。多子系统持仓 (S1+S2) 或恢复的分层持仓
-        应按各层冻结 N 汇总后传入 — 缺省才用 lots×n×volscale×stop_mult,
-        否则账面风险会随当根 N 漂移 (B6)。
+        risk: 显式潜亏记账值。多子系统持仓应按各层冻结 N 分 profile
+        汇总后传入，避免账面风险随当根 N 漂移 (B6)。
         sid: 持仓归属策略 (方案B 保证金分组键)。
         """
-        self.on_closed(code)
+        self.on_closed(code, profile=profile)
         if lots > 0 and direction != 0:
             self.on_filled(code, direction, lots, price, n,
-                           volscale, stop_mult, group, sid=sid, units=units)
+                           volscale, stop_mult, group, sid=sid, units=units,
+                           profile=profile)
             if risk is not None:
-                self._book[code]["risk"] = float(risk)
+                self._book[(code, str(profile))]["risk"] = float(risk)
 
     def sync_position(self, code: str, direction: int, lots: int,
                       price: float, n: float, volscale: float,
                       stop_mult: float, group: str = "",
                       risk: float = None, sid: str = "",
-                      units: float = 1.0):
-        """批量执行后按合并目标仓位同步账本 (S1+S2 双系统:
-        两子系统共享同一 code 记账 — 单位限制/总敞口按市场口径)"""
+                      units: float = 1.0, profile: str = ""):
+        """按 (code, profile) 同步账本；单位限制仍按 code 级 `_code_meta`。"""
         self.on_rebuilt(code, direction, lots, price, n,
                         volscale, stop_mult, group, risk=risk, sid=sid,
-                        units=units)
+                        units=units, profile=profile)
 
     # ------------------------------------------------------------------
     # 观测
     # ------------------------------------------------------------------
     def open_risk(self) -> float:
-        """在途 2N 总潜亏记账值"""
+        """在途总潜亏记账值（全 code × 全 profile 合计）"""
         return sum(e["risk"] for e in self._book.values())
+
+    def code_risk(self, code: str) -> float:
+        """该 code 全部 profile 已占风险（累计闸扣减值）"""
+        return sum(e["risk"] for k, e in self._book.items() if k[0] == code)
+
+    def entry(self, code: str, profile: str = ""):
+        """读取单条 (code, profile) 账本；缺省 profile 兼容单 profile。"""
+        return self._book.get((code, str(profile)))
 
     @property
     def open_units(self) -> float:
-        """全组合占用单位数 (按 book['units'] 累计, 不再是 code 数)"""
-        return sum(float(e.get("units", 1.0)) for e in self._book.values())
+        """全组合占用单位数（code 级去重，多 profile 不双计）"""
+        return sum(float(m.get("units", 1.0))
+                   for m in self._code_meta.values())
 
     def units_in_group(self, group: str) -> float:
         if not group:
             return 0.0
-        return sum(float(e.get("units", 1.0)) for e in self._book.values()
-                   if e["group"] == group)
+        return sum(float(m.get("units", 1.0))
+                   for code, m in self._code_meta.items()
+                   if m.get("group", "") == group)
 
     def has_position(self, code: str) -> bool:
-        return code in self._book
+        return any(k[0] == code for k in self._book)
+
+    def has_position_profile(self, code: str, profile: str) -> bool:
+        return (code, str(profile)) in self._book

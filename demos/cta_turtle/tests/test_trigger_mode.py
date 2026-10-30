@@ -48,8 +48,8 @@ def test_close_mode_unchanged():
 
 
 def test_arm_envelope_includes_today():
-    """武装位 = 通道(不含当根) 与当根 high/low 的包络"""
-    e = _mk()
+    """非 exclude 的旧包络模式 = 通道与当根 high/low 包络"""
+    e = _mk(arm_exclude_signal=False)
     decs = _arm(e, h=112.0, l=97.0)            # 当根创出新高 112
     assert decs[0]["decision"] == DEC_ARM
     a = e.armed
@@ -115,6 +115,21 @@ def test_tick_stop_and_add_and_channel_exit():
     assert decs[0]["reason"] == "stop" and decs[0]["price"] == 106.0
 
 
+def test_on_price_gap_uses_actual_tick_for_stop_and_add():
+    e = _mk()
+    _arm(e)
+    e.on_price(110.0)
+    e.confirm_enter(1, 2, 110.0)
+    assert e.on_price(100.0)[0]["price"] == 100.0  # stop=106，跳空不美化为106
+
+    e2 = _mk()
+    _arm(e2)
+    e2.on_price(110.0)
+    e2.confirm_enter(1, 2, 110.0)
+    dec = e2.on_price(120.0)[0]                   # add=111，跳空按实际tick
+    assert dec["decision"] == DEC_ADD and dec["price"] == 120.0
+
+
 def test_short_side_symmetric():
     e = _mk()
     _arm(e)
@@ -172,6 +187,48 @@ def test_s1_sim_closed_by_price_releases_failsafe():
     assert e.s1_last["result"] == "loss"
     assert e._fs_armed == 0                    # fail-safe 解除
     assert e.armed["fs_long"] is None
+
+
+def test_s1_sim_gap_channel_exit_uses_actual_price_for_result():
+    """sim 单通道出场输赢必须与实单同源：跳空/滑点后的实际成交价可能
+    与理想通道位方向相反，不能按通道位误判为盈利。"""
+    long_e = _mk(system="S1")
+    long_e.s1_last = {"direction": 1, "entry_price": 100.0, "n": 5.0,
+                      "taken": False, "status": "open", "result": None}
+    long_e._exit_ch = (110.0, 105.0)             # 多头出场下沿 105
+    long_e._advance_sim_price(95.0)               # 止损 90 未触及，实际亏
+    assert long_e.s1_last["result"] == "loss"
+
+    bar_e = _mk(system="S1")
+    bar_e.s1_last = dict(long_e.s1_last, status="open", result=None)
+    bar_e._exit_ch = (110.0, 105.0)
+    bar_e._advance_sim_bar(95.0, 96.0, 95.0)
+    assert bar_e.s1_last["result"] == "loss"
+
+    short_e = _mk(system="S1")
+    short_e.s1_last = {"direction": -1, "entry_price": 100.0, "n": 5.0,
+                       "taken": False, "status": "open", "result": None}
+    short_e._exit_ch = (95.0, 90.0)               # 空头出场上沿 95
+    short_e._advance_sim_price(105.0)             # 止损 110 未触及，实际亏
+    assert short_e.s1_last["result"] == "loss"
+
+
+def test_disarm_survives_exit_rearm_and_snapshot_restore():
+    e = _mk()
+    _arm(e)
+    e.disarm_entry(-1)
+    e.on_price(110.0)
+    e.confirm_enter(1, 2, 110.0)
+    e.confirm_exit(120.0)
+    assert e.armed["short"] is None           # 出场 rearm 不复活否决方向
+    assert e.on_price(90.0) == []
+
+    restored = _mk()
+    restored.restore(e.snapshot())
+    assert restored.armed["short"] is None
+    assert restored.on_price(90.0) == []
+    _arm(restored)                             # 新评估日重新裁决过滤资格
+    assert restored.armed["short"] == 90.0
 
 
 def test_reject_pending_disarms_direction():

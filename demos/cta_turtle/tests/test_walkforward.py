@@ -60,6 +60,8 @@ def test_iter_windows_truncated_by_end():
 
 def test_iter_windows_invalid_range():
     assert iter_windows(202101010900, 202001010900, 12, 6) == []
+    with pytest.raises(ValueError, match="正整数"):
+        iter_windows(201901010900, 202001010900, 12, 0)
 
 
 # ---------- 目标函数 ----------

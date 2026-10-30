@@ -14,6 +14,8 @@ from core.TurtleEngine import TurtleEngine
 from core.aggregate import aggregate_h1
 from core.ConfigLoader import ConfigLoader
 from execution.host import StrategyHost
+from StraTurtle import StraTurtle
+from schemas import InstrumentConfig, TurtleBaseConfig
 
 
 def _chans(eu=100.0, el=90.0, xu=105.0, xl=85.0, fu=110.0, fl=80.0):
@@ -49,32 +51,52 @@ def test_trigger_envelope_off_arms_channel_only():
     assert a["long"] == 100.0     # 纯通道, 当根 high 不参与
 
 
-def test_arm_exclude_signal_uses_prev_channel():
-    """S4-1b: 严格经典武装位 = prev_* 通道 (突破前 N 日, 排除信号 bar)。
-
-    当前管线传入的 channels 窗口已含武装用 bar → envelope 包络恒等
-    (与 channel_only 逐位相同已实证); 真正的经典语义由本开关提供。
-    """
+def test_arm_exclude_signal_excludes_current_and_ignores_envelope():
+    """arm_exclude 使用 current（已排除信号根），envelope 不得重新加入。"""
     ch = _chans(eu=100.0)
-    ch["prev_entry_upper"] = 95.0    # 突破前 N 日高点 < 当根通道
-    ch["prev_exit_upper"] = 104.0
+    ch["prev_entry_upper"] = 95.0
     ch["prev_exit_lower"] = 84.0
-    ch["prev_fs_upper"] = 108.0
+    ch.update({"next_entry_upper": 130.0, "next_entry_lower": 70.0,
+               "next_exit_upper": 140.0, "next_exit_lower": 60.0,
+               "next_fs_upper": 150.0, "next_fs_lower": 50.0})
     e = TurtleEngine(entry_mode="trigger", arm_exclude_signal=True)
     e.on_bar(120.0, 97.0, 118.0, 100.0, 10.0, ch)
-    a = e.armed
-    # 包络 max(prev_entry 95, 当根 high 120) = 120 (当根 high 仍参与
-    # envelope; 与 sim 探针口径一致); 出场/失败安全通道用 prev_*
-    assert a["long"] == 120.0
+    assert e.armed["long"] == 100.0       # 不是 max(prev/next, high)=130/120
+
     e2 = TurtleEngine(entry_mode="trigger", arm_exclude_signal=True,
                       trigger_envelope=False)
     e2.on_bar(120.0, 97.0, 118.0, 100.0, 10.0, ch)
-    a2 = e2.armed
-    assert a2["long"] == 95.0        # 纯 prev 通道 (严格经典)
-    # 出场武装位需持仓才有; 持仓后验证 prev_exit 通道生效
-    e2.confirm_enter(1, 10, 96.0, 10.0)
+    assert e2.armed["long"] == 100.0
+    e2.confirm_enter(1, 10, 101.0, 10.0)
     e2.on_bar(120.0, 97.0, 118.0, 100.0, 10.0, ch)
-    assert e2.armed["exit"] == 84.0  # prev_exit_lower (非当根 85)
+    assert e2.armed["exit"] == 85.0      # current exit_lower，非 prev=84
+
+
+def test_regular_trigger_arm_uses_next_channels():
+    """非 exclude 模式使用 next_*，生产与研究不再各自错一根。"""
+    ch = _chans(eu=100.0)
+    ch.update({"next_entry_upper": 130.0, "next_entry_lower": 70.0,
+               "next_exit_upper": 140.0, "next_exit_lower": 60.0,
+               "next_fs_upper": 150.0, "next_fs_lower": 50.0})
+    e = TurtleEngine(entry_mode="trigger", arm_exclude_signal=False)
+    e.on_bar(120.0, 97.0, 118.0, 100.0, 10.0, ch)
+    assert e.armed["long"] == 130.0
+    assert e.armed["short"] == 70.0
+
+
+def test_strategy_next_channels_are_last_n_including_closed_bar():
+    stra = StraTurtle("next", InstrumentConfig(code="SHFE.rb.HOT"),
+                      TurtleBaseConfig())
+    highs = np.arange(1.0, 100.0)
+    lows = highs - 2.0
+    closes = highs - 1.0
+    _atr, _n, chan = stra._calc_indicators(highs, lows, closes)
+    ch = chan["S1"]
+    assert ch["entry_upper"] == np.max(highs[-21:-1])  # current 排除当根
+    assert ch["next_entry_upper"] == np.max(highs[-20:])
+    assert ch["next_entry_lower"] == np.min(lows[-20:])
+    assert ch["next_exit_upper"] == np.max(highs[-10:])
+    assert ch["next_fs_upper"] == np.max(highs[-55:])
 
 
 # ----------------------------------------------------------------------

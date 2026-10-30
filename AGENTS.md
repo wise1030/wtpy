@@ -453,3 +453,61 @@ README 测试数/日期区间漂移；加仓阈值用当根 N 无平滑选项；
   待观察：pp 全幽灵 trim + 当日封锁将在 21:00 夜盘首 tick 后对账触发（届时
   fund_live position 应 233→0）；exec 单元断供根因（wtpy C++ 层）未修，
   F1 预创建+自愈重启仍是对策。
+- [x] **策略/资金口径复核与第一批修复（2026-10-20）**：产出
+  `demos/cta_turtle/docs/STRATEGY_REVIEW_2026-10-20.md`，并落地 P0/P1 第一批：
+  ①**回测资金口径**——`runBT/run_matrix --capital` 覆盖
+  `risk.fallback_capital`，`ConfigLoader` 对 `unit_var×stop_mult` 与
+  `capital×max_risk_per_mkt` 不一致 WARN（旧 15M/5M 两套基数导致手数差 3 倍）；
+  ②**单品种累计风险**——新增 `risk.max_risk_per_market=0.08`，`cap_entry`
+  在“本笔 2%”之外扣该 code 已占风险，4 层不再突破累计预算；
+  ③**回测真值隔离**——`on_init` 检测 `is_backtest` 后禁用 rtdata/trades，
+  防止同机实盘账户污染回测（比陈旧真值更隐蔽）；
+  ④**日损闸**——`risk.daily_loss_stop_frac/flatten_frac`（默认 0=关闭，
+  开启前先定单策略分配资金）；`config.yaml` riskmon base_amount 5M→15M、
+  risk_scale 1.0→0.5（旧值 = 降到 100% 空转）；
+  ⑤**确定性缺陷**：N 缺失丢弃触发决策时 `clear_pending`；多速度 `name`
+  与引擎 `system` 解耦（`SpeedConfig.system`）；session_end 评估传 volume/OI；
+  过滤器 `on_error=allow|deny`；日评估先成交回写再 roll（避免末层误差摊到首层）；
+  runBT 预检用 `--config`、m5 识别 CSV/DSB；speed_study PnL 乘金字塔层数；
+  `max_units_*` 改按 `units` 累计（不再按 code 数）；研究脚本失败即中止
+  （run_matrix SystemExit；walkforward/slippage 先删旧 summary+rc 检查），
+  runBT 在 WtBtAnalyst 失败时写 funds.csv fallback summary。
+  ⑥**组合约束回放**：新增 `run_portfolio.py`（基于已生成 trades/funds 的事后
+  诊断，非重跑信号）；现有 12 品种交易流回放显示 50.5% 交易日 >6 仓、
+  化工组 42.4% 交易日 >2 —— 旧矩阵是无约束上界。
+  ⑦**共享账本组合回测 v1**：新增 `run_portfolio_bt.py`（12 品种共用一个
+  RiskManager/账本逐日推进，真正执行单品种/累计/总敞口/保证金/单位上限；
+  close 模式）。6000 万总资金/1 tick/2019-01~2026-08/名额按突破强度：
+  约束后 +77.1%/回撤29.2%/Sharpe0.414，无约束 +97.4%/38.2%/0.446；
+  1500 万总资金跑同配置出现 254 天保证金超限（峰值 19.1M），说明
+  12 品种满配需约 20M 以上保证金。
+  测试 386→**421** 全绿、ruff 通过。剩余：trigger/m5 组合回测、执行层订单
+  状态机/订单号归因、删除陈旧 deploy/ 快照、启用 notify、h1 支持。
+- [x] **复核批次 P2 小项修复（2026-10-21）**：①P2-1 临时目录泄漏——
+  run_walkforward 网格组合配置 mkdtemp→`wf_results/_wf_combo_tmp.yaml`
+  +atexit 清理，fetch_data_sina journal 临时目录 finally 清理，
+  run_speed_study 删死代码+笔数首遍缓存（消二遍全量重跑，耗时减半）；
+  ②P2-2 平今费率——`run_portfolio_bt.fee_cost` 增 `today` 参数，当仓
+  平仓适用 closetoday（DCE/CZCE 平今/隔夜不同），PortfolioSim 记首层
+  开仓日；close 模式无同日往返，全窗口重跑指标逐位不变（为 trigger/m5
+  预留）；③P2-3 `run_slippage_sens` 报告新增 `fallback` 列（funds.csv
+  兜底 summary 显式标记）；④P2-4 `speed_study.json` 重新生成（含层数
+  日PnL 口径）+`meta.caliber`/`stale_note`，README 注明 09-16 旧文件
+  固定1单位口径勿比；⑤P2-5 `run_portfolio_bt` 打印实际评估区间+截断
+  WARN，summary 落盘 eval_start/eval_end/n_days。测试 421→**426** 全绿
+  （+test_slippage_sens 2 / test_fetch_sina 1 / 清理钩子 1 / 平今费率 1），
+  ruff 通过。
+- [x] **cta_turtle Phase3 阻断项修复（2026-10-29，详见 demos/AGENTS.md）**：
+  多 profile `__dual__` 恢复不再重复登记单 profile 出场（修复成交后误清
+  剩余子系统风险账）；mixed enter/add 落地为持久化延迟队列并在出场成交后
+  重放/跨日过期；盘中止损与日损全平统一异步批次；组合研究换月日
+  `arm_exclude_signal` 使用新坐标 `chan[i]`、空仓 S1 sim 同步 re-anchor；
+  session_end 缺 m5 不推进评估锚；TradeJournal 游标带文件身份+首笔成交
+  身份、轮转/原地截断失效 UNKNOWN、半行不消费；S1 sim 跳空出场按实际成交价判输赢。测试
+  549→559 全绿、ruff。第二阶段统一 intent/RiskManager profile 分账/组合
+  回测多 profile 仍未实施，多 profile 生产激活保持阻断。
+- [x] **cta_turtle 第二优先级实施（2026-10-29，详见 demos/AGENTS.md）**：
+  RiskManager 改 `(code, profile)` 分账与份额预算；run_portfolio_bt 支持
+  S1+S2/speeds 多 profile（gross 风险/费用、net 批末结算）；实盘
+  enter/add write-ahead outbox（先持久化目标意图、证据确认、UNKNOWN 封锁）。
+  测试 559→571 全绿、ruff。剩余：C++ userTag 反向归因、生产故障注入。

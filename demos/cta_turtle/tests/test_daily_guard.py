@@ -49,6 +49,8 @@ def _mk(stop=0.03, flat=0.05):
                      daily_loss_stop_frac=stop,
                      daily_loss_flatten_frac=flat)
     stra = StraTurtle("g", inst, TurtleBaseConfig(), risk_cfg=cfg)
+    # 本文件测日损阈值/复位，不涉及实盘成交证据；使用回测即时成交。
+    stra._is_backtest = True
     stra._volscale = 10.0
     stra._pricetick = 1.0
     return stra

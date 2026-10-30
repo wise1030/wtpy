@@ -64,3 +64,19 @@ def test_merge_hots_append_and_dedup():
     assert cu["to"] == "cu2610" and cu["date"] == 20260903  # WT 小写格式
     # 再跑一次 → 全部幂等
     assert phs.merge_hots(hots, picked, 20260903) == 0
+
+
+def test_select_hots_never_falls_back_to_first_invalid_contract():
+    candidates = {"SHFE.rb": ["RB2701", "RB2705"],
+                  "SHFE.cu": ["CU2610"], "CZCE.TA": ["TA701"]}
+    picked = phs._select_hots(candidates, {
+        "RB2701": 0.0, "RB2705": 123.0,
+        "CU2610": float("nan"), "TA701": None})
+    assert picked["SHFE.rb"] == ("RB2705", 123.0)
+    assert picked["SHFE.cu"][0] is None       # NaN 不得变首候选主力
+    assert picked["CZCE.TA"][0] is None      # 缺行情不得冒充真实 0
+
+    empty = phs._select_hots({"SHFE.rb": ["RB2701"]}, {})
+    assert empty["SHFE.rb"] == (None, None)
+    zero = phs._select_hots({"SHFE.rb": ["RB2701"]}, {"RB2701": 0})
+    assert zero["SHFE.rb"] == (None, 0.0)

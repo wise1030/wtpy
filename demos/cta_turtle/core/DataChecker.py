@@ -153,10 +153,18 @@ def has_bars(code: str, period: str, storage_dir: str) -> bool:
     """
     dsb = _dsb_path(code, period, storage_dir)
     if dsb and os.path.exists(dsb):
-        return True
+        health = _read_dsb_health(dsb)
+        return bool(health and (health.get("rows") or 0) > 0)
     suffix = _PERIOD_SUFFIX.get(period, "")
-    return any(os.path.exists(p) for p in
-               _csv_candidates(code, suffix, storage_dir))
+    for path in _csv_candidates(code, suffix, storage_dir):
+        if not os.path.exists(path):
+            continue
+        health = _read_csv_health(path)
+        if health and (health.get("rows") or 0) > 0:
+            return True
+    # header-only/空文件/不可解析 DSB 均不能证明模拟 tick 链可用；
+    # 返回 False 让调用方退化，而不是假装有盘中数据。
+    return False
 
 
 def check_hots(code: str, common_dir: str, live: bool = False):

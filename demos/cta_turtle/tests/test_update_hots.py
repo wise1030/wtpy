@@ -1,4 +1,5 @@
 """scripts/update_hots.py 纯函数/解析测试"""
+import json
 import os
 import sys
 
@@ -72,3 +73,36 @@ def test_diff_new_product_key():
     diff = {k: (before.get(k), after[k]) for k in after
             if before.get(k) != after[k]}
     assert diff == {"CZCE.TA": (None, "TA701")}
+
+
+def test_valid_picks_requires_positive_finite_hold():
+    candidates = {"SHFE.rb": ["RB2701"], "SHFE.cu": ["CU2610"]}
+    valid = uh._valid_picks(candidates, {
+        "SHFE.rb": ("RB2701", 100.0),
+        "SHFE.cu": ("CU2610", 0.0)})
+    assert valid == {"SHFE.rb": ("RB2701", 100.0)}
+
+
+def test_update_hots_all_invalid_keeps_file_and_avoids_restart(
+        tmp_path, monkeypatch):
+    common = tmp_path / "common"
+    common.mkdir()
+    original = {"SHFE": {"rb": [{"to": "rb2701", "date": 20260101}]}}
+    (common / "contracts.json").write_text("{}", encoding="utf-8")
+    (common / "hots.json").write_text(json.dumps(original), encoding="utf-8")
+    monkeypatch.setattr(uh, "PRODUCTS", {"SHFE.rb": ("SHFE", "rb")})
+    monkeypatch.setattr(uh, "active_contracts",
+                        lambda *args: ["RB2701", "RB2705"])
+    monkeypatch.setattr(uh, "pick_hots",
+                        lambda candidates: {"SHFE.rb": (None, None)})
+    monkeypatch.setattr(uh, "_restart_datakit",
+                        lambda: (_ for _ in ()).throw(
+                            AssertionError("invalid data must not restart")))
+    notices = []
+    monkeypatch.setattr(uh, "_notify",
+                        lambda key, text: notices.append((key, text)))
+    monkeypatch.setattr(sys, "argv", ["update_hots.py", "--common", str(common)])
+
+    assert uh.main() == 1
+    assert json.loads((common / "hots.json").read_text()) == original
+    assert notices and notices[0][0] == "hots_fail"

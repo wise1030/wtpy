@@ -1,3 +1,28 @@
+- [x] **S1/S2/speeds normalized profiles + 安全改造（2026-10-25）**：
+  复核推翻“system 与 speeds 无条件等价”：S1/S2 是引擎入场语义及 base
+  窗口预设，speeds 是共享执行/风控单元内的 profile 组合；legacy 双系统
+  ceil/floor units 不能机械转 50/50（units=1 还有零份额 S2）。落地
+  `core/profiles.py` 唯一 ProfileSpec 解析（key/system/entry/exit/fs/
+  units/share），StraTurtle 三分支装配收敛为单一路径，ConfigLoader/
+  runLive/run_portfolio_bt 共用。①配置安全：多档 speeds 强制显式
+  name/system（55/20 或 name=S2 不决定语义），speeds 项未知键拒绝，
+  fs 缺省跟随 base.s2_entry，按实际 profiles 校验 bar_cnt（250/125
+  需 252，旧校验会永久 NaN 空转）。②快照安全：v4 增加 profiles
+  语义指纹（system/windows/units/share），纯函数 validate_snapshot
+  校验子系统集合+指纹+system，TurtleEngine.restore 也校验 system；
+  改名/错语义 fail-loud，禁止漏恢复后静默塌缩到首 profile。③风控：
+  execute_dual 每个 confirm 后立即 sync（同批预算预约，修 close
+  第二子系统重复消费 total_risk）；单位闸改 open_units+新单位前置
+  容量检查（5/6+2 不再放行到 7）。④研究：run_portfolio_bt 单 speed
+  按真实 profile+required_bars，多 profile 明确拒绝（原静默按单 S1）；
+  run_speed_study 增 --system S1|S2/open 跳空止损/完整 meta，55/20+S1
+  不再误称生产 S2；独立审查另修出场 bar PnL（用实际出场价，剔除
+  止损后的无持仓时段，test_speed_study 跳空回归），产物已重生成。
+  测试 484→**498** 全绿、ruff、
+  黄金逐位一致；close 组合基线新旧 CSV md5 相同（77.07%/29.17%/0.414，
+  1927 笔），trigger 严格经典武装基线也一致（139.94%/37.84%/0.572，
+  2389 笔）。**未生产启用**；多 profile net 成交/组合模拟、反向
+  net/gross、share 保证金/累计风险分账仍是激活前阻断项。
 - [x] **剩余路线清零（2026-10-21）**：①**trigger/m5 组合回测**——
   `run_portfolio_bt --entry-mode trigger`：日线只武装（含当根包络,
   session_end(T-1) 口径），盘中 m5 走引擎 check_bar 触碰仿真（跳空按
@@ -140,3 +165,63 @@ close 突破入场/trigger 武装）。剩余：live h1 部署前 rt m5 日历�
   前置位（与 WtBtEngine 真实行为一致）。test_mode.py 6 例真值表钉死
   派生规则。v2（撮合/证据/时钟完整 ExecutionModel 接口）留待 h1 组合
   二期后定义边界。测试 462→**468** 全绿、ruff 通过、黄金回测逐位一致。
+- [x] **Phase3 阻断项修复第一批（2026-10-29）**：按审阅优先级落地并回归
+  ——①多 profile `__dual__` 批次快照恢复不再兼容补录单 profile 出场
+  记录（修复批次成交后误清仍持仓 S2 风险账，恢复→成交→S2 80手账本
+  回归）；②mixed enter/add 改为**真实持久化延迟队列**（保留引擎
+  pending、出场成交后重放、提交异常后下一无出场事件恢复、跨自然日过期
+  清 pending），不再是"日志称延后实际 reject"；③多 profile 盘中止损/
+  日损全平统一走异步 `TargetIntent` 批次，不再目标 0 即 confirm；
+  ④组合研究换月日默认 `arm_exclude_signal=true` 使用已平移新坐标的
+  `chan[i]`，空仓 S1 sim 单也随 `_apply_rolls` re-anchor；⑤实盘
+  session_end 缺当日 m5 时不再用 his 末根冒充当日评估推进 `_d1_date`
+  （保持锚点待 catch-up，修复数据事故后永久跳过当日窗口）；⑥
+  `TradeJournal` 业务游标=文件身份(ino)+首笔成交身份+行号，新建或
+  同路径原地截断后旧游标失效保持 UNKNOWN，半行写入不推进游标；⑦trigger S1 sim 单通道出场按实际
+  tick/open 判定输赢，跳空不再被理想通道位误判盈利。测试 549→**559**
+  全绿、ruff；README/Phase3 文档同步。**未做**：第二阶段统一
+  enter/add/exit write-ahead intent、RiskManager profile 分账、组合
+  回测多 profile——多 profile 生产激活仍阻断。
+- [x] **第二优先级：profile 分账 + 组合多 profile + write-ahead outbox
+  （2026-10-29）**：①`RiskManager` 账本键改 `(code, profile)`，价格/风险
+  不再跨子系统 vwap 合并；单位/相关性组由 code 级 `_code_meta` 去重；
+  累计风险与保证金改为"本 profile share 预算、扣本 profile 占用"
+  （`post_risk_base` code 全局 + `post_profile_risk_base` profile 累计），
+  首 profile 不能挤占后续份额，组合总敞口仍全局。②`run_portfolio_bt`
+  支持 S1+S2/speeds 多 profile：独立引擎/通道/开仓日、共享账本逐
+  profile 同步、close/trigger/h1 批次内预算预约、broker net 批末一次
+  结算；费用按 profile gross（保守上界），summary 记
+  `orders/book_mode/fee_mode/multi_profile_products`。③实盘 enter/add
+  write-ahead：意图先于 set_position 入 v4 快照（`intents/outbox_seq`），
+  恢复只允许绝对目标重放或真实成交证据确认，UNKNOWN 封锁不假确认，
+  跨日过期；多 profile dual 循环内 confirm 保持批次预算预约、批末关闭
+  意图。测试 559→**571** 全绿、ruff、diff-check。剩余硬边界：反向
+  net/gross 需 C++ userTag；生产激活前仍需故障注入/真实 webhook/OOS。
+- [x] **反向 net/gross 订单级归因分析：userTag 降级为备选项
+  （2026-10-29，docs/ORDER_ATTRIBUTION_NO_CPP.md）**：论证 net 标量
+  证据无法分解 profile 向量变化（同向部分出场/反向并存/跨零 mixed/
+  共享账户串扰四场景），订单级归属必要；但 C++ userTag 非唯一解——
+  现有 outbox 意图序 + EventNotifier 侧车（TRD_ORDER/TRADE 自带
+  localid/islong/isopen/istoday）+ trades.csv 权威兜底三条零侵入链
+  已拼成完整 "意图→localid→成交" 归因链，靠"信号 FIFO 消费 + 每策略
+  独立执行器 → 提交序==建单序"即可绑定，无需改 C++。userTag 独占
+  价值仅剩"同 code 同向同手数同 tick 双意图"（R4），缓解=批内错开提交
+  或 UNKNOWN。结论：先落地 Python 侧 OrderAttributor + 2 周生产观测
+  窗实证，错误率不达标再启动 A5-2 C++ 改造；mixed UNKNOWN 分支随
+  意图侧拆签名自然消解。
+- [x] **订单级归因链落地 + 多 profile 激活阻断项清零（2026-10-30）**：
+  ①`core/OrderAttributor.py` 纯逻辑 localid 归因（簿镜像+签名预测+
+  意图 FIFO×侧车/trades.csv 双源事件；提交序==建单序绑定；簿拆分漂移
+  成交超量惰性反推；守恒破坏 UNKNOWN+attribution_mismatch 告警）接入
+  enter/add/exit/dual 全路径，**跨零 mixed 不再一律 UNKNOWN**；
+  ②故障注入回归 tests/test_order_attribution.py 16 例（外部订单穿插/
+  撤单重挂/丢包 stub/簿漂移/双源去重/半行/进程内集成），测试 571→**587**
+  全绿、ruff；③S1+S2 vs S1 组合 A/B（12 品种 close/60M/2019-2026,
+  matrix_results/dual_ab.json）**负结果**：双系统双倍速消耗品种累计/
+  保证金预算（rejected 1606、保证金超限 69 天）→ 约束 +6.2%/DD55.6%
+  vs 纯 S1 +75.3%/DD29.4% → **生产维持单 profile S1**，多 profile 能力
+  保留；④黄金基线显式刷新（10-26 武装口径修复去类前视优势，rb
+  33.37%→9.73% 诚实口径，--update 声明）；⑤C++ userTag 正式降级为
+  加固备选项。已部署生产（deploy/cta_turtle，rsync+md5 校验+SIGKILL
+  重启，WatchDog 拉起）。剩余非代码项：notify webhook URL、归因链
+  生产观测窗实证。

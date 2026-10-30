@@ -272,9 +272,14 @@ class TruthMonitor:
                            self.h._base.stop_atr_mult,
                            stop=s["engine"].stop_anchor())
                        for s in self.h._subs)
-            self.h._risk.on_rebuilt(code, d, abs(pos_i), avgpx,
-                                  n if n > 0 else 1.0, self.h._volscale or 1.0,
-                                  self.h._base.stop_atr_mult, self.h._inst.group,
-                                  risk=risk, sid=self.h.name(),
-                                  units=float(self.h._inst.units))
+            # 重建把所有净仓收进首 profile，其余 profile 已 flatten；
+            # 先清 code 全量旧账，再只给首 profile 记账，避免旧分档残留。
+            self.h._risk.on_closed(code)
+            self.h._risk.sync_position(
+                code, d, abs(pos_i), avgpx,
+                n if n > 0 else 1.0, self.h._volscale or 1.0,
+                self.h._base.stop_atr_mult, self.h._inst.group,
+                risk=risk, sid=self.h.name(),
+                units=float(self.h._inst.units),
+                profile=self.h._subs[0]["name"])
         self.h._recon_miss = 0

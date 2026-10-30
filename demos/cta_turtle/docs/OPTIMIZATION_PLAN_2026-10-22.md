@@ -202,13 +202,42 @@ strength，留档 matrix_results/caliber_ab.json）：
 - **换月窗口保护**：换月日 HOT 价差跳空会污染 N/通道一瞬，加换月日
   ±1 天的入场冷却（或至少观测记录）。
 
-### S6. 双系统/多速度的激活前提（P2）
+### S6. 双系统/多速度的激活前提（P2）—— 基础统一已落地，仍未生产启用
 
-`S1+S2` 与 speeds 均休眠。启用前的两个代码债必须先清：
-- 双系统 share 保证金口径（3.2.6：先入场者占满后入场者被过度压缩）；
-- 门控链合并（A1 第一步）。
-清完后用 `run_portfolio_bt`（双系统需扩展 PortfolioSim 支持 net 执行）
-验证 S1+S2 vs 纯 S1 的组合层差异，再决定是否生产化。
+`S1+S2` 与 speeds 均休眠。2026-10-25 复核纠正了“二者无条件等价”
+的过强表述：S1/S2 是引擎入场语义及 base 窗口预设，speeds 是同一
+执行/风控单元内的 profile 组合；legacy 双系统的 ceil/floor units
+不能机械映射为 50/50 speeds。
+
+已落地：
+- `core/profiles.py` 唯一 ProfileSpec 解析，StraTurtle/ConfigLoader/
+  runLive/run_portfolio_bt 共用；legacy name、顺序、units/share 保留；
+- 多档 speeds 强制显式 name/system，拒绝未知键，fs 跟随 base；
+  长窗口按实际 profiles 校验 bar_cnt，防止永久 NaN 空转；
+- 快照增加 profile 集合与语义指纹（system/windows/units/share），
+  改名、漏子系统、错语义 fail-loud；TurtleEngine.restore 校验 system；
+- 多子系统每次 confirm 后立即同步账本（同批预算预约），单位闸改为
+  open_units + 新单位的前置容量检查；
+- run_portfolio_bt 单 speed 使用真实 profile；多 profile 明确拒绝，
+  不再静默按单 S1；run_speed_study 增加 --system S1|S2、open 跳空
+  止损与完整口径 meta（55/20 + S1 不再误称生产 S2）；独立审查另修复
+  出场 bar PnL：按实际出场价而非一律 close，剔除止损后的无持仓时段。
+
+验证：498 测试全绿、ruff、黄金回测逐位一致；close 组合基线新旧 CSV
+md5 相同（+77.07%/DD29.17%/Sharpe0.414，1927 笔），trigger 严格经典
+武装基线亦逐字节一致（+139.94%/DD37.84%/Sharpe0.572，2389 笔）。
+
+**激活前提更新（2026-10-30）**：多 profile 组合账本模拟与 share
+保证金/累计风险分账已落地（RiskManager 按 `(code, profile)` 记账，
+PortfolioSim 支持 S1+S2/speeds，gross 风险/费用、net 批末结算；
+详见 Phase3 文档 §7）；反向 net/gross 订单级归属已在 Python 层解决
+（`core/OrderAttributor.py` localid 归因链，零 C++ 改动，设计见
+docs/ORDER_ATTRIBUTION_NO_CPP.md，C++ userTag 降级为加固备选项）；
+故障注入回归 16 例；S1+S2 vs S1 组合 A/B 完成（matrix_results/
+dual_ab.json）——**负结果**（约束后 +6.2%/DD55.6% vs 纯 S1
++75.3%/DD29.4%，双倍速消耗品种预算被勒死）→ **生产维持单 profile
+S1**。剩余非代码项：notify webhook URL（待用户提供）；归因链生产
+观测窗实证（部署后自动累积，偏差 >0.5 tick 告警并维持旧口径）。
 
 ---
 

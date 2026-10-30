@@ -73,9 +73,10 @@ def _make_trig(direction="both", units=2, intrabar=False,
     return StraTurtle("tb", inst, base)
 
 
-def _setup(n=90):
+def _setup(n=90, backtest=False):
     stra = _make_trig()
     ctx = TrigCtx()
+    ctx.is_backtest = backtest
     d1 = ctx.add_store("d1")
     _fill_daily(d1, n)
     stra.on_init(ctx)
@@ -86,7 +87,7 @@ def _setup(n=90):
 # bt 日线粒度流程
 # ------------------------------------------------------------------
 def test_bt_daily_arm_then_touch_enter_and_stop_exit():
-    stra, ctx, d1 = _setup()
+    stra, ctx, d1 = _setup(backtest=True)
     stra.on_calculate(ctx)                     # 首根评估 → 武装
     assert ctx.orders == []                    # 武装不产生订单
     e = stra._engine
@@ -199,12 +200,29 @@ def test_session_end_synth_daily_eval():
     e = stra._engine
     assert stra._d1_date == 20230090
     assert e.armed["long"] is not None
-    # 合成日K: o=3400 h=3412 l=3390 c=3395 → 通道含当根包络
-    assert e._entry_ch[0] >= 3412.0
+    # arm_exclude=true：合成信号根不重新加入武装通道，next_* 才含当日
+    assert e._entry_ch[0] == max(d1.highs[-20:])
     # 幂等: 同日期再次调用不重评估
     snap1 = ctx.kv["tb_engine"]
     stra.on_session_end(ctx, 20230090)
     assert ctx.kv["tb_engine"] == snap1
+
+
+def test_session_eval_missing_m5_does_not_advance_anchor():
+    """数据链路异常缺少当日 m5 时，不得用 his 末根冒充当日评估并推进
+    _d1_date；否则次日真实日线补齐后 catch-up/日评估会永久跳过当日。"""
+    stra, ctx, d1 = _setup()
+    stra.on_calculate(ctx)
+    old_last = 20230089
+    assert stra._d1_date == old_last
+
+    stra.on_session_end(ctx, 20230090)       # 无当日 m5 → 跳过，不推进锚
+    assert stra._d1_date == old_last
+    assert any("session eval skipped" in t for _, t in ctx.logs)
+
+    d1.append(20230090, 1500, 3395, 3398, 3393, 3396)   # 次日真实日线到达
+    stra.on_calculate(ctx)
+    assert stra._d1_date == 20230090
 
 
 def test_snapshot_v4_armed_roundtrip():
@@ -496,7 +514,7 @@ def test_restore_rebuilds_risk_book():
     stra2.on_init(ctx2)
     assert stra2._engine.direction == 1                # 引擎持仓恢复
     assert stra2._risk.has_position("SHFE.rb.HOT")     # 账本重建
-    e = stra2._risk._book["SHFE.rb.HOT"]
+    e = stra2._risk.entry("SHFE.rb.HOT", "S1")
     assert e["lots"] == stra2._engine.layers[0][0]
     assert e["risk"] > 0                               # 2N 潜亏已记账
 
@@ -620,9 +638,11 @@ def test_session_eval_passes_oi_context():
 
     stra._eval_core = fake
     stra._d1_date = None
+    m5 = ctx.add_store("m5")
+    m5.append(20230091, 1500, 3395, 3398, 3393, 3396)
     stra.on_session_end(ctx, 20230091)
     assert seen.get("with_oi") is True
-    assert seen.get("synth", "missing") is None
+    assert seen.get("synth") == (3395.0, 3398.0, 3393.0, 3396.0)
 
 
 def test_stale_pending_dropped_on_daily_eval():
