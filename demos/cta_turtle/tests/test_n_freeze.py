@@ -32,7 +32,7 @@ def _ch(entry=1e9, exit_=0.0):
 def test_stop_not_loosened_when_n_expands():
     """N 放大 (60→120) 不得放宽止损: 止损位保持 2880 (2×冻结 N);
     旧口径会随当根 N 下移到 2760 → 实际止损亏损达预算 2 倍"""
-    e = TurtleEngine("S1", stop_atr_mult=2.0, stop_n_mode="entry")
+    e = TurtleEngine(filter=True, stop_atr_mult=2.0, stop_n_mode="entry")
     e.confirm_enter(1, 10, 3000.0, n=60.0)
     assert e.layer_ns == [60.0]
     assert abs(e.stop_price() - 2880.0) < 1e-9
@@ -42,7 +42,7 @@ def test_stop_not_loosened_when_n_expands():
     assert dec[0]["decision"] == "exit" and dec[0]["reason"] == "stop"
     assert dec[0]["price"] == 2880.0
     # 未击穿冻结止损位时不触发
-    e2 = TurtleEngine("S1", stop_atr_mult=2.0, stop_n_mode="entry")
+    e2 = TurtleEngine(filter=True, stop_atr_mult=2.0, stop_n_mode="entry")
     e2.confirm_enter(1, 10, 3000.0, n=60.0)
     assert e2.on_bar(high=3000, low=2890, close=2950, prev_close=2950,
                      n=120.0, channels=_ch()) == []
@@ -50,7 +50,7 @@ def test_stop_not_loosened_when_n_expands():
 
 def test_stop_uses_frozen_entry_n_when_n_shrinks():
     """N 缩小 (60→30) 不得收紧止损 (防噪声打掉)"""
-    e = TurtleEngine("S1", stop_atr_mult=2.0, stop_n_mode="entry")
+    e = TurtleEngine(filter=True, stop_atr_mult=2.0, stop_n_mode="entry")
     e.confirm_enter(1, 10, 3000.0, n=60.0)
     # 旧口径 (当根 N=30 → 止损 2940) 会把 low=2900 误判为触发
     dec = e.on_bar(high=3000, low=2900, close=2950, prev_close=2980,
@@ -61,7 +61,7 @@ def test_stop_uses_frozen_entry_n_when_n_shrinks():
 
 def test_add_level_uses_frozen_entry_n():
     """加仓位 = 最后层价 ± 0.5×冻结 N, 不随当根 N 抬高"""
-    e = TurtleEngine("S1", pyramid_layers=4, pyramid_step_atr=0.5, stop_n_mode="entry")
+    e = TurtleEngine(filter=True, pyramid_layers=4, pyramid_step_atr=0.5, stop_n_mode="entry")
     e.confirm_enter(1, 10, 3000.0, n=60.0)
     # 冻结加仓位 3030; 当根 N=120 时旧口径为 3060
     dec = e.on_bar(high=3040, low=3010, close=3035, prev_close=3010,
@@ -74,7 +74,7 @@ def test_add_level_uses_frozen_entry_n():
 
 def test_add_layer_freezes_its_own_n():
     """每层各记自己的 N: 止损/加仓锚定最后一层"""
-    e = TurtleEngine("S1", pyramid_layers=4, pyramid_step_atr=0.5, stop_n_mode="entry")
+    e = TurtleEngine(filter=True, pyramid_layers=4, pyramid_step_atr=0.5, stop_n_mode="entry")
     e.confirm_enter(1, 10, 3000.0, n=60.0)
     e.confirm_add(10, 3030.0, n=80.0)
     assert e.layer_ns == [60.0, 80.0]
@@ -84,7 +84,7 @@ def test_add_layer_freezes_its_own_n():
 
 def test_reanchor_last_price_keeps_frozen_n():
     """成交价回写只改价格, 不改该层冻结 N"""
-    e = TurtleEngine("S1", stop_atr_mult=2.0, stop_n_mode="entry")
+    e = TurtleEngine(filter=True, stop_atr_mult=2.0, stop_n_mode="entry")
     e.confirm_enter(1, 10, 3000.0, n=60.0)
     e.reanchor_last_price(3005.0)
     assert e.layer_ns == [60.0]
@@ -93,7 +93,7 @@ def test_reanchor_last_price_keeps_frozen_n():
 
 def test_update_n_supplies_fallback_without_on_bar():
     """close/intrabar 路径下引擎不经 on_bar 也能拿到当前 N (否则 NaN)"""
-    e = TurtleEngine("S1", stop_atr_mult=2.0)
+    e = TurtleEngine(filter=True, stop_atr_mult=2.0)
     e.adopt_position(1, 10, 3000.0)                     # 收养时无 N
     assert e.stop_price() != e.stop_price()             # NaN
     e.update_n(50.0)
@@ -102,7 +102,7 @@ def test_update_n_supplies_fallback_without_on_bar():
 
 def test_legacy_snapshot_without_layer_ns_falls_back():
     """旧快照 (无 layer_ns) 回退最近评估 N, 行为与升级前一致"""
-    e = TurtleEngine("S1", stop_atr_mult=2.0)
+    e = TurtleEngine(filter=True, stop_atr_mult=2.0)
     e.restore({"direction": 1, "layers": [[10, 100.0]]})
     assert e.layer_ns == [None]
     assert e.stop_price() != e.stop_price()             # 尚无 N 来源
@@ -113,7 +113,7 @@ def test_legacy_snapshot_without_layer_ns_falls_back():
 
 def test_booked_risk_equals_frozen_stop_loss():
     """P0-2 一致性: 风控记账的 2N 潜亏 == 冻结 N 止损的实际亏损"""
-    e = TurtleEngine("S1", stop_atr_mult=2.0, stop_n_mode="entry")
+    e = TurtleEngine(filter=True, stop_atr_mult=2.0, stop_n_mode="entry")
     e.confirm_enter(1, 10, 3000.0, n=60.0)
     rm = RiskManager(RiskConfig(fallback_capital=5e6))
     rm.on_filled("SHFE.rb.HOT", 1, 10, 3000.0, 60.0, 10.0, 2.0, "black")
@@ -130,7 +130,7 @@ def test_booked_risk_by_actual_stop_is_lower_for_pyramid():
     实盘 2026-09-16: 2N 口径 52.7 万 vs 止损口径 20.4 万 → 组合预算被
     占满, 加仓全被 total_risk(cap=0) 否决。
     """
-    e = TurtleEngine("S1", stop_atr_mult=2.0, pyramid_layers=4)
+    e = TurtleEngine(filter=True, stop_atr_mult=2.0, pyramid_layers=4)
     e.confirm_enter(1, 100, 3000.0, n=50.0)
     e.confirm_add(100, 3100.0, n=50.0)      # 止损 = 3100 - 2*50 = 3000
     assert abs(e.stop_anchor() - 3000.0) < 1e-9
@@ -144,21 +144,21 @@ def test_booked_risk_by_actual_stop_is_lower_for_pyramid():
 
 def test_booked_risk_by_stop_floors_negative():
     """止损在成本有利一侧 (锁盈) 的层贡献为负, 组合取净额并下限 0"""
-    e = TurtleEngine("S1", stop_atr_mult=2.0, pyramid_layers=4)
+    e = TurtleEngine(filter=True, stop_atr_mult=2.0, pyramid_layers=4)
     e.confirm_enter(1, 100, 2900.0, n=50.0)
     e.confirm_add(100, 3200.0, n=50.0)
     # 止损 3000: 首层锁盈 -100k, 末层亏 +200k → 净额 100k (小于"只算
     # 正贡献"的 200k, 这才是组合最坏亏损的正确口径)
     assert abs(e.booked_risk(10.0, 2.0, stop=3000.0) - 100_000.0) < 1e-6
     # 单层且止损高于成本 → 净额 ≤ 0 → 下限归零 (不产生负风险)
-    e2 = TurtleEngine("S1", stop_atr_mult=2.0)
+    e2 = TurtleEngine(filter=True, stop_atr_mult=2.0)
     e2.confirm_enter(1, 100, 2900.0, n=50.0)
     assert e2.booked_risk(10.0, 2.0, stop=3000.0) == 0.0
 
 
 def test_layer_ns_backfilled_on_first_eval():
     """legacy 层 (layer_ns=None) 在首次评估时用当根 N 回填, 之后按冻结走"""
-    e = TurtleEngine("S1", stop_atr_mult=2.0)
+    e = TurtleEngine(filter=True, stop_atr_mult=2.0)
     e.restore({"direction": 1, "layers": [[10, 3000.0]]})
     assert e.layer_ns == [None]
     e.update_n(50.0)
@@ -171,7 +171,7 @@ def test_layer_ns_backfilled_on_first_eval():
 @pytest.mark.parametrize("n_bad", [None, 0.0, -1.0, float("nan")])
 def test_invalid_n_falls_back_to_market_n(n_bad):
     """无效 n 不写入 layer_ns (回退最近评估 N); 无来源时止损 NaN"""
-    e = TurtleEngine("S1", stop_atr_mult=2.0)
+    e = TurtleEngine(filter=True, stop_atr_mult=2.0)
     e.confirm_enter(1, 10, 3000.0, n=n_bad)
     assert e.stop_price() != e.stop_price()
     e.update_n(50.0)
@@ -182,7 +182,7 @@ def test_invalid_n_falls_back_to_market_n(n_bad):
 
 def test_ratchet_tightens_on_n_shrink_but_never_loosens():
     """ratchet: 当根 N 但只收紧不放宽 (多头止损只上移)"""
-    e = TurtleEngine("S1", stop_atr_mult=2.0, stop_n_mode="ratchet")
+    e = TurtleEngine(filter=True, stop_atr_mult=2.0, stop_n_mode="ratchet")
     e.confirm_enter(1, 10, 3000.0, n=60.0)
     assert abs(e.stop_price() - 2880.0) < 1e-9        # 初始 = 2×60
     # N 缩小 60→30 → 止损上移到 2940 (收紧)
@@ -198,7 +198,7 @@ def test_ratchet_tightens_on_n_shrink_but_never_loosens():
 
 def test_ratchet_add_reanchors_to_new_layer():
     """加仓按新单位重锚 (经典口径): 棘轮只在两次加仓之间生效"""
-    e = TurtleEngine("S1", pyramid_layers=4, stop_atr_mult=2.0,
+    e = TurtleEngine(filter=True, pyramid_layers=4, stop_atr_mult=2.0,
                      stop_n_mode="ratchet")
     e.confirm_enter(1, 10, 3000.0, n=30.0)
     assert abs(e.stop_price() - 2940.0) < 1e-9
@@ -208,11 +208,11 @@ def test_ratchet_add_reanchors_to_new_layer():
 
 def test_ratchet_survives_snapshot_and_roll():
     """棘轮位随快照持久化, 换月平移同步"""
-    e = TurtleEngine("S1", stop_atr_mult=2.0, stop_n_mode="ratchet")
+    e = TurtleEngine(filter=True, stop_atr_mult=2.0, stop_n_mode="ratchet")
     e.confirm_enter(1, 10, 3000.0, n=60.0)
     e.update_n(30.0)
     assert abs(e.stop_price() - 2940.0) < 1e-9
-    e2 = TurtleEngine("S1", stop_atr_mult=2.0, stop_n_mode="ratchet")
+    e2 = TurtleEngine(filter=True, stop_atr_mult=2.0, stop_n_mode="ratchet")
     e2.restore(e.snapshot())
     e2.update_n(120.0)
     assert abs(e2.stop_price() - 2940.0) < 1e-9       # 不放宽
@@ -222,7 +222,7 @@ def test_ratchet_survives_snapshot_and_roll():
 
 def test_current_mode_still_loosens_for_ab():
     """current (A/B) 口径保留旧行为: N 放大则止损放宽"""
-    e = TurtleEngine("S1", stop_atr_mult=2.0, stop_n_mode="current")
+    e = TurtleEngine(filter=True, stop_atr_mult=2.0, stop_n_mode="current")
     e.confirm_enter(1, 10, 3000.0, n=60.0)
     assert abs(e.stop_price() - 2880.0) < 1e-9
     e.update_n(120.0)
@@ -233,7 +233,7 @@ def test_current_mode_still_loosens_for_ab():
 
 def test_orphan_direction_without_layers_no_crash():
     """direction≠0 且 layers 为空 (脏快照): 不得抛 IndexError/ZeroDivision"""
-    e = TurtleEngine("S1", stop_atr_mult=2.0)
+    e = TurtleEngine(filter=True, stop_atr_mult=2.0)
     e.restore({"direction": 1, "layers": []})
     assert e.stop_price() != e.stop_price()             # NaN
     assert e.on_bar(high=101, low=99, close=101, prev_close=99, n=5.0,
@@ -245,7 +245,7 @@ def test_orphan_direction_without_layers_no_crash():
 
 def test_adopt_position_rejects_nonpositive_price():
     """收养价非法 (空头 avgpx 未取绝对值) → 不建仓, 不产生负止损"""
-    e = TurtleEngine("S1", stop_atr_mult=2.0)
+    e = TurtleEngine(filter=True, stop_atr_mult=2.0)
     assert e.adopt_position(-1, 5, -3150.0) == 0
     assert e.direction == 0 and e.layers == []
     assert e.adopt_position(-1, 5, 3150.0, n=60.0) == 5
@@ -255,7 +255,7 @@ def test_adopt_position_rejects_nonpositive_price():
 
 def test_adopt_position_trigger_mode_arms_stop():
     """trigger 模式收养后立即纳入管理; 空仓复位幂等"""
-    e = TurtleEngine("S1", stop_atr_mult=2.0, entry_mode="trigger")
+    e = TurtleEngine(filter=True, stop_atr_mult=2.0, entry_mode="trigger")
     e.update_n(60.0)
     e.adopt_position(-1, 5, 3150.0)
     assert abs(e.armed["stop"] - 3270.0) < 1e-9
@@ -268,7 +268,7 @@ def test_adopt_position_trigger_mode_arms_stop():
 
 def test_flatten_book_keeps_s1_filter_state():
     """flatten_book 只复位持仓, 不动 S1 过滤器记录"""
-    e = TurtleEngine("S1", stop_atr_mult=2.0)
+    e = TurtleEngine(filter=True, stop_atr_mult=2.0)
     e.confirm_enter(1, 10, 3000.0, n=60.0)
     e.flatten_book()
     assert e.s1_last is not None and e.s1_last.get("taken") is True

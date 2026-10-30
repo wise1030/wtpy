@@ -15,7 +15,7 @@ from StraTurtle import StraTurtle
 
 
 def _eng(mode="trigger", system="S1"):
-    return TurtleEngine(system=system, entry_mode=mode,
+    return TurtleEngine(filter=system == "S1", entry_mode=mode,
                         stop_n_mode="ratchet")
 
 

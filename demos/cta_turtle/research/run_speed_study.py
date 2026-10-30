@@ -75,7 +75,8 @@ def sim_speed(dates, opens, highs, lows, closes, atr, entry, exit_,
     e_up, e_lo = donchian(highs, lows, entry)
     x_up, x_lo = donchian(highs, lows, exit_)
     f_up, f_lo = donchian(highs, lows, fs)
-    e = TurtleEngine(system, stop_atr_mult=2.0, pyramid_layers=4,
+    e = TurtleEngine(filter=system == "S1", stop_atr_mult=2.0,
+                     pyramid_layers=4,
                      pyramid_step_atr=0.5, stop_n_mode="ratchet",
                      entry_mode="close")
     trades = 0

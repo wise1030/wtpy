@@ -270,7 +270,7 @@ def test_snapshot_v3_roundtrip_preserves_dedup():
     stra.on_init(ctx)
     stra.on_calculate(ctx)
     blob = json.loads(ctx.kv["tb_engine"])
-    assert blob["v"] == 4                  # v4: +trigger武装状态
+    assert blob["v"] == 5                  # v5: filter 指纹 (v4 自动迁移)
     assert "S1" in blob["subs"]
     assert blob["d1_date"] == 20230089
     # 同 kv 恢复到新实例: 同数据不再产生信号 (去重键生效)

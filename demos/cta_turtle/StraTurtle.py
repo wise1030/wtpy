@@ -80,11 +80,10 @@ class StraTurtle(BaseCtaStrategy):
                 "entry": spec.entry, "exit": spec.exit, "fs": spec.fs,
                 "share": spec.share, "system": spec.system,
                 "engine": TurtleEngine(
-                    system=spec.system,
+                    filter=spec.filter,
                     stop_atr_mult=base_cfg.stop_atr_mult,
                     pyramid_layers=base_cfg.pyramid_layers,
                     pyramid_step_atr=base_cfg.pyramid_step_atr,
-                    enable_s1_filter=spec.filter,
                     entry_mode=base_cfg.entry_mode,
                     stop_n_mode=base_cfg.stop_n_mode,
                     trigger_envelope=base_cfg.trigger_envelope,
@@ -806,12 +805,12 @@ class StraTurtle(BaseCtaStrategy):
         context.register_index_line(ch_idx, "entry_lower", lineType=0)
         context.register_index_line(ch_idx, "stop", lineType=0)
 
-        # === 状态恢复 (v4: +trigger武装/profile语义指纹; v3/v2/v1 兼容) ===
+        # === 状态恢复 (v5=filter指纹; v4/v3/v2/v1 兼容, v4 自动迁移) ===
         raw = context.user_load_data(f"{self.name()}_engine", "", str)
         if raw:
             try:
                 data = json.loads(raw)
-                if isinstance(data, dict) and data.get("v") in (3, 4):
+                if isinstance(data, dict) and data.get("v") in (3, 4, 5):
                     # 原名找不到会静默漏恢复，随后净仓可能被收养成
                     # 首 profile 单层。身份/语义不一致必须 fail-loud。
                     validate_snapshot(data, self._profiles)
@@ -864,7 +863,7 @@ class StraTurtle(BaseCtaStrategy):
                             self._last_n = en
                             break
                 self._restore_exit_orders(data.get("exit_orders"))
-                if data.get("v") == 4:
+                if int(data.get("v") or 0) >= 4:
                     self._restore_position_intents(data.get("intents"),
                                                    data.get("outbox_seq"))
                     saved_def = data.get("deferred") or {}
@@ -1373,7 +1372,7 @@ class StraTurtle(BaseCtaStrategy):
                 # 双系统图表取首活跃子系统止损 (净仓位图元为合并口径)
                 context.set_index_value(self._ch_idx, "stop",
                                         fe.stop_price())
-        snap = {"v": 4,
+        snap = {"v": 5,
                 "subs": {s["name"]: s["engine"].snapshot()
                          for s in self._subs},
                 "profiles": snapshot_meta(self._profiles),
@@ -1722,7 +1721,7 @@ class StraTurtle(BaseCtaStrategy):
 
     def _persist(self, context: CtaContext):
         """轻量持久化 (触发事件后): 仅引擎快照+去重键"""
-        snap = {"v": 4,
+        snap = {"v": 5,
                 "subs": {s["name"]: s["engine"].snapshot()
                          for s in self._subs},
                 "profiles": snapshot_meta(self._profiles),

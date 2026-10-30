@@ -59,21 +59,33 @@ DEC_ARM = "arm"        # trigger 模式: 日线评估完成, 价位已武装 (�
 
 
 class TurtleEngine:
-    def __init__(self, system: str = "S1",
+    """海龟信号状态机 (纯逻辑零框架依赖)。
+
+    B 方案 (2026-10-30, docs/PROFILE_CONFIG_UNIFICATION.md): `system`
+    不再是构造维度 —— 语义唯一开关是 `filter` (S1 入场状态机: 盈利
+    跳过+sim 单+fail-safe); "S1"/"S2" 降级为只读派生标签 (属性),
+    仅供日志/快照回滚兼容。`enable_s1_filter` 参数由 filter 取代
+    (原二元组 (system, enable_s1_filter) 的全部行为组合 ≡ filter 单
+    布尔: S1+off=裸20/10 ≡ filter=False 语义在 system=="S1" 分支内
+    本就如此表达)。
+    """
+
+    def __init__(self, filter: bool = True,   # noqa: A002 (语义名, 见上)
                  stop_atr_mult: float = 2.0,
                  pyramid_layers: int = 4,
                  pyramid_step_atr: float = 0.5,
-                 enable_s1_filter: bool = True,
                  entry_mode: str = "close",
                  stop_n_mode: str = "ratchet",
                  trigger_envelope: bool = True,
                  allow_same_bar_reversal: bool = True,
                  gap_stop: bool = True,
                  arm_exclude_signal: bool = True):
-        assert system in ("S1", "S2")
         assert entry_mode in ("close", "trigger")
         assert stop_n_mode in ("entry", "current", "ratchet")
-        self.system = system
+        # S1 过滤器语义 (盈利跳过+sim 单推进+fail-safe 一整套)。
+        # False 时退化为裸 Donchian 突破 (原 "S1+enable_s1_filter=False"
+        # 与 "S2" 两种旧配置在行为上的并集)。
+        self.filter = bool(filter)
         self.stop_mult = stop_atr_mult
         self.max_layers = max(1, pyramid_layers)
         self.step_atr = pyramid_step_atr
@@ -106,10 +118,6 @@ class TurtleEngine:
         # 当前有效止损/加仓位 (ratchet 模式的棘轮棘齿; 其余模式=当次算值)
         self._stop_level = None
         self._add_level = None
-        # S1 盈利跳过过滤开关 (P0-1): False 时 S1 退化为裸 20/10 突破。
-        # 注意: sim 单推进与该过滤器深度耦合, 关闭后 _record_sim/
-        # _advance_sim 自然不会被触发 (无 skip 即无 sim 单)。
-        self.enable_s1_filter = bool(enable_s1_filter)
 
         self.direction = 0                    # 0 平 / +1 多 / -1 空
         self.layers = []                      # [[lots, price], ...]
@@ -137,6 +145,12 @@ class TurtleEngine:
         self._entry_ch = None     # (upper, lower) 入场通道
         self._exit_ch = None      # (upper, lower) 出场通道
         self._fs_ch = None        # (upper, lower) fail-safe 通道
+
+    @property
+    def system(self) -> str:
+        """派生标签: "S1" if filter else "S2"。仅供日志/快照回滚兼容,
+        不再是构造维度 (B 方案, docs/PROFILE_CONFIG_UNIFICATION.md)。"""
+        return "S1" if self.filter else "S2"
 
     # ------------------------------------------------------------------
     # 主入口
@@ -253,7 +267,7 @@ class TurtleEngine:
 
             if sig_dir != 0:
                 decisions.extend(self._eval_entry(sig_dir, close, n, channels))
-            elif self.system == "S1" and self._fs_armed != 0:
+            elif self.filter and self._fs_armed != 0:
                 # fail-safe: 无新 20 边沿但武装中, 检查 55 边沿
                 d = self._fs_armed
                 fs_hit = (close > channels['fs_upper'] and
@@ -270,7 +284,7 @@ class TurtleEngine:
     def _eval_entry(self, sig_dir: int, close: float, n: float,
                     channels: dict) -> list:
         """新鲜入场信号的 S1/S2 分流"""
-        if self.system == "S2" or not self.enable_s1_filter:
+        if not self.filter:
             return [{"decision": DEC_ENTER, "direction": sig_dir,
                      "price": close, "n": n, "failsafe": False}]
         # S1: 过滤判定
@@ -342,7 +356,7 @@ class TurtleEngine:
         self._reset_levels()      # 新仓 → 重设止损/加仓锚 (2N / 0.5N)
         self._fs_armed = 0
         self._pending = None
-        if self.system == "S1":
+        if self.filter:
             # 实盘入场成为新的 s1_last (taken, 持仓中)
             self.s1_last = {
                 "direction": direction, "entry_price": price, "n": None,
@@ -399,7 +413,7 @@ class TurtleEngine:
         仅对"实单持仓中"(taken 且 status=open) 的记录生效; 已被 sim 单
         或其他状态取代时返回 False, 避免覆盖后到的记录。
         """
-        if self.system != "S1" or not self.layers or self.s1_last is None:
+        if not self.filter or not self.layers or self.s1_last is None:
             return False
         if not self.s1_last.get("taken") \
                 or self.s1_last.get("status") != "open":
@@ -920,7 +934,7 @@ class TurtleEngine:
     def _trigger_entry(self, sig_dir: int, px: float) -> list:
         """入场通道触发: S1 过滤 / S2 直通; skip 则记 sim 并武装 fail-safe。
         只撤同向入场位 (反向保持武装, 否决后可独立触发)"""
-        if self.system == "S2" or not self.enable_s1_filter \
+        if not self.filter \
                 or not self._s1_filter_skip(px):
             self._pending = {"kind": "enter", "dir": sig_dir}
             if sig_dir > 0:
@@ -1045,6 +1059,9 @@ class TurtleEngine:
     # ------------------------------------------------------------------
     def snapshot(self) -> dict:
         return {
+            # v5 起 filter 是语义指纹; system 仍写入 (派生值) 供旧代码
+            # 回滚恢复兼容 (旧代码只认 system 且校验通过)。
+            "filter": self.filter,
             "system": self.system,
             "direction": self.direction,
             "layers": [list(x) for x in self.layers],
@@ -1066,13 +1083,20 @@ class TurtleEngine:
         }
 
     def restore(self, state: dict):
-        # system 决定 s1_last/sim/fail-safe 的解释。旧实现虽把 system
-        # 写入快照却从不校验，同名 S1→S2 会静默继承旧过滤与武装状态。
-        saved_system = state.get("system")
-        if saved_system is not None and saved_system != self.system:
+        # filter 决定 s1_last/sim/fail-safe 的解释 (B 方案: v5 起 filter
+        # 是语义指纹; v4 快照无 filter → 由 system 迁移, 两种口径等价的
+        # 证明是旧代码从不持久化 enable_s1_filter, filter 语义每启由
+        # 配置重建)。旧实现虽把 system 写入快照却从不校验，同名 S1→S2
+        # 会静默继承旧过滤与武装状态。
+        saved_filter = state.get("filter")
+        if saved_filter is None:
+            saved_system = state.get("system")
+            saved_filter = None if saved_system is None \
+                else saved_system == "S1"
+        if saved_filter is not None and bool(saved_filter) != self.filter:
             raise ValueError(
-                f"引擎快照 system 不匹配: saved={saved_system} "
-                f"current={self.system}; 请显式迁移快照")
+                f"引擎快照 filter 不匹配: saved={saved_filter} "
+                f"current={self.filter}; 请显式迁移快照")
         self.direction = state.get("direction", 0)
         self.layers = [list(x) for x in state.get("layers", [])]
         # 旧快照无 layer_ns → 补 None (由 _layer_n 回退最近评估 N, 行为

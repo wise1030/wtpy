@@ -144,7 +144,7 @@ def test_tick_trigger_enter_live_path():
     assert any(o[1] > 0 for o in ctx.orders)   # 触及即入场
     # 触发后快照已持久化 (v4 含 armed)
     blob = json.loads(ctx.kv["tb_engine"])
-    assert blob["v"] == 4
+    assert blob["v"] == 5
     assert blob["subs"]["S1"]["armed"]["stop"] is not None
 
 

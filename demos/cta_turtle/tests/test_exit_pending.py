@@ -20,7 +20,7 @@ def _exit_then_skip(engine):
 
 
 def test_trigger_exit_pending_blocks_retrigger_and_survives_restore():
-    e = TurtleEngine(system="S1", entry_mode="trigger")
+    e = TurtleEngine(filter=True, entry_mode="trigger")
     e.on_bar(100, 98, 99, 99, 2.0, _channels())
     e.on_price(200.0)
     e.confirm_enter(1, 3, 200.0, 2.0)
@@ -33,7 +33,7 @@ def test_trigger_exit_pending_blocks_retrigger_and_survives_restore():
     assert e.on_price(stop - 10) == []       # 不重复出场、不提前反手
     assert e.check_bar(stop - 10, stop + 1, stop - 11, stop - 10) == []
 
-    restored = TurtleEngine(system="S1", entry_mode="trigger")
+    restored = TurtleEngine(filter=True, entry_mode="trigger")
     restored.restore(e.snapshot())
     assert restored.direction == 1
     assert restored._exit_pending["lots"] == 3
@@ -46,7 +46,7 @@ def test_trigger_exit_pending_blocks_retrigger_and_survives_restore():
 
 
 def test_close_async_exit_restores_s1_until_real_fill():
-    e = TurtleEngine(system="S1", entry_mode="close")
+    e = TurtleEngine(filter=True, entry_mode="close")
     e.confirm_enter(1, 1, 100.0, n=10.0)
     decs = _exit_then_skip(e)
     assert [d["decision"] for d in decs] == ["exit", "skip"]
@@ -68,7 +68,7 @@ def test_close_async_exit_restores_s1_until_real_fill():
 
 def test_close_immediate_exit_skip_preserves_new_sim_failsafe():
     """回测/即时确认路径也修复旧仓 confirm 清掉新 sim 的边界。"""
-    e = TurtleEngine(system="S1", entry_mode="close")
+    e = TurtleEngine(filter=True, entry_mode="close")
     e.confirm_enter(1, 1, 100.0, n=10.0)
     decs = _exit_then_skip(e)
     e.confirm_exit(decs[0]["price"])
@@ -79,7 +79,7 @@ def test_close_immediate_exit_skip_preserves_new_sim_failsafe():
 
 
 def test_cancel_exit_keeps_original_position_and_rearms_management():
-    e = TurtleEngine(system="S2", entry_mode="trigger")
+    e = TurtleEngine(filter=False, entry_mode="trigger")
     e.on_bar(100, 98, 99, 99, 2.0, _channels())
     e.on_price(200.0)
     e.confirm_enter(1, 2, 200.0, 2.0)

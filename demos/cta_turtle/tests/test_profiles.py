@@ -104,14 +104,14 @@ def test_snapshot_identity_and_semantic_guard():
 
     wrong_system = {"subs": {"S1": {"system": "S2"},
                              "S2": {"system": "S2"}}}
-    with pytest.raises(ValueError, match="S1.system"):
+    with pytest.raises(ValueError, match="S1.filter"):
         validate_snapshot(wrong_system, profiles)
 
 
 def test_engine_restore_rejects_system_mismatch():
-    snap = TurtleEngine(system="S1").snapshot()
-    with pytest.raises(ValueError, match="system 不匹配"):
-        TurtleEngine(system="S2").restore(snap)
+    snap = TurtleEngine(filter=True).snapshot()
+    with pytest.raises(ValueError, match="filter 不匹配"):
+        TurtleEngine(filter=False).restore(snap)
 
 
 def _yaml_with_speeds(speed_lines: str, base_lines: str = "") -> str:
@@ -246,12 +246,16 @@ def test_profiles_preset_window_override_keeps_semantics():
     assert ps[0].filter is False
 
 
-def test_profiles_s1_filter_off_keeps_s1_engine_semantics():
-    """preset S1 + filter: false = 裸20/10: 引擎仍是 S1 状态机, 过滤器关"""
+def test_profiles_s1_filter_off_keeps_s1_windows():
+    """preset S1 + filter: false = 裸20/10: 窗口仍是 S1 预设, 过滤器关。
+    (B 方案: system 标签由 filter 派生, filter=False → 标签 "S2" —
+    这正是统一的意义: 裸20/10 与 S2 共享同一语义开关。)"""
     base = TurtleBaseConfig()
     ps = resolve_profiles(
         _inst(profiles=[ProfileConfig(preset="S1", filter=False)]), base)
-    assert ps[0].system == "S1" and ps[0].filter is False
+    assert ps[0].filter is False
+    assert (ps[0].entry, ps[0].exit) == (base.s1_entry, base.s1_exit)
+    assert ps[0].system == "S2"      # 派生标签, 非独立维度
 
 
 def test_profiles_custom_windows_without_preset():
@@ -330,13 +334,37 @@ def test_profile_filter_reaches_engine():
     inst = InstrumentConfig(code="SHFE.rb.HOT", units=1, profiles=[
         ProfileConfig(preset="S1", filter=False)])
     stra = StraTurtle("tf", inst, TurtleBaseConfig())
-    assert stra._subs[0]["engine"].enable_s1_filter is False
-    assert stra._subs[0]["engine"].system == "S1"
+    assert stra._subs[0]["engine"].filter is False
+    assert stra._subs[0]["engine"].system == "S2"   # 派生标签
 
 
-def test_snapshot_meta_unchanged_by_unification():
-    """快照指纹键集合不变 → 存量 v4 快照恢复零影响"""
-    meta = ProfileSpec("S1", "S1", 20, 10, 55, 1.0, 1.0).snapshot_meta()
-    assert set(meta) == {"system", "entry", "exit", "fs", "units", "share"}
+def test_snapshot_meta_v5_filter_and_v4_migration():
+    """v5 指纹键集合 = filter 维度; v4 快照 (system 字段) 自动迁移恢复"""
+    meta = ProfileSpec("S1", True, 20, 10, 55, 1.0, 1.0).snapshot_meta()
+    assert set(meta) == {"filter", "entry", "exit", "fs", "units", "share"}
     validate_snapshot_meta({"S1": meta},
-                           [ProfileSpec("S1", "S1", 20, 10, 55, 1.0, 1.0)])
+                           [ProfileSpec("S1", True, 20, 10, 55, 1.0, 1.0)])
+    # v4 快照: system 字段迁移 (S1→filter True)
+    v4 = {"system": "S1", "entry": 20, "exit": 10, "fs": 55,
+          "units": 1.0, "share": 1.0}
+    validate_snapshot_meta({"S1": v4},
+                           [ProfileSpec("S1", True, 20, 10, 55, 1.0, 1.0)])
+    # v4 快照语义变更 (S2) 对当前 S1 profile → fail-loud
+    v4s2 = dict(v4, system="S2")
+    with pytest.raises(ValueError, match="S1.filter"):
+        validate_snapshot_meta({"S1": v4s2},
+                               [ProfileSpec("S1", True, 20, 10, 55, 1.0, 1.0)])
+
+
+def test_engine_restore_v4_system_snapshot_migrates():
+    """v4 引擎快照 (仅 system 字段) 在 v5 引擎上按 system→filter 迁移"""
+    e = TurtleEngine(filter=True)
+    e.confirm_enter(1, 10, 3400.0, n=30.0)
+    snap = e.snapshot()
+    v4 = {k: v for k, v in snap.items() if k != "filter"}   # 模拟 v4
+    assert v4["system"] == "S1"
+    restored = TurtleEngine(filter=True)
+    restored.restore(v4)                     # 迁移成功
+    assert restored.direction == 1
+    with pytest.raises(ValueError, match="filter 不匹配"):
+        TurtleEngine(filter=False).restore(v4)

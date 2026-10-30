@@ -12,7 +12,7 @@ def _channels():
 
 
 def test_close_ratchet_stop_uses_previous_bar_n():
-    e = TurtleEngine(system="S2", entry_mode="close", stop_n_mode="ratchet")
+    e = TurtleEngine(filter=False, entry_mode="close", stop_n_mode="ratchet")
     e.confirm_enter(1, 1, 100.0, n=10.0)       # 根前 stop=80/add=105
     ch = _channels()
 
@@ -29,12 +29,12 @@ def test_close_ratchet_stop_uses_previous_bar_n():
 
 
 def test_close_previous_n_survives_snapshot_restore():
-    e = TurtleEngine(system="S2", entry_mode="close", stop_n_mode="ratchet")
+    e = TurtleEngine(filter=False, entry_mode="close", stop_n_mode="ratchet")
     e.confirm_enter(1, 1, 100.0, n=10.0)
     ch = _channels()
     e.on_bar(104.0, 97.0, 104.0, 100.0, 1.0, ch, open=103.0)
 
-    restored = TurtleEngine(system="S2", entry_mode="close",
+    restored = TurtleEngine(filter=False, entry_mode="close",
                             stop_n_mode="ratchet")
     restored.restore(e.snapshot())
     dec = restored.on_bar(104.0, 97.0, 104.0, 104.0, 1.0, ch, open=103.0)

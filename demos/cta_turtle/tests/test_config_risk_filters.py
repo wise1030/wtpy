@@ -101,7 +101,7 @@ base_extra_never: remove_me
     assert cfg.base.recon_patience == 5
     stra = StraTurtle("t", cfg.instruments[0], cfg.base,
                       risk_cfg=cfg.risk)
-    assert stra._engine.enable_s1_filter is False
+    assert stra._engine.filter is False
     assert stra._base.recon_patience == 5
     # 过滤链已装配: 隐式方向闸 + 2 个显式过滤器
     from filters.builtins import DirectionGateFilter

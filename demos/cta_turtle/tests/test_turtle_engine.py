@@ -24,7 +24,7 @@ def _ch(entry=100.0, exit_=90.0, fs=110.0, prev_entry=None,
 
 
 def _mk_engine(system="S1", layers=4, step=0.5, stop=2.0):
-    return TurtleEngine(system=system, stop_atr_mult=stop,
+    return TurtleEngine(filter=system == "S1", stop_atr_mult=stop,
                         pyramid_layers=layers, pyramid_step_atr=step)
 
 

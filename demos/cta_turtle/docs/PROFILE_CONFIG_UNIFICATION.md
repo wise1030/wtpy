@@ -1,7 +1,8 @@
-# S1/S2 system 与 speeds 统一可行性分析
+# S1/S2 system 与 speeds 统一 — 设计论证与实施记录
 
-> 2026-10-30 分析并**已按 A 方案实施**（配置层统一，引擎/快照零改动；
-> B 引擎去 system 化为可选后续）。本文档保留为设计论证存档。
+> 2026-10-30 分析并实施完毕：**A 方案（配置层统一）+ B 方案（引擎去
+> system 化）均已落地**，生产已部署、v4 快照自动迁移恢复验证通过。
+> 本文档保留为设计论证存档。
 
 ---
 
@@ -81,24 +82,27 @@ instruments:
   `20/10+filter off`、`40/15 自定义窗口+filter on` 等任意组合；
   walk-forward 的网格也从"system 二选一"变成窗口×filter 的连续空间。
 
-## 4. 引擎指纹怎么办（快照兼容）
+## 4. 引擎指纹怎么办（快照兼容）—— 已按 B 方案实施
 
-v4 快照的 profile 指纹含 `system` 字段，`TurtleEngine.restore` 校验它。
-两条路：
+实施结果（2026-10-30 夜）：
+- `TurtleEngine` 构造维度 `system`+`enable_s1_filter` 二元组 → 单一
+  `filter: bool`；`system` 降级为只读派生属性（"S1" if filter else
+  "S2"），仅供日志/标签。全部 10 处 `self.system` 门控改走 filter。
+- `ProfileSpec` 同步：`system` 字段 → `filter` 字段 + `system` 派生
+  属性；`snapshot_meta` v5 = {filter, entry, exit, fs, units, share}。
+- 快照版本 v4→v5（StraTurtle `"v": 5`）；恢复路径接受 v3/v4/v5：
+  - v4 引擎快照（仅 system）→ 迁移 filter = system=="S1"；
+  - v4 profiles 指纹（system 字段）→ 同口径迁移，多余 system 键容忍；
+  - 新旧快照都写入 system 派生值 → 代码回滚（新快照被旧代码读）也
+    能恢复。
+- 已知边界（fail-loud，记录在案）：v4 快照无法区分 "S1+裸20/10" 与
+  "S2"（v4 从不持久化 enable_s1_filter），迁移按 system 判 filter；
+  若部署真处于该组合且配置已改，恢复会显式报错要求迁移 —— 与项目
+  fail-loud 哲学一致，生产配置（filter=True）不受影响。
+- 零漂移验证：黄金回测 signals/funds/trades 哈希逐位一致；生产 v4
+  快照在新代码下自动迁移恢复（rb 410 手/风险账一致，0 error）。
 
-- **A（推荐，第一步）**：配置层统一，引擎与快照**完全不动**。
-  `resolve_profiles` 输出仍带 `system` 字段（由 filter 位推导：
-  filter=on→"S1"，off→"S2"），快照/恢复/日志零漂移。
-  代价：`system` 成为导出字段而非输入字段，概念上仍在。
-- **B（可选，第二步）**：引擎去 system 化——构造参数改
-  `filter: bool`（替换 system+enable_s1_filter 二元组），快照指纹
-  `system` 改 `filter`。需要快照版本 v5 + 迁移规则（v4 按
-  system→filter 换算）。收益是概念彻底干净；成本是动引擎核心 +
-  ~40 处测试口径。
-
-A 做到位后 B 是纯机械重构，可以随时补；不补也不影响任何业务正确性。
-
-## 5. 迁移与兼容矩阵
+## 5. 迁移与兼容矩阵（实施状态）
 
 | 现状配置 | 统一后等价写法 | 处理 |
 |---|---|---|

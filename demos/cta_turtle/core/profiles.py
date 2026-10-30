@@ -26,23 +26,26 @@ import math
 @dataclass(frozen=True)
 class ProfileSpec:
     key: str
-    system: str                 # S1 | S2（引擎语义，不是展示名）
+    filter: bool                # S1 入场状态机语义 (唯一语义开关, B 方案);
+                                # "S1"/"S2" 降级为派生标签 (system 属性)
     entry: int
     exit: int
     fs: int
     units: float                # PositionSizer 名义单位
     share: float                # 品种内预算份额（legacy 可为 0）
-    filter: bool = True         # S1 过滤器语义 (引擎 enable_s1_filter;
-                                # 不入快照指纹 — 每启由配置重建, 与
-                                # enable_s1_filter 现状同口径)
+
+    @property
+    def system(self) -> str:
+        """派生标签: "S1" if filter else "S2"。仅供日志/旧键兼容,
+        不再是独立维度 (docs/PROFILE_CONFIG_UNIFICATION.md B 方案)。"""
+        return "S1" if self.filter else "S2"
 
     def snapshot_meta(self) -> dict:
-        """写入快照的语义指纹。任何变化都要求显式迁移，禁止同名静默
-        继承旧 s1_last/armed/channels 或混用新旧 sizing。
-        (filter 有意不入指纹: 它是每启构造参数, 与 system 快照校验
-        组合已能保证语义连续。)"""
+        """写入快照的语义指纹 (v5)。任何变化都要求显式迁移，禁止同名
+        静默继承旧 s1_last/armed/channels 或混用新旧 sizing。
+        (v4 快照的 system 字段由 validate_snapshot_meta 迁移为 filter。)"""
         return {
-            "system": self.system,
+            "filter": bool(self.filter),
             "entry": int(self.entry),
             "exit": int(self.exit),
             "fs": int(self.fs),
@@ -56,16 +59,14 @@ class ProfileSpec:
 # "裸20/10" 开关的语义不变); S2 恒无过滤器语义。
 _PRESET_DEFAULTS = {
     "S1": lambda base: {
-        "system": "S1",
+        "filter": bool(base.enable_s1_filter),
         "entry": int(base.s1_entry), "exit": int(base.s1_exit),
         "fs": int(base.s2_entry),
-        "filter": bool(base.enable_s1_filter),
     },
     "S2": lambda base: {
-        "system": "S2",
+        "filter": False,
         "entry": int(base.s2_entry), "exit": int(base.s2_exit),
         "fs": int(base.s2_entry),
-        "filter": False,
     },
 }
 
@@ -104,7 +105,7 @@ def _expand_profiles(inst_cfg, base_cfg) -> list:
         if preset:
             eff = _PRESET_DEFAULTS[preset](base_cfg)
         else:
-            eff = {"system": "", "entry": None, "exit": None,
+            eff = {"entry": None, "exit": None,
                    "fs": None, "filter": None}
         # 显式字段覆盖预设缺省
         for field in ("entry", "exit", "fs", "filter"):
@@ -116,7 +117,6 @@ def _expand_profiles(inst_cfg, base_cfg) -> list:
                 f"{code}: profiles[{j}] 无 preset 时必须显式 entry/exit")
         flt = bool(eff["filter"]) if eff["filter"] is not None \
             else bool(base_cfg.enable_s1_filter)
-        system = preset or ("S1" if flt else "S2")
         if preset == "S2" and flt:
             raise ValueError(
                 f"{code}: profiles[{j}] preset S2 无过滤器语义, "
@@ -139,10 +139,10 @@ def _expand_profiles(inst_cfg, base_cfg) -> list:
             raise ValueError(
                 f"{code}: profiles[{j}] 无 preset 时必须显式 name")
         out.append(ProfileSpec(
-            key=name, system=system, entry=int(eff["entry"]),
+            key=name, filter=flt, entry=int(eff["entry"]),
             exit=int(eff["exit"]), fs=int(fs),
             units=max(0.0, units_total * share),
-            share=share, filter=flt))
+            share=share))
     if not math.isclose(total_share, 1.0, abs_tol=1e-6):
         raise ValueError(
             f"{code}: profiles share 之和需为 1 (当前 {total_share:g})")
@@ -175,15 +175,15 @@ def resolve_profiles(inst_cfg, base_cfg) -> list:
                 f"{inst_cfg.code}: speeds share 需各自在 (0,1] 且合计为 1")
         return [
             ProfileSpec(
-                key=str(sp.name), system=str(sp.system),
+                key=str(sp.name),
+                filter=str(sp.system) == "S1"
+                and bool(base_cfg.enable_s1_filter),
                 entry=int(sp.entry), exit=int(sp.exit),
                 # ConfigLoader 已按 base.s2_entry 填缺省；直接实例化
                 # SpeedConfig 时 fs=None 也走同一缺省口径。
                 fs=int(sp.fs if sp.fs is not None else base_cfg.s2_entry),
                 units=max(0.0, float(inst_cfg.units) * float(sp.share)),
-                share=float(sp.share),
-                filter=bool(base_cfg.enable_s1_filter)
-                if str(sp.system) == "S1" else False)
+                share=float(sp.share))
             for sp in speeds
         ]
 
@@ -192,13 +192,14 @@ def resolve_profiles(inst_cfg, base_cfg) -> list:
         u1, u2 = u - u // 2, u // 2
         denom = max(u, 1)
         return [
-            ProfileSpec("S1", "S1", int(base_cfg.s1_entry),
+            ProfileSpec("S1", bool(base_cfg.enable_s1_filter),
+                        int(base_cfg.s1_entry),
                         int(base_cfg.s1_exit), int(base_cfg.s2_entry),
-                        float(u1), u1 / denom,
-                        filter=bool(base_cfg.enable_s1_filter)),
-            ProfileSpec("S2", "S2", int(base_cfg.s2_entry),
+                        float(u1), u1 / denom),
+            ProfileSpec("S2", False,
+                        int(base_cfg.s2_entry),
                         int(base_cfg.s2_exit), int(base_cfg.s2_entry),
-                        float(u2), u2 / denom, filter=False),
+                        float(u2), u2 / denom),
         ]
 
     system = str(inst_cfg.system)
@@ -209,10 +210,10 @@ def resolve_profiles(inst_cfg, base_cfg) -> list:
         entry, exit_ = base_cfg.s2_entry, base_cfg.s2_exit
     else:
         entry, exit_ = base_cfg.s1_entry, base_cfg.s1_exit
-    return [ProfileSpec(system, system, int(entry), int(exit_),
-                        int(base_cfg.s2_entry), float(inst_cfg.units), 1.0,
-                        filter=bool(base_cfg.enable_s1_filter)
-                        if system == "S1" else False)]
+    return [ProfileSpec(system, system == "S1"
+                        and bool(base_cfg.enable_s1_filter),
+                        int(entry), int(exit_),
+                        int(base_cfg.s2_entry), float(inst_cfg.units), 1.0)]
 
 
 def required_bars(inst_cfg, base_cfg) -> int:
@@ -233,8 +234,14 @@ def snapshot_meta(profiles) -> dict:
 
 
 def validate_snapshot_meta(saved, profiles) -> None:
-    """校验 v4+ 快照携带的 profile 指纹；旧快照无此段时由调用方做
-    name/system 兼容检查。任何不匹配都抛 ValueError（fail-loud）。"""
+    """校验快照携带的 profile 指纹；旧快照无此段时由调用方做
+    name 兼容检查。任何不匹配都抛 ValueError（fail-loud）。
+
+    v4→v5 迁移 (B 方案 2026-10-30): v4 指纹的 system 字段迁移为
+    filter = system=="S1" (v4 从不持久化 enable_s1_filter, filter 语义
+    每启由配置重建, 该迁移与启动构造口径一致)。saved 多出的 system
+    键容忍; 缺 filter 且无 system → fail-loud。
+    """
     if saved is None:
         return
     if not isinstance(saved, dict):
@@ -249,6 +256,14 @@ def validate_snapshot_meta(saved, profiles) -> None:
         got = saved[key]
         if not isinstance(got, dict):
             raise ValueError(f"snapshot profile {key} 元数据格式非法")
+        # v4 迁移: system → filter
+        got = dict(got)
+        if "filter" not in got:
+            if "system" not in got:
+                raise ValueError(
+                    f"snapshot profile {key} 缺 filter (v4 迁移亦需要 "
+                    f"system 字段)")
+            got["filter"] = got["system"] == "S1"
         for field, wv in want.items():
             if field not in got:
                 raise ValueError(f"snapshot profile {key} 缺 {field}")
@@ -297,9 +312,15 @@ def validate_snapshot(data: dict, profiles) -> None:
             "请显式迁移快照，禁止静默漏恢复")
     validate_snapshot_meta(data.get("profiles"), profiles)
     for key, snap in saved_subs.items():
-        saved_system = snap.get("system") if isinstance(snap, dict) else None
-        if saved_system is not None and saved_system != expected[key].system:
+        if not isinstance(snap, dict):
+            continue
+        # v5 指纹 filter; v4 仅有 system → 迁移 filter=system=="S1"
+        saved_filter = snap.get("filter")
+        if saved_filter is None and "system" in snap:
+            saved_filter = snap.get("system") == "S1"
+        if saved_filter is not None \
+                and bool(saved_filter) != expected[key].filter:
             raise ValueError(
-                f"snapshot profile {key}.system 不匹配: "
-                f"saved={saved_system} current={expected[key].system}; "
+                f"snapshot profile {key}.filter 不匹配: "
+                f"saved={saved_filter} current={expected[key].filter}; "
                 "请显式迁移快照")

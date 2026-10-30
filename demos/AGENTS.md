@@ -267,3 +267,16 @@ close 突破入场/trigger 武装）。剩余：live h1 部署前 rt m5 日历�
   等价 legacy/互斥/弃用告警/快照指纹不变), ruff, 已部署生产
   (64 文件 md5 全一致, 24 inited, 恢复正确, 0 error)。
   剩余 B 方案(引擎去 system 化, 快照 v5)为可选后续。
+- [x] **profile 统一 B 方案落地（2026-10-30 夜，A 方案同日下午已落）**：
+  引擎去 system 化——`TurtleEngine(system, enable_s1_filter)` 二元组
+  → 单一 `filter: bool`（全部 10 处 system 门控改走 filter; "S1"/"S2"
+  降级为 filter 派生只读标签, 日志/快照回滚兼容）; ProfileSpec 同步
+  (filter 字段+system 属性); 快照 v4→v5（filter 指纹, 恢复路径
+  v3/v4/v5 全兼容, v4 system 自动迁移 filter=system=="S1", 新快照
+  双写 system 派生值支持代码回滚）。已知 fail-loud 边界记录: v4 快照
+  无法区分"S1+裸20/10"与"S2"(v4 不持久化 enable_s1_filter), 迁移按
+  system 判 — 该组合且改配置时恢复显式报错要求迁移, 生产(filter=T)
+  不受影响。零漂移验证: 黄金哈希逐位一致 + 生产 v4 快照自动迁移恢复
+  (rb 410 手/风险账一致, 0 error)。测试 606→**607** (+v4迁移/v5指纹/
+  派生标签 3 例, 另机械迁移 ~40 处构造点), ruff, 已部署生产。
+  system/speeds 配置别名保留可用 (deprecated WARN)。

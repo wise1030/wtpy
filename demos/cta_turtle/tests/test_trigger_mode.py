@@ -27,7 +27,7 @@ def _ch(eu=110.0, el=90.0, xu=105.0, xl=95.0, fu=120.0, fl=80.0):
 
 
 def _mk(system="S2", mode="trigger", **kw):
-    return TurtleEngine(system=system, entry_mode=mode, **kw)
+    return TurtleEngine(filter=system == "S1", entry_mode=mode, **kw)
 
 
 def _arm(e, h=100.0, l=98.0, c=99.0, pc=99.0, n=2.0, ch=None):

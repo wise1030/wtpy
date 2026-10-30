@@ -519,7 +519,7 @@ def test_dual_risk_book_uses_layer_n_not_current():
 def test_engine_booked_risk_per_layer():
     """engine.booked_risk(): 逐层按各自冻结 N (缺 N 的层跳过)"""
     from core.TurtleEngine import TurtleEngine
-    e = TurtleEngine("S1", stop_atr_mult=2.0, pyramid_layers=4)
+    e = TurtleEngine(filter=True, stop_atr_mult=2.0, pyramid_layers=4)
     e.confirm_enter(1, 10, 3000.0, n=60.0)
     e.confirm_add(5, 3030.0, n=80.0)
     assert abs(e.booked_risk(10.0) - (10 * 60 + 5 * 80) * 10 * 2) < 1e-9
