@@ -240,3 +240,12 @@ close 突破入场/trigger 武装）。剩余：live h1 部署前 rt m5 日历�
   contracts/hots/hotdaily 定时器全部正常；真值 balance 25.6M/avail
   13.5M，本策略持仓 rb 空 410/p 空 72/m 空 304/CF 空 159/IF 空 9
   与引擎一致。教训：账户级数据源的按品种过滤必须前置到 feed 层。
+- [ ] **profile 配置统一可行性分析（2026-10-30，未实施，
+  docs/PROFILE_CONFIG_UNIFICATION.md）**：结论=可合并且方向是配置层
+  向代码层看齐（代码层早已统一为 ProfileSpec 唯一中间态，分裂只在
+  配置层 system/speeds 双入口 + "speeds 非空忽略 system" 优先级规则）。
+  引擎核验: system 全部用途 ≡ filter 布尔语义 + 预设名（窗口早已
+  参数化, enable_s1_filter 已是半独立开关）。目标模型 =
+  `profiles: [{preset: S1|S2, 逐字段覆盖, share}]`；两步走:
+  A 配置层统一零引擎漂移（推荐先做）, B 引擎去 system 化（可选,
+  快照 v5）。边界: 与双系统 A/B 负结果无关, 不改变生产单 profile 结论。
