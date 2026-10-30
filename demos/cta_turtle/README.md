@@ -4,11 +4,13 @@
 （日线信号，每品种独立配置）。核心能力：VaR 波动率仓位反算、**双模式信号确认**
 （`trigger` 盘中武装-触发，生产默认 / `close` 收盘确认）、**可插拔信号过滤器**
 （方向闸/ADX/波动率带/流动性下限）、**组合级风险预算**（单品种本笔+单品种累计+
-总敞口+保证金+相关性组单位限制+共享账户资金闸）、**双系统 S1+S2 并行**（各半
-units 共享品种预算）、经典加仓金字塔、m5 盘中止损、**小时级 h1 信号**
-（策略层 m5→h1 聚合，2026-10-21 一期）、交易通道真值对账
-（rtdata.json 持仓/资金 + trades.csv 逐笔成交）、walk-forward 滚动寻优、
-**共享账本组合回测**（close/trigger 双模式，真正执行组合约束）。
+总敞口+保证金+相关性组单位限制+共享账户资金闸）、**多 profile 信号**
+（`profiles[]` 统一入口：preset=窗口+过滤器预设，任意窗口×filter 组合可表达；
+多 profile 组合 A/B 为负结果，生产单 profile S1）、经典加仓金字塔、m5 盘中止损、
+**小时级 h1 信号**（策略层 m5→h1 聚合，2026-10-21 一期）、交易通道真值对账
+（rtdata.json 持仓/资金 + trades.csv 逐笔成交 + **订单级 localid 归因链**，
+零 C++ 改动）、walk-forward 滚动寻优、**共享账本组合回测**（close/trigger
+双模式，真正执行组合约束）。
 
 > 变更历史与路线全貌见 `../AGENTS.md`（本 README 只描述当前状态）。
 
@@ -21,8 +23,10 @@ StraTurtle (框架壳)           生命周期/图表/执行/持久化/对账/盘
      │
 ├─ filters/                   可插拔信号过滤链 (方向闸/ADX/波动率带/流动性, 只读不改引擎)
 ├─ core/                      被 import 的策略核心库 (纯逻辑零框架依赖)
-│   TurtleEngine/Indicators   信号状态机 + Wilder ATR/Donchian (向量化)
+│   TurtleEngine/Indicators   信号状态机 (filter 唯一语义开关) + Wilder ATR/Donchian
+│   profiles                  profiles[] → ProfileSpec 唯一展开 (preset/别名/快照校验)
 │   RiskManager               下单前最后闸门: 单品种本笔/累计/组合预算+相关性组+保证金+共享账户资金闸
+│   OrderAttributor           订单级归因链: 意图序×侧车 localid×trades.csv → per-profile 精确 vwap
 │   LiveTruth                 交易通道真值 (rtdata.json 真实持仓/资金 + trades.csv 逐笔成交)
 │   ExecJournal               执行层订单状态机+归因 (旁路侧车 scripts/exec_journal.py)
 │   aggregate                 m5→h1 聚合 (h1 一期, backtest/live 同源)
@@ -47,7 +51,7 @@ StraTurtle (框架壳)           生命周期/图表/执行/持久化/对账/盘
 | S1 出场 | 反向 10 周期突破 或 2N 止损 |
 | S1 过滤 | 上次 S1 突破盈利 → 跳过本次；被跳过则武装 fail-safe：价格继续突破 55 周期强制入场；被跳过的模拟单 2N 止损后过滤器解除（`enable_s1_filter` 可关闭） |
 | S2 | 55 周期突破入场 / 20 周期出场，无过滤 |
-| 双系统 | `system: "S1+S2"` 两子系统并行，各分 ceil/floor 半量 units，独立通道/引擎状态，框架净仓=两者之和，品种内风险/保证金预算按 units 占比切分 |
+| 多 profile | 双系统/S2 等一切组合都是 `profiles[]` 写法（见下行）；**组合 A/B 负结果**（12 品种 close/60M/2019-2026：S1+S2 双倍速消耗品种累计/保证金预算 → 约束 +6.2%/DD55.6% vs 纯 S1 +75.3%/DD29.4%，`matrix_results/dual_ab.json`）→ **生产单 profile S1**，多 profile 能力保留待预算放宽后重测 |
 | 信号 profiles | `profiles[]` 是唯一入口（`system`/`speeds` 为弃用别名，deprecated 告警，展开结果等价）：`preset: S1\|S2` 是"窗口+过滤器语义"的预设简写（S1=20/10+盈利跳过/fail-safe；S2=55/20 无过滤），显式 `entry/exit/fs/filter` 逐字段覆盖预设缺省——`S2 语义+自定义窗口`、`S1 窗口+关过滤器` 等任意组合可表达；多档必须显式 `name` 且 `share` 合计=1（品种预算按份额切分），与旧键互斥 fail-loud。ATR、period、过滤链、执行与风控仍为品种级共享；快照携带 profile 身份与语义指纹，改名/改语义不做静默迁移 |
 | 加仓 | 每盈利 0.5N 加一层（可配 `pyramid_step_atr`），上限 `pyramid_layers`（1=不加仓），加仓后整体止损上移至最后加仓价 ∓ 2N；`stop_n_mode=ratchet` 时加仓位只在两次加仓之间单调向不利方向（防 N 缩小时价格未推进就加仓） |
 | 止损 | 2N 硬止损，bar 内 low/high 触碰判定，按止损价离场；`stop_n_mode` 控制 N 口径（默认 ratchet=只收紧不放宽，见「与经典海龟的偏离」）；`intrabar_stop: true` 时主K切换为分钟线（默认 m5）**盘中即时离场**；`entry_mode: trigger` 时止损/加仓/通道出场全部由 tick 武装位盘中触发 |
@@ -210,8 +214,9 @@ notify:
 instruments:
   - code: SHFE.rb.HOT
     period: d1            # d1 | h1 (h1=策略层 m5→h1 聚合, 需 m5 数据)
-    system: S1            # S1(20/10+过滤) | S2(55/20)
-    units: 2              # 每层 2×20万=40万 VaR
+    # profiles:           # 信号 profile 唯一入口 (system/speeds 已弃用):
+    #   - preset: S1       #   预设=窗口+filter 简写; 可覆盖 entry/exit/fs/filter
+    units: 2              # 每层 2×20万=40万 VaR (品种名义单位, 按 share 折算)
     direction: both       # both | long | short (隐式方向闸)
     group: black          # 相关性组标签
     filters:              # 辅助过滤链 (可省略; 内置类型见 filters/builtins.py)
@@ -260,10 +265,17 @@ WT 数据底盘只从 tick 合成 min1/min5/day、**不写 h1**，且 his DSB �
   增量 feed）；live 部署前需在生产环境验证 rt m5 的 date/time 口径与 bt DSB
   一致（夜盘日历日假设，见 `core/aggregate.py` docstring）
 
-## 组合回测成绩（共享账本，历史口径）
+## 组合回测成绩（共享账本）
+
+**当前口径（2026-10-30 重跑，12 品种 close/strength/60M/1tick，
+2019-01~2026-08 = 1859 交易日）**：约束 +75.28% / 回撤 29.38% / Sharpe
+0.408（1929 笔，否决 383），无约束对照 +95.66% / 38.62% / 0.441
+（`matrix_results/dual_ab.json` 的 S1 臂）。trigger 组合全窗口成绩
+待 m5 数据补齐后重跑（本地仅 rb/IF 有 m5，其余 10 品种退化 d1 触碰）。
 
 > 下表是 2026-10-26 语义修正前的历史留档。通道、事件估值、post-risk、
-> 费用与换月覆盖已变化，不能直接视为当前结果；请以带 manifest 的新运行为准。
+> 费用与换月覆盖已变化，不能直接视为当前结果；上表与带 manifest 的新
+> 运行为准。
 
 `run_portfolio_bt.py` 让 12 品种共用**一个** `RiskManager`/账本逐日推进，
 新开仓/加仓前真正执行单品种本笔、单品种累计、总敞口、保证金、单位上限
@@ -271,10 +283,10 @@ WT 数据底盘只从 tick 合成 min1/min5/day、**不写 h1**，且 his DSB �
 上界**，不可比）。窗口 2019-01~2026-08（1859 交易日），总资金 60M，单边滑点
 1 tick，约束 = 6 单位 / 组 2 / 总风险 10% / 保证金 60%：
 
-| 模式 | 约束后 | 无约束对照（同信号同单笔风险） |
+| 模式 | 约束后（历史口径） | 无约束对照（同信号同单笔风险） |
 |---|---|---|
-| close（收盘确认，名额按突破强度） | **+77.07% / 回撤 29.17% / Sharpe 0.414**（1927 笔，否决 382） | +97.35% / 38.19% / 0.446 |
-| trigger（盘中武装-触发，名额按 m5 时间 first-come） | **+85.97% / 回撤 38.77% / Sharpe 0.448**（2589 笔，否决 1053） | +152.53% / 38.41% / 0.558 |
+| close（收盘确认，名额按突破强度） | +77.07% / 回撤 29.17% / Sharpe 0.414（1927 笔，否决 382） | +97.35% / 38.19% / 0.446 |
+| trigger（盘中武装-触发，名额按 m5 时间 first-come） | +85.97% / 回撤 38.77% / Sharpe 0.448（2589 笔，否决 1053） | +152.53% / 38.41% / 0.558 |
 
 口径注意：
 - close 模式结果**依赖名额分配规则**（config 顺序 +61.9% vs 突破强度
@@ -302,8 +314,10 @@ WT 数据底盘只从 tick 合成 min1/min5/day、**不写 h1**，且 his DSB �
    `prev_*` 与当根 high/low 再包络，既重新加入信号根，又让生产与研究
    错一根。现 `arm_exclude_signal=true` 使用已排除信号根的 current
    通道并忽略 envelope；false 使用 `next_*` 最近 N 根通道。旧“严格经典
-   +139.94%”不再作为决策证据。rb 黄金回归从 33.37% 变为 21.85%，
-   作为声明式口径变更保留差异，未擅自刷新历史基线。
+   +139.94%”不再作为决策证据。rb 黄金基线随两次口径修正显式刷新
+   （33.37% → 9.73%，`golden_bt.py --update` 声明）：10-26 修正去除陈旧
+   锚的类前视优势，10-29 引擎修复（S1 sim 跳空输赢/换月坐标等）叠加；
+   当前 9.73%/DD25.74%/Sharpe -0.015 为诚实口径的固定回归基线。
 
 0. **主力连续日线需每日续接**（`scripts/update_hot_daily.py`，2026-09-16 实盘故障）：
    数据底盘（WtDt）每日只写**真实合约**日线（`his/day/<EXCHG>/<contract>.dsb`），
@@ -365,7 +379,7 @@ WT 数据底盘只从 tick 合成 min1/min5/day、**不写 h1**，且 his DSB �
 ## 测试
 
 ```bash
-python3 -m pytest tests/ -q    # 587 passed (59 个测试文件)
+python3 -m pytest tests/ -q    # 607 passed (59 个测试文件)
 ruff check . --config ruff_cta_turtle.toml    # lint
 ```
 
@@ -399,9 +413,15 @@ journal turnover 旁路、`--weights` 之外的矩阵串行模式提醒、**陈�
 无 m5 退化 d1 触碰）、**执行层订单状态机与归因**（生命周期跃迁/at-least-once
 去重/订单缺失 stub 兜底/买卖方向滑点符号/时间窗与方向不匹配）、
 **h1 m5 聚合/夜盘映射/评估锚点**、平今费率区分（closetoday/close 回退）。
-**第二阶段**：next/current 通道归属、disarm 持久化、事件估值无未来函数、
-根前 N、tick 跳空实际价、post-risk、组合权益、逐层今昨仓费用、换月日历、
-共同窗口/日期对齐、输入 manifest 与异口径聚合拒绝。
+**第三阶段**：多 profile `__dual__` 批次恢复/mixed 延迟队列/异步出场、
+TradeJournal 业务游标(文件身份+首笔身份)、trigger S1 sim 跳空输赢、
+**write-ahead outbox**（意图先于目标单持久化/绝对目标重放/证据确认/
+UNKNOWN 封锁/跨日过期）、**RiskManager (code,profile) 分账**（份额
+预算/post_profile_risk_base）、**组合回测多 profile**（gross 风险费用、
+net 批末结算）、**订单级归因链**（意图序×侧车 localid×trades.csv 兜底/
+簿镜像惰性反推/守恒 UNKNOWN/mixed 签名认领/外部品种过滤）、
+**profiles 统一入口**（preset 覆盖规则/deprecated 别名互斥）、
+**v4→v5 快照迁移**（system→filter 指纹/引擎与 profiles 两处/回滚双写）。
 
 回测工具链可靠性：`run_matrix` 子进程失败即 SystemExit；`run_walkforward` /
 `run_slippage_sens` 先删旧 summary 再跑并检查 rc；`WtBtAnalyst` 失败时
@@ -421,7 +441,9 @@ journal turnover 旁路、`--weights` 之外的矩阵串行模式提醒、**陈�
 | `docs/OPTIMIZATION_PLAN_2026-10-22.md` | 优化方案 (资金分配/拆分/执行层/过滤器 A/B) |
 | `docs/IMPLEMENTATION_P0_2026-10-26.md` | P0 第一批实施记录（出场证据/共享账户/数据与预检 fail-closed） |
 | `docs/IMPLEMENTATION_PHASE2_2026-10-26.md` | 第二阶段实施记录（通道/时序/组合资金/研究复现） |
-| `docs/IMPLEMENTATION_PHASE3_2026-10-26.md` | 第三阶段实施记录（多 profile/换月连续性/OOS 与告警自检） |
+| `docs/IMPLEMENTATION_PHASE3_2026-10-26.md` | 第三阶段实施记录（多 profile/换月连续性/OOS 与告警自检；§7-8 含归因链与激活结论） |
+| `docs/ORDER_ATTRIBUTION_NO_CPP.md` | 订单级归因链设计论证（net/gross 不可解性/localid 链/userTag 降级备选项） |
+| `docs/PROFILE_CONFIG_UNIFICATION.md` | system/speeds 统一设计论证与 A+B 实施记录（preset/filter 正交模型） |
 
 ## 文件结构
 
@@ -430,20 +452,23 @@ StraTurtle.py            # 策略壳: 生命周期/图表/装配/持久化/对�
                          #   执行链路已迁出, 见 execution/)
 execution/               # 执行层 (A1 拆分, 2026-10-22; 薄转发保接口兼容)
   batch.py               # TargetIntent：事件级净目标/净变化与跨零口径
-  router.py              # 门控链+单/双系统执行路由+武装裁决
+  router.py              # 门控链+单/多 profile 执行路由+武装裁决
   fill_tracker.py        # enter/add/exit 成交证据链/exit_pending/均价回写/幽灵处理
   truth_monitor.py       # 真值源/运行时对账/共享账户资金闸
   telemetry.py           # 告警落盘/否决日志冷却/fund_live/journal 旁路
-  paths.py               # 组合根目录常量
+  host.py                # StrategyHost 显式依赖面 (DEPS 白名单 loud-failure)
   models.py              # StrategyMode 模式面 (A2: on_init 单点算定)
+  paths.py               # 组合根目录常量
 filters/
   base.py                # SignalFilterBase 协议 + FilterContext + 注册表
   builtins.py            # DirectionGate/AdxTrend/VolatilityBand/LiquidityFloor
 core/
   indicators.py          # Wilder ATR/ADX (lfilter) + Donchian (sliding_window_view)
-  TurtleEngine.py        # 信号状态机 (纯逻辑, 无框架依赖)
+  TurtleEngine.py        # 信号状态机 (纯逻辑, filter 唯一语义开关, 无框架依赖)
+  profiles.py            # profiles[] → ProfileSpec 唯一展开 + preset/别名/快照 v5 校验
   PositionSizer.py       # VaR 反算
-  RiskManager.py         # 组合风险预算闸门 + 在途持仓记账 (支持子系统份额/账户资金闸)
+  RiskManager.py         # 组合风险预算闸门 + (code,profile) 分账 + 账户资金闸
+  OrderAttributor.py     # 订单级归因链 (意图×localid×成交 → per-profile vwap)
   LiveTruth.py           # 交易通道真值 (rtdata.json 持仓/资金 + trades.csv 逐笔成交)
   BarJournal.py          # K线旁路日志 (宕机窗口兜底, journal→csv 幂等回补)
   ExecJournal.py         # 执行层订单状态机+归因 (纯逻辑, localid 级滑点/部成率)
@@ -489,5 +514,5 @@ scripts/
 deploy_tpl/              # 生产部署模板 (run.py/runDt.py/dtcfg/解析器/systemd units)
 configbt.yaml            # 回测引擎配置
 config.yaml + tdparsers/tdtraders/executers/actpolicy/filters/logcfg  # 实盘模板
-tests/                   # 59 个测试文件 / 587 例
+tests/                   # 59 个测试文件 / 607 例
 ```
