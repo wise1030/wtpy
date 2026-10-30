@@ -225,3 +225,18 @@ close 突破入场/trigger 武装）。剩余：live h1 部署前 rt m5 日历�
   加固备选项。已部署生产（deploy/cta_turtle，rsync+md5 校验+SIGKILL
   重启，WatchDog 拉起）。剩余非代码项：notify webhook URL、归因链
   生产观测窗实证。
+- [x] **远程巡检 + 归因链两项生产缺陷修复（2026-10-30 午后）**：巡检
+  发现 ①共享账户上**其他策略**在做 INE.ec/ao/ag（订单回报 userTag
+  `000001#...` 可见），其成交进入账户级侧车/trades.csv 后被全部 12
+  策略的 OrderFeed 消费 → 成批 attribution unmatched 误告警
+  （本品种 0 例，归因链本身正确）；②事件携带真实合约码
+  (SHFE.rb.2610) 而归因队列以 HOT 键注册，绑定会整体失配（测试事件
+  一直用 HOT 码故未暴露）。修复：ExecAttribution.poll 按品种前缀
+  过滤 + 事件归一化到 HOT 键；各加 1 例回归（tests 18 例，
+  全量 **589 passed**、ruff）。热修部署 + SIGKILL 重启复验：最新批次
+  14:10:03 后 0 unmatched/0 error。运维记录：监控服务正确名
+  wt-turtle-monitor（非 -mon，active 自 9/20）；今日 4 次启动批次
+  08:47 盘前 / 10:18 / 10:21 / 14:10（后三次为部署）；premarket/
+  contracts/hots/hotdaily 定时器全部正常；真值 balance 25.6M/avail
+  13.5M，本策略持仓 rb 空 410/p 空 72/m 空 304/CF 空 159/IF 空 9
+  与引擎一致。教训：账户级数据源的按品种过滤必须前置到 feed 层。

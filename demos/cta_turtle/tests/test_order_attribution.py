@@ -271,6 +271,31 @@ def test_order_feed_daily_rotation_resumes(tmp_path):
 
 # ---------- ExecAttribution: 簿初值 ----------
 
+def test_exec_attr_poll_filters_foreign_codes(tmp_path):
+    """账户级事件流按品种前缀过滤: 共享账户下其他策略的成交 (生产
+    实测 INE.ec/ao/ag) 不得进入本策略归因队列 (2026-10-30 回归)。"""
+    ea = ExecAttribution(CODE, str(tmp_path / "execj"), "")
+    ea.init_book(None, fallback_net=0.0)
+    ea.on_intent("i1", before=0, after=2, ts=100.0)
+    jdir = tmp_path / "execj"
+    jdir.mkdir(exist_ok=True)
+    with open(jdir / "exec_20261030.jsonl", "w", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "trade", "code": "INE.ec.2612",
+                            "localid": 77, "volume": 5,
+                            "price": 2100.0, "ts": 100.1}) + "\n")
+        f.write(json.dumps({"type": "order", "code": "SHFE.rb.2610",
+                            "localid": 78, "islong": True, "isopen": True,
+                            "total": 2, "ts": 100.2}) + "\n")
+        f.write(json.dumps({"type": "trade", "code": "SHFE.rb.2610",
+                            "localid": 78, "volume": 2,
+                            "price": 3400.0, "ts": 100.3}) + "\n")
+    new_unmatched = ea.poll()
+    assert new_unmatched == 0
+    assert ea.attr.unmatched == []
+    p = ea.progress("i1")
+    assert p["done"] and p["vwap"] == pytest.approx(3400.0)
+
+
 def test_exec_attr_init_book_from_broker_positions():
     ea = ExecAttribution(CODE)
     ea.init_book([

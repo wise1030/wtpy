@@ -596,9 +596,23 @@ class ExecAttribution:
         self.attr.discard(iid)
 
     def poll(self):
-        """增量事件喂入归因器; 返回本轮未匹配成交数 (守恒校验用)。"""
+        """增量事件喂入归因器; 返回本轮未匹配成交数 (守恒校验用)。
+
+        事件按品种前缀过滤: 侧车/成交落盘是**账户级** (共享账户下含
+        其他策略的全部订单, 2026-10-30 生产实测 INE.ec/ao/ag 外部
+        成交进入全部 12 策略的 feed), 只消费本 code 前缀的事件。
+        """
+        from core.LiveTruth import code_prefix
+        prefix = code_prefix(self.code) or str(self.code)
         n0 = len(self.attr.unmatched)
         for ev in self.feed.poll():
+            code = str(ev.get("code") or "")
+            if code != str(self.code) and not (
+                    prefix and code.startswith(prefix)):
+                continue
+            # 事件归一化到 HOT 键: 队列/绑定全部以 self.code 为键,
+            # 事件携带的是真实合约码 (SHFE.rb.2610)
+            ev = dict(ev, code=str(self.code))
             if ev["kind"] == "order":
                 self.attr.on_order(ev)
             else:
