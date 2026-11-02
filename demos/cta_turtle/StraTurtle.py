@@ -863,6 +863,12 @@ class StraTurtle(BaseCtaStrategy):
                             self._last_n = en
                             break
                 self._restore_exit_orders(data.get("exit_orders"))
+                # 对账计数跨重启持久 (2026-11-02 生产事故根治): 生产
+                # 每日双重启 (08:47 盘前 + 20:40 hotdaily) 使进程内
+                # _recon_miss 归零, 而 reconcile 只在日评估路径运行、
+                # 每日仅 1 次 → 失配永远无法累计到 recon_patience,
+                # l/pp 引擎陈旧层账因此潜伏 7 个交易日零触发。
+                self._recon_miss = int(data.get("recon_miss") or 0)
                 if int(data.get("v") or 0) >= 4:
                     self._restore_position_intents(data.get("intents"),
                                                    data.get("outbox_seq"))
@@ -941,6 +947,33 @@ class StraTurtle(BaseCtaStrategy):
                 f"{self.name()} risk book restored: "
                 f"lots={restored_lots} risk={restored_risk:.0f} "
                 f"profiles={len(self._subs)} (stop caliber)")
+
+        # 引擎层账 vs 信号持仓启动失配播种 (2026-11-02 生产事故根治,
+        # 与快照内 recon_miss 持久化配套): 经快照恢复+收养后引擎净仓
+        # 仍与信号仓不符 → 差异已跨重启存续, 非秒级在途单可自愈, 把
+        # 对账计数顶到 patience-1, 下一次日评估即触发重建
+        # (TruthMonitor.reconcile)。生产每日双重启下不播种则计数
+        # 每天归零、永远无法累计到 patience (l/pp 脱管潜伏一周的
+        # 根因); 在途单场景的重建目标=信号仓, 偏差由
+        # fill_timeout/ghost_fill 告警链兜底观测。
+        try:
+            fw_pos = int(round(float(context.stra_get_position(code))))
+            eng_net = self._combined_target()
+            if fw_pos != eng_net:
+                seed = max(0, int(self._base.recon_patience) - 1)
+                if self._recon_miss < seed:
+                    self._recon_miss = seed
+                context.stra_log_text(
+                    f"{self.name()} restored with engine/book mismatch "
+                    f"(engine net={eng_net} vs signal {fw_pos}), "
+                    f"reconcile seeded to {self._recon_miss}/"
+                    f"{int(self._base.recon_patience)}, next daily eval "
+                    f"rebuilds", level=3)
+                self._alert("reconcile_seed",
+                            f"engine net={eng_net} vs signal {fw_pos}, "
+                            f"rebuild on next daily eval")
+        except Exception:
+            pass
 
         context.stra_log_text(
             f"StraTurtle inited: {code} {self._inst.period} "
@@ -1382,7 +1415,8 @@ class StraTurtle(BaseCtaStrategy):
                 "exit_orders": self._exit_order_snapshot(),
                 "deferred": self._deferred_decisions,
                 "intents": self._position_intent_snapshot(),
-                "outbox_seq": self._outbox_seq}
+                "outbox_seq": self._outbox_seq,
+                "recon_miss": self._recon_miss}
         context.user_save_data(f"{self.name()}_engine", json.dumps(snap))
 
     def _dump_fund_live(self, context):
@@ -1731,7 +1765,8 @@ class StraTurtle(BaseCtaStrategy):
                 "exit_orders": self._exit_order_snapshot(),
                 "deferred": self._deferred_decisions,
                 "intents": self._position_intent_snapshot(),
-                "outbox_seq": self._outbox_seq}
+                "outbox_seq": self._outbox_seq,
+                "recon_miss": self._recon_miss}
         context.user_save_data(f"{self.name()}_engine", json.dumps(snap))
 
     @staticmethod
@@ -2228,9 +2263,17 @@ class StraTurtle(BaseCtaStrategy):
         """→ execution.Telemetry.veto_log (A1-2 迁出, 薄转发)"""
         return self._telemetry.veto_log(context, key, msg)
 
-    @staticmethod
     def _get_fees(self, context):
-        """→ execution.FillTracker.get_fees (A1-3 迁出, 薄转发)"""
+        """→ execution.FillTracker.get_fees (A1-3 迁出, 薄转发)
+
+        注意: 必须是普通方法 (带 self)。A1 迁移时遗留了
+        ``@staticmethod`` 装饰器, 但签名仍是 ``(self, context)``,
+        调用时 context 被绑到 self 形参 → TypeError, 导致
+        fund_live.csv 旁路自 2026-10-30 部署起静默失效
+        (2026-11-02 生产审计发现, Runner 日志每秒刷
+        "fund_live dump failed: missing 1 required positional
+        argument: 'context'")。
+        """
         return self._fills.get_fees(context)
 
     def _fill_confirmed(self, context, fp: dict, code: str, target: int):
