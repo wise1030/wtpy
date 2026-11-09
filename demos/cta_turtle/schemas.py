@@ -60,6 +60,14 @@ class RiskConfig:
     # 下 3% = 45 万/策略, 12 个策略同时触发会远超账户承受力。
     daily_loss_stop_frac: float = 0.0
     daily_loss_flatten_frac: float = 0.0
+    # 成交确认窗口超时 (Phase 0, 2026-11-09: 原 600s/1800s 硬编码分档)。
+    # enter/add 用 fill_timeout_secs (默认 600=旧行为); 出场 (止损/通道/
+    # 日损全平) 用 exit_fill_timeout_secs (默认 120 — 保护性订单延迟是
+    # 真实风险, 2026-11-04 pp 止损 646s 才确认; 仅影响告警时机, 不改变
+    # 任何成交或确认语义)。fill_confirmed 的 fees 兜底窗口 =
+    # fill_timeout_secs (fees0>0) / 3x (免费品种, 旧 1800=600*3 等价)。
+    fill_timeout_secs: float = 600.0
+    exit_fill_timeout_secs: float = 120.0
 
     def validate(self):
         for name in ("max_risk_per_mkt", "max_risk_per_market",
@@ -101,6 +109,12 @@ class RiskConfig:
             raise ValueError(
                 "risk.daily_loss_flatten_frac 不能小于 "
                 "daily_loss_stop_frac (平仓阈值应更宽)")
+        for name in ("fill_timeout_secs", "exit_fill_timeout_secs"):
+            v = getattr(self, name)
+            if not isinstance(v, (int, float)) or isinstance(v, bool) \
+                    or not 30.0 <= float(v) <= 86400.0:
+                raise ValueError(
+                    f"risk.{name}={v!r} 需在 [30, 86400] 秒内")
 
 
 @dataclass

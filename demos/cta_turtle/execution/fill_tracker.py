@@ -169,7 +169,9 @@ class FillTracker:
                 self._finish_dual_exit(context, "truth_target", vwap)
                 return
         waited = time.time() - float(fp.get("ts", 0))
-        if waited > 600 and not fp.get("alerted"):
+        # 出场超时走分档口径 (Phase 0): 保护性订单默认 120s, 远早于入场
+        if waited > self.h._risk.cfg.exit_fill_timeout_secs \
+                and not fp.get("alerted"):
             fp["alerted"] = True
             txt = (f"{code} dual exit unconfirmed {waited:.0f}s: "
                    f"{volume:g}/{intent.lots} closed; risk/reentry blocked")
@@ -286,7 +288,9 @@ class FillTracker:
                 if broker is not None:
                     fp["broker_remaining"] = abs(float(broker))
             waited = time.time() - float(fp.get("ts", 0))
-            if waited > 600 and not fp.get("alerted"):
+            # 出场超时走分档口径 (Phase 0, 默认 120s)
+            if waited > self.h._risk.cfg.exit_fill_timeout_secs \
+                    and not fp.get("alerted"):
                 fp["alerted"] = True
                 txt = (f"{code}[{key}] exit unconfirmed {waited:.0f}s: "
                        f"close fills {volume:g}/{lots:g}; target flat but "
@@ -399,7 +403,10 @@ class FillTracker:
         #    p 29 手幽灵根因) → 视为未验证, 保持窗口等待真值恢复/
         #    真实成交落 journal, 超时后放行 (记账价保持决策价)
         waited = time.time() - fp.get("ts", 0)
-        limit = 600 if fees0 > 0 else 1800
+        # Phase 0: 窗口从配置读取 (默认 600=旧行为); fees 未配置/免费的
+        # 品种给 3x (旧 1800=600*3 等价口径)
+        limit = self.h._risk.cfg.fill_timeout_secs \
+            if fees0 > 0 else self.h._risk.cfg.fill_timeout_secs * 3
         if waited > limit * 2 and not truth_present:
             if not fp.get("unblocked"):
                 fp["unblocked"] = True
@@ -451,11 +458,12 @@ class FillTracker:
         confirmed, pos_src, pos = self.fill_confirmed(context, fp, code,
                                                        target)
         if not confirmed or pos == 0:
-            # 分批窗口超时 (>10min 未达目标仓位) → 告警一次
+            # 分批窗口超时 (默认 600s 未达目标仓位) → 告警一次
             # (执行单元放弃追单/涨跌停无法成交的可观测代理, P0-2;
             #  真值源可用时这是"订单未到柜台"的直接证据)
             waited = time.time() - fp.get("ts", 0)
-            if not fp.get("alerted") and waited > 600:
+            if not fp.get("alerted") \
+                    and waited > self.h._risk.cfg.fill_timeout_secs:
                 fp["alerted"] = True
                 # 真值源判定 = 券商侧确实没有这笔仓位 (幽灵仓直接证据)
                 evt = "ghost_fill" if pos_src == "truth" else "fill_timeout"

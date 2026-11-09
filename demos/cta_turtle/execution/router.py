@@ -44,6 +44,7 @@ class ExecutionRouter:
         "_risk",
         "_safe_mark",
         "_sizer",
+        "_state_degraded",
         "_sub_lots",
         "_sub_share",
         "_subs",
@@ -103,6 +104,14 @@ class ExecutionRouter:
         返回 (final_lots, reasons); final_lots<=0 时已打印否决日志并
         reject_pending, 调用方直接返回。
         """
+        if self.h._state_degraded:
+            # 快照恢复失败 → 引擎状态真实性不可信 (Phase 0): 禁止新开/
+            # 加仓; 出场/止损不受影响 (近似管理 > 裸奔)。
+            self.h._veto_log(context, "degraded",
+                             f"veto {kind} @{price:.2f}: 状态恢复失败 "
+                             f"DEGRADED, 禁止新开/加仓")
+            self.reject_trigger(self.h._engine)
+            return 0, []
         if self.h._ghost_blocked(context):
             self.h._veto_log(context, f"ghost{tag}",
                            f"veto {kind} @{price:.2f}: 本日 ghost trim "
@@ -518,6 +527,12 @@ class ExecutionRouter:
         """入场三道闸: 过滤链 → VaR 手数 → 组合风控。返回最终手数(0=否决)"""
         code = self.h._inst.code
         tag = f"[{sub['name']}]"
+        if self.h._state_degraded:
+            self.h._veto_log(context, "degraded",
+                             f"{tag} veto enter {d}@{dec['price']:.2f}: "
+                             f"状态恢复失败 DEGRADED, 禁止新开/加仓")
+            self.reject_trigger(sub["engine"])
+            return 0
         if self.h._ghost_blocked(context):
             self.h._veto_log(context, f"ghost{d}",
                            f"{tag} veto enter {d}@{dec['price']:.2f}: "
@@ -569,6 +584,12 @@ class ExecutionRouter:
                          dec: dict, n: float) -> int:
         e = sub["engine"]
         tag = f"[{sub['name']}]"
+        if self.h._state_degraded:
+            self.h._veto_log(context, "degraded",
+                             f"{tag} veto add @{dec['price']:.2f}: "
+                             f"状态恢复失败 DEGRADED, 禁止新开/加仓")
+            self.reject_trigger(e)
+            return 0
         if self.h._ghost_blocked(context):
             self.h._veto_log(context, f"ghost{len(e.layers)}",
                            f"{tag} veto add @{dec['price']:.2f}: 本日 "

@@ -15,6 +15,7 @@
 - set_position 目标语义, live 由 executers.yaml 执行单元落单
 """
 import dataclasses
+import hashlib
 import json
 import os
 import time
@@ -115,6 +116,12 @@ class StraTurtle(BaseCtaStrategy):
         self._veto_hits = {}
         self._recon_miss = 0        # 运行时对账连续失配计数
         self._last_n = float("nan")  # 对账重建记账用最近 N
+        # 快照恢复失败 → DEGRADED (Phase 0, 2026-11-09): 引擎状态真实性
+        # 不可信, 禁止新开/加仓 (出场/止损不受影响 — 按收养/对账的近似
+        # 状态管理仍优于完全裸奔); 首次成功 _persist 后解除。Alert 每日
+        # 至多一次 (_degrade_date)。
+        self._state_degraded = False
+        self._degrade_date = None
         # 盘中去重状态 (P1: None=待首个 calculate 建基线, 不回放历史)
         self._d1_date = None        # 已消费的信号周期末根 bar 日期
         self._h1_key = None         # h1: 已评估桶锚点 tdate*10000+label
@@ -157,6 +164,18 @@ class StraTurtle(BaseCtaStrategy):
         self._journal = None        # 惰性创建 BarJournal
         self._j_d1_date = None      # 已落日志的信号周期日期
         self._j_m5_key = None       # 已落日志的盘中键值
+        # Phase 0 心跳/周期快照 (2026-11-09): 实盘每 ≤5s 写
+        # generated/heartbeat/<name>.json (tmp+rename), 供 heartbeat_watch
+        # / doctor 做进程存活、tick 断流 (2026-09-28 类事故)、状态概览的
+        # 外部检测; 回测不写。周期快照 (300s 节流) + generated/snapshots/
+        # 3 深轮换备份, 缩小崩溃窗口。旁路失败静默跳过, 绝不阻断交易。
+        self._last_tick_ts = 0.0
+        self._heartbeat_ts = 0.0
+        self._periodic_persist_ts = 0.0
+        self._snap_hash = ""
+        # -1 = 从未告警 (日期不可得时 day=None, None!=-1 → 首见即告警,
+        # 之后当日抑制; 若用 None 初值会把"日期不可得"的首见告警吞掉)
+        self._no_price_arm_date = -1
         # 交易通道真值源 (P0-3): generated/traders/<id>/rtdata.json
         self._truth = None          # core.LiveTruth.ChannelTruth 或 None
         self._truth_probed = False  # 已探测过 (不可用时不反复重试)
@@ -881,9 +900,23 @@ class StraTurtle(BaseCtaStrategy):
                 context.stra_log_text(
                     f"{self.name()} restored: dir={self._engine.direction}, "
                     f"layers={len(self._engine.layers)}")
-            except (json.JSONDecodeError, TypeError) as e:
+            except (json.JSONDecodeError, TypeError, ValueError,
+                    KeyError) as e:
+                # Phase 0 (2026-11-09): 快照损坏不再静默继续 — 进入
+                # DEGRADED (禁止新开/加仓, 出场保留), 告警每日一次。
+                # 注意 on_init 内 _alert 走 notifier + alerts.log 双通道;
+                # adopt/reconcile 路径维持原样 (近似管理 > 完全裸奔)。
+                self._state_degraded = True
                 context.stra_log_text(
-                    f"{self.name()} state restore failed: {e}", level=2)
+                    f"{self.name()} state restore failed: {e} "
+                    f"→ DEGRADED (no new entries/adds until re-persist)",
+                    level=3)
+                try:
+                    self._alert("state_degraded",
+                                f"state restore failed: {e}; "
+                                f"new entries/adds blocked")
+                except Exception:
+                    pass
 
         # 持仓状态对账: 框架有持仓但引擎空仓 → 按单层重建到首子系统
         # 口径: avgpx 取绝对值 (框架空头 avgpx 为负, avgpx×pos=成本>0;
@@ -996,6 +1029,9 @@ class StraTurtle(BaseCtaStrategy):
             except Exception as e:
                 context.stra_log_text(
                     f"{self.name()} exec prewarm failed: {e}", level=2)
+            # Phase 0: 启动即落首帧心跳, watchdog 从进程拉起第一分钟起
+            # 就有存活判据 (否则要等首个 tick/session 事件才可见)
+            self._write_heartbeat(context, force=True)
 
     def on_calculate(self, context: CtaContext):
         self._in_schedule = True
@@ -1015,6 +1051,7 @@ class StraTurtle(BaseCtaStrategy):
                 self._on_calc_daily(context)
         finally:
             self._in_schedule = False
+            self._write_heartbeat(context)
 
     # ------------------------------------------------------------------
     # h1 路径 (2026-10-21 一期): 策略层 m5→h1 聚合评估
@@ -1616,6 +1653,9 @@ class StraTurtle(BaseCtaStrategy):
         """实盘 tick 驱动触发 (trigger 模式)"""
         if self._mode.entry_mode != "trigger" or stdCode != self._inst.code:
             return
+        self._last_tick_ts = time.time()    # Phase 0: 心跳断流检测基准
+        self._maybe_periodic_persist(context)   # 周期快照 (300s 节流)
+        self._write_heartbeat(context)          # 心跳 (5s 节流)
         self._process_open_intents(context)
         self._process_exit_orders(context)
         if self._exit_orders or self._open_intents:
@@ -1750,7 +1790,35 @@ class StraTurtle(BaseCtaStrategy):
                 self._execute(context, dec, self._last_n)
 
     def _on_arm(self, context, engine, fctx):
-        """→ execution.ExecutionRouter.on_arm (A1-1 迁出, 薄转发)"""
+        """→ execution.ExecutionRouter.on_arm (A1-1 迁出, 薄转发)
+
+        Phase 0 (2026-11-09) 前置门: 行情价不可用 (stra_get_price 为 0/
+        None/NaN —— 2026-09-28 商品通道断流的双实证特征之一) 时不允许
+        留下新的入场武装位: 数据恢复后 armed 位已陈旧, 会以过期通道位
+        触发假突破入场。两方向解除武装 + 每日一次告警; 出场/止损位不
+        动 (持仓管理优先)。回测恒可用, 不影响基线。
+        """
+        if not self._is_backtest:
+            px = context.stra_get_price(self._inst.code)
+            if px is None or px != px or float(px) <= 0:
+                engine.disarm_entry(1)
+                engine.disarm_entry(-1)
+                get_date = getattr(context, "stra_get_date", None)
+                day = None
+                if get_date is not None:
+                    try:
+                        day = int(get_date())
+                    except (TypeError, ValueError):
+                        day = None
+                if day != self._no_price_arm_date:
+                    self._no_price_arm_date = day
+                    txt = (f"{self._inst.code} price unavailable "
+                           f"(stra_get_price={px!r}) — entries disarmed, "
+                           f"no new arms until feed recovers")
+                    context.stra_log_text(
+                        f"{self.name()} {txt}", level=3)
+                    self._alert("no_price_arm_block", txt)
+                return
         return self._router.on_arm(context, engine, fctx)
 
     def _persist(self, context: CtaContext):
@@ -1768,6 +1836,100 @@ class StraTurtle(BaseCtaStrategy):
                 "outbox_seq": self._outbox_seq,
                 "recon_miss": self._recon_miss}
         context.user_save_data(f"{self.name()}_engine", json.dumps(snap))
+        # 快照重新落盘成功 = 状态恢复真实性 → 解除 DEGRADED
+        self._state_degraded = False
+        self._backup_snapshot(json.dumps(snap))
+
+    # ------------------------------------------------------------------
+    # Phase 0 (2026-11-09): 心跳 / 周期快照 / 快照备份
+    # ------------------------------------------------------------------
+    _HEARTBEAT_INTERVAL = 5.0       # 心跳写入节流 (秒)
+    _PERIODIC_PERSIST_INTERVAL = 300.0   # 周期快照节流 (秒)
+
+    def _backup_snapshot(self, payload: str):
+        """快照 3 深轮换备份 (generated/snapshots/), 内容变化才写。
+
+        原实现只有框架 userdata 单文件, 崩溃/写坏即无回退; 备份让 doctor
+        与人工恢复有最近 3 个时间点可用。旁路失败静默跳过。
+        """
+        if self._is_backtest:
+            return
+        try:
+            h = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+            if h == self._snap_hash:
+                return
+            self._snap_hash = h
+            d = os.path.join(_GROUP_DIR, "generated", "snapshots")
+            os.makedirs(d, exist_ok=True)
+            base = os.path.join(d, f"{self.name()}.json")
+            # 轮换: .2→.3, .1→.2, current→.1
+            for i in (2, 1):
+                src = f"{base}.{i}"
+                if os.path.exists(src):
+                    os.replace(src, f"{base}.{i + 1}")
+            if os.path.exists(base):
+                os.replace(base, f"{base}.1")
+            tmp = f"{base}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(payload)
+            os.replace(tmp, base)
+        except OSError:
+            pass
+
+    def _write_heartbeat(self, context, force: bool = False):
+        """实盘心跳落盘; 回测跳过, 写失败静默 (旁路不阻断交易)。
+
+        字段覆盖 watchdog 三类检测: 进程存活 (文件 mtime)、tick 断流
+        (last_tick_ts)、状态概览 (方向/净仓/锚点/未决窗口/DEGRADED)。
+        """
+        if self._is_backtest:
+            return
+        now = time.time()
+        if not force and now - self._heartbeat_ts < self._HEARTBEAT_INTERVAL:
+            return
+        self._heartbeat_ts = now
+        try:
+            code = self._inst.code
+            px = context.stra_get_price(code)
+            hb = {
+                "name": self.name(), "code": code, "ts": now,
+                "pid": os.getpid(),
+                "last_tick_ts": self._last_tick_ts,
+                "tick_age": (now - self._last_tick_ts)
+                if self._last_tick_ts else None,
+                "price": float(px) if (px and px == px and px > 0) else 0.0,
+                "direction": self._engine.direction,
+                "net_lots": self._combined_target(),
+                "d1_date": self._d1_date, "m5_key": self._m5_key,
+                "exit_orders": len(self._exit_orders),
+                "open_intents": len(self._open_intents),
+                "fill_pending": len(self._fill_pending),
+                "degraded": self._state_degraded,
+            }
+            d = os.path.join(_GROUP_DIR, "generated", "heartbeat")
+            os.makedirs(d, exist_ok=True)
+            tmp = os.path.join(d, f".{self.name()}.{os.getpid()}.tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(hb, f)
+            os.replace(tmp, os.path.join(d, f"{self.name()}.json"))
+        except Exception:
+            pass
+
+    def _maybe_periodic_persist(self, context):
+        """周期快照 (300s 节流): 事件驱动 _persist 之外的崩溃窗口兜底。
+
+        原有 _persist 只挂在决策/出场/意图事件上, 长时间无事件时崩溃会
+        丢失最近状态 (armed 位/锚点/账本同步点); 周期落盘把丢失窗收敛到
+        ≤5min。bt 同样执行 (user_save_data 无副作用差异, 黄金基线覆盖)。
+        """
+        now = time.time()
+        if now - self._periodic_persist_ts < self._PERIODIC_PERSIST_INTERVAL:
+            return
+        self._periodic_persist_ts = now
+        try:
+            self._persist(context)
+        except Exception:
+            pass
 
     @staticmethod
     def _nd_field(bars, field):
@@ -1828,6 +1990,7 @@ class StraTurtle(BaseCtaStrategy):
             return None
 
     def on_session_end(self, context: CtaContext, curTDate: int):
+        self._write_heartbeat(context, force=True)   # Phase 0: 会话末强制心跳
         self._process_open_intents(context)
         self._process_exit_orders(context)
         if self._exit_orders or self._open_intents:

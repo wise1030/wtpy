@@ -47,6 +47,8 @@ TPL_FILES = {"deploy_tpl/run.py": "run.py",
                   "scripts/convert_csv_to_dsb.py",
               "scripts/timer_notify.py": "scripts/timer_notify.py",
               "scripts/notify_selftest.py": "scripts/notify_selftest.py",
+              "scripts/heartbeat_watch.py": "scripts/heartbeat_watch.py",
+              "scripts/doctor.py": "scripts/doctor.py",
               "scripts/exec_journal.py": "scripts/exec_journal.py",
               "scripts/ctp_loader/map_future.ini":
                   "scripts/ctp_loader/map_future.ini"}

@@ -1,0 +1,15 @@
+[Unit]
+Description=cta_turtle heartbeat watchdog (process/tick silence detection, Phase 0 2026-11-09)
+After=network.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=@PREFIX@/deploy/cta_turtle
+# 2026-09-28 商品行情全天中断事故的外部防线: 进程外检测 generated/heartbeat/
+# 心跳文件 (进程存活/tick 断流/DEGRADED 自报), 状态转换告警 + 30min 重复提醒。
+# 脚本自身异常走 timer_notify 推送 (watchdog 不 silent); exit 恒 0。
+ExecStart=@PREFIX@/venv/bin/python scripts/heartbeat_watch.py \
+    --group @PREFIX@/deploy/cta_turtle \
+    --common @PREFIX@/common \
+    --config config/turtle_config.yaml

@@ -1,0 +1,10 @@
+[Unit]
+Description=cta_turtle heartbeat watchdog timer (every minute during trade week)
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+Persistent=false
+
+[Install]
+WantedBy=timers.target
