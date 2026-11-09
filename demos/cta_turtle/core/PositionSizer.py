@@ -11,21 +11,25 @@ class PositionSizer:
     def __init__(self, unit_var: float):
         self._unit_var = unit_var
 
-    def layer_lots(self, n: float, volscale: float, units: int) -> int:
+    def layer_lots(self, n: float, volscale: float, units: int,
+                   unit_var: float = None) -> int:
         """计算单层手数。
 
         Args:
             n: 当前 ATR (价格单位)
             volscale: 合约乘数 (stra_get_comminfo().volscale)
             units: 交易单位数 (每层 VaR = units × unit_var)
+            unit_var: 单单位 1N 风险预算(CNY); None=构造值,
+                      显式传入优先 (Phase 1 资本模型 v2 派生口径)
 
         Returns:
             手数; N 无效(<=0/NaN)或预算不足 1 手时返回 0 (调用方放弃入场)
         """
+        uv = self._unit_var if unit_var is None else float(unit_var)
         if n is None or not math.isfinite(n) or n <= 0:
             return 0
-        if volscale <= 0 or units <= 0:
+        if volscale <= 0 or units <= 0 or uv <= 0:
             return 0
-        budget = units * self._unit_var
+        budget = units * uv
         lots = int(budget // (n * volscale))
         return max(0, lots)

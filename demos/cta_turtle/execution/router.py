@@ -43,12 +43,14 @@ class ExecutionRouter:
         "_open_intents",
         "_risk",
         "_safe_mark",
+        "_shadow_size",
         "_sizer",
         "_state_degraded",
         "_sub_lots",
         "_sub_share",
         "_subs",
         "_sync_risk_book",
+        "_unit_var",
         "_veto_log",
         "_volscale",
         "name",
@@ -125,7 +127,9 @@ class ExecutionRouter:
                            f"{self.h._risk.cfg.daily_loss_stop_frac:.2%})")
             self.reject_trigger(self.h._engine)
             return 0, []
-        lots = self.h._sizer.layer_lots(n, self.h._volscale, self.h._inst.units)
+        lots = self.h._sizer.layer_lots(n, self.h._volscale, self.h._inst.units,
+                                        unit_var=self.h._unit_var())
+        self.h._shadow_size(context, n, lots)
         if lots <= 0:
             if kind == "enter":
                 msg = (f"veto enter {tag}@{price:.2f}: "
@@ -548,7 +552,9 @@ class ExecutionRouter:
         if not dec.get("prefiltered") and \
                 not self.run_filter_chain(context, d, dec, fctx):
             return 0
-        lots = self.h._sizer.layer_lots(n, self.h._volscale, sub["units"])
+        lots = self.h._sizer.layer_lots(n, self.h._volscale, sub["units"],
+                                        unit_var=self.h._unit_var())
+        self.h._shadow_size(context, n, lots)
         if lots <= 0:
             self.h._veto_log(context, f"lot{d}",
                            f"{tag} veto enter {d}@{dec['price']:.2f}: "
@@ -602,7 +608,9 @@ class ExecutionRouter:
                            f"日损闸已触发 (只减不加)")
             self.reject_trigger(e)
             return 0
-        lots = self.h._sizer.layer_lots(n, self.h._volscale, sub["units"])
+        lots = self.h._sizer.layer_lots(n, self.h._volscale, sub["units"],
+                                        unit_var=self.h._unit_var())
+        self.h._shadow_size(context, n, lots)
         if lots <= 0:
             self.h._veto_log(context, f"add{len(e.layers)}",
                            f"{tag} veto add @{dec['price']:.2f}: lots=0")

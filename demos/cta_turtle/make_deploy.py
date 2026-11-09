@@ -49,6 +49,12 @@ TPL_FILES = {"deploy_tpl/run.py": "run.py",
               "scripts/notify_selftest.py": "scripts/notify_selftest.py",
               "scripts/heartbeat_watch.py": "scripts/heartbeat_watch.py",
               "scripts/doctor.py": "scripts/doctor.py",
+              "scripts/build_contract_signals.py":
+                  "scripts/build_contract_signals.py",
+              "scripts/merge_historical_contracts.py":
+                  "scripts/merge_historical_contracts.py",
+              "scripts/seed_live_contracts.py":
+                  "scripts/seed_live_contracts.py",
               "scripts/exec_journal.py": "scripts/exec_journal.py",
               "scripts/ctp_loader/map_future.ini":
                   "scripts/ctp_loader/map_future.ini"}

@@ -179,13 +179,13 @@ def main():
         print("无失配品种 (engine == broker)")
         return
     print("失配清单 (engine != broker):")
-    for code, name, eng, sig, broker in rows:
+    for code, _name, eng, sig, broker in rows:
         print(f"  {code:16s} engine={eng:6d} signal={sig:6d} broker={broker:6d}")
     if args.dry_run:
         return
     if input("确认执行? [y/N] ").strip().lower() != "y":
         return
-    for code, name, eng, sig, broker in rows:
+    for code, name, _eng, _sig, broker in rows:
         print("OK", trim(args.group, code, name, broker, args.backup))
     # 审计留痕
     try:

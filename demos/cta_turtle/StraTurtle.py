@@ -26,6 +26,8 @@ from wtpy import BaseCtaStrategy, CtaContext
 from schemas import InstrumentConfig, TurtleBaseConfig, RiskConfig
 from filters import build_chain, FilterContext
 from core.aggregate import aggregate_h1, norm_m5_time
+from core.hotsutil import (align_window, find_common, load_hots,
+                           parse_contracts, split_code)
 from core.indicators import wilder_atr, donchian, with_next_channels
 from core.TurtleEngine import (TurtleEngine)
 from core.PositionSizer import PositionSizer
@@ -54,7 +56,8 @@ class StraTurtle(BaseCtaStrategy):
                  risk_cfg: RiskConfig = None,
                  risk_mgr: RiskManager = None,
                  notify=None,
-                 bt_no_simtick: bool = False):
+                 bt_no_simtick: bool = False,
+                 alloc_total: int = 1):
         BaseCtaStrategy.__init__(self, name)
         self._inst = inst_cfg
         self._base = base_cfg
@@ -67,6 +70,9 @@ class StraTurtle(BaseCtaStrategy):
         # A2: 运行模式面 (on_init 用真实 is_backtest 重解)
         self._mode = StrategyMode.resolve(self._base, self._inst,
                                           False, bt_no_simtick)
+        # Phase 1 资本模型: 组合品种总数 (派生 unit_var 的等权分配分母;
+        # from_config/runLive 传 len(instruments), 单测缺省 1)
+        self._alloc_total = max(1, int(alloc_total))
 
         # === 子系统装配 ===
         # profiles/system/speeds 由 core.profiles 唯一展开为 ProfileSpec:
@@ -176,6 +182,14 @@ class StraTurtle(BaseCtaStrategy):
         # -1 = 从未告警 (日期不可得时 day=None, None!=-1 → 首见即告警,
         # 之后当日抑制; 若用 None 初值会把"日期不可得"的首见告警吞掉)
         self._no_price_arm_date = -1
+        # Phase 1 合约信号源 (2026-11-10): signal_source=contract 时按
+        # hots.json 当前主力解析信号合约 (_sig_contract), 指标/通道在其
+        # 自身真实序列上计算 (无复权); None = hot 口径或未解析成功。
+        self._sig_contract = None
+        self._sig_calendar = None        # bt 逐日主力 [(start,end,yymm)]
+        self._sig_bars_cache = {}        # full_code -> (dates, h, l, c)
+        self._sig_cur_dom = None         # 当前评估日主力 (roll 事件检测)
+        self._sig_roll_alert_day = -1
         # 交易通道真值源 (P0-3): generated/traders/<id>/rtdata.json
         self._truth = None          # core.LiveTruth.ChannelTruth 或 None
         self._truth_probed = False  # 已探测过 (不可用时不反复重试)
@@ -297,8 +311,48 @@ class StraTurtle(BaseCtaStrategy):
             if inst.code == code:
                 return cls(name, inst, cfg.base, risk_cfg=cfg.risk,
                            risk_mgr=risk_mgr, notify=notify,
-                           bt_no_simtick=bt_no_simtick)
+                           bt_no_simtick=bt_no_simtick,
+                           alloc_total=len(cfg.instruments))
         raise ValueError(f"{code} 不在 {config_path} 的 instruments 中")
+
+    def _unit_var(self) -> float:
+        """有效单单位 1N 风险预算 (Phase 1 资本模型 v2)。
+
+        base.unit_var > 0 → 显式配置值 (旧口径, 黄金基线即此);
+        = 0 → 派生: 分配资金 × unit_risk_frac (分配资金 =
+        portfolio_capital 分配额, 未启用则 fallback_capital)。
+        """
+        if self._base.unit_var > 0:
+            return float(self._base.unit_var)
+        cfg = self._risk.cfg
+        if cfg.portfolio_capital > 0:
+            alloc = self._risk.capital_base(self.name())
+        else:
+            alloc = float(cfg.fallback_capital)
+        frac = float(getattr(cfg, "unit_risk_frac", 0.01) or 0.01)
+        return alloc * frac
+
+    def _shadow_size(self, context, n: float, lots: int):
+        """资本模型 shadow 观察 (2026-11-10): shadow_capital>0 时按
+        25M 分配口径旁路计算新模型手数, 与现行手数对比只记录不改变
+        行为 (veto_log 带冷却+首见告警)。验证后翻转正式口径。"""
+        cap = float(getattr(self._risk.cfg, "shadow_capital", 0.0) or 0.0)
+        if cap <= 0 or lots <= 0 or not (n and n == n and n > 0) \
+                or not self._volscale:
+            return
+        w = (self._risk.cfg.alloc_weights or {}).get(self._inst.code, 1.0)
+        # shadow 等权分母用品种数; 带权重时近似按 Σweight=品种数
+        alloc = cap * float(w) / max(1.0, float(self._alloc_total))
+        frac = float(getattr(self._risk.cfg, "unit_risk_frac", 0.01) or 0.01)
+        new_lots = self._sizer.layer_lots(
+            n, self._volscale, self._inst.units,
+            unit_var=alloc * frac)
+        if new_lots != lots:
+            self._veto_log(
+                context, "shadow_size",
+                f"shadow sizing: current={lots} vs 25M-model={new_lots} "
+                f"lots (N={n:.2f}, alloc={alloc:,.0f}, "
+                f"unit_var={alloc * frac:,.0f}) — 观察期不生效")
 
     # ------------------------------------------------------------------
     # 事件推送
@@ -803,6 +857,9 @@ class StraTurtle(BaseCtaStrategy):
                 f"{self.name()} bt_no_simtick: trigger 判定走 "
                 f"check_bar, 撮合=bar收盘口径 (无 m5 模拟tick)")
 
+        # Phase 1 (2026-11-10): contract 信号源解析 + 订阅主力合约 d1 副K
+        self._resolve_signal_source(context)
+
         comm = context.stra_get_comminfo(code)
         self._volscale = float(comm.volscale)
         self._pricetick = float(comm.pricetick)
@@ -1266,6 +1323,12 @@ class StraTurtle(BaseCtaStrategy):
                 self._run_trigger_bar(context, o, float(highs[-1]),
                                       float(lows[-1]), float(closes[-1]))
 
+        # Phase 1: contract 信号源替换指标窗口 (None=窗口不足, 跳过)
+        sig = self._signal_arrays(context, bars, highs, lows, closes)
+        if sig is None:
+            return
+        highs, lows, closes = sig
+
         atr, n, chan = self._eval_core(
             context, bars, highs, lows, closes,
             float(highs[-1]), float(lows[-1]), float(closes[-1]),
@@ -1408,6 +1471,203 @@ class StraTurtle(BaseCtaStrategy):
         """暖机所需信号周期 bar 数：与 ConfigLoader 共用 profiles 口径，
         覆盖 base/全部 speed 窗口 + ATR + prev 通道余量。"""
         return required_bars(self._inst, self._base)
+
+    # ------------------------------------------------------------------
+    # Phase 1 (2026-11-10): 合约信号源 — 移仓后新合约自身序列, 无复权
+    # ------------------------------------------------------------------
+    def _sig_source(self) -> str:
+        """有效信号源: 品种级覆盖优先, 空则继承 base (Phase 1)。"""
+        return self._inst.signal_source or self._base.signal_source
+
+    def _resolve_signal_source(self, context: CtaContext):
+        """contract 模式信号源解析 (Phase 1, 无复权):
+
+        - 回测: 读 common/roll_calendar.json, **逐日主力** —— 每个历史
+          日期的指标/通道在当日主力合约自身真实序列上计算 (移仓即切,
+          无价格调整); init 时预订阅窗口内全部主力合约副K。
+        - 实盘: hots.json 当前主力单合约 (与每日 20:35 hots 更新 +
+          20:40 重启的运维节奏配套; 盘中换月由 _check_sig_roll 告警)。
+        执行/持仓始终是 HOT, 由框架换月映射; 触发位即真实可交易价。
+        """
+        if self._sig_source() != "contract":
+            return
+        common = find_common(_GROUP_DIR)
+        if self._is_backtest:
+            cal = self._load_roll_calendar(common)
+            if cal:
+                self._sig_calendar = cal
+                self._sig_contract = self._full_contract(cal[-1][2])
+                context.stra_log_text(
+                    f"{self.name()} signal source: roll_calendar "
+                    f"{len(cal)} segments (逐日主力, 无复权; 数据经 "
+                    f"contracts 缓存直读, 不走 C++ 副K; 执行仍为 "
+                    f"{self._inst.code})")
+                return
+        hots = load_hots(os.path.join(common, "hots.json"))
+        cur = parse_contracts(hots, [self._inst.code]).get(self._inst.code)
+        if not cur:
+            txt = (f"{self._inst.code} signal_source=contract 但 "
+                   f"hots.json/roll_calendar 均无主力信息 — 退化为 HOT")
+            context.stra_log_text(f"{self.name()} {txt}", level=3)
+            self._alert("signal_source_fallback", txt)
+            return
+        self._sig_contract = self._full_contract_from_contract(cur)
+        context.stra_prepare_bars(self._sig_contract, self._inst.period,
+                                  self._base.bar_cnt, isMain=False)
+        context.stra_log_text(
+            f"{self.name()} signal source: {self._sig_contract} "
+            f"(自身真实序列, 无复权; 执行仍为 {self._inst.code})")
+
+    def _full_contract(self, yymm: str) -> str:
+        ex, prod = split_code(self._inst.code)[:2]
+        return f"{ex}.{prod}.{yymm}"
+
+    def _full_contract_from_contract(self, contract: str) -> str:
+        """hots.json 规则 'to' 字段 (rb2701) -> SHFE.rb.2701。"""
+        ex = self._inst.code.split(".")[0]
+        if "." in contract:
+            return contract
+        head = contract[: -4] if contract[-4:].isdigit() else contract
+        return f"{ex}.{head}.{contract[-4:]}"
+
+    def _load_roll_calendar(self, common: str):
+        """roll_calendar.json -> [(start, end, yymm)] 或 None。"""
+        try:
+            with open(os.path.join(common, "roll_calendar.json"),
+                      encoding="utf-8") as f:
+                raw = json.load(f) or {}
+            entry = (raw.get("codes") or {}).get(self._inst.code)
+            segs = (entry or {}).get("segments") or []
+            out = [(int(s[0]), int(s[1]), str(s[2])) for s in segs]
+            return out or None
+        except (OSError, ValueError, TypeError, IndexError):
+            return None
+
+    def _dominant_for(self, date: int):
+        """回测逐日主力: 日历段查找 -> 合约全码 或 None。"""
+        cal = self._sig_calendar
+        if not cal:
+            return self._sig_contract
+        for s, e, yymm in cal:
+            if int(s) <= int(date) <= int(e):
+                return self._full_contract(yymm)
+        # 窗外 (数据延伸): 用最近一段
+        if int(date) < cal[0][0]:
+            return self._full_contract(cal[0][2])
+        return self._full_contract(cal[-1][2])
+
+    def _check_sig_roll(self, context, dom: str):
+        """换月事件检测/告警: 评估日主力变化 → 日志+告警 (实盘配套
+        每日 20:40 重启切换; bt 逐日切换无告警, 只记录首次)。"""
+        if dom is None or dom == self._sig_cur_dom:
+            return
+        prev = self._sig_cur_dom
+        self._sig_cur_dom = dom
+        if prev is None:
+            return
+        get_date = getattr(context, "stra_get_date", None)
+        day = -1
+        if get_date is not None:
+            try:
+                day = int(get_date())
+            except (TypeError, ValueError):
+                pass
+        if day == self._sig_roll_alert_day:
+            return
+        self._sig_roll_alert_day = day
+        txt = (f"signal roll: {prev} -> {dom}"
+               + ("" if self._is_backtest else
+                  "; 实盘信号保持旧合约至 20:40 重启切换"))
+        context.stra_log_text(f"{self.name()} {txt}", level=2)
+        self._alert("signal_source_roll", txt)
+
+    def _sig_bars(self, context, full_code):
+        """合约信号序列读取 (带缓存) -> (dates, h, l, c) 或 None。
+
+        回测: 直读 storage/csv/contracts/<code>.json 抓取缓存 —— 绕开
+        C++ 副K (逐合约 sub 注册触发 CtaMocker 段错误风险, 2026-11-10
+        实证) 且免去 24 个副K订阅开销; 实盘: 单主力合约走框架副K。"""
+        cached = self._sig_bars_cache.get(full_code)
+        if cached is not None:
+            return cached if cached[0] is not None else None
+        if self._is_backtest:
+            rows = self._load_contract_cache(full_code)
+            if not rows:
+                self._sig_bars_cache[full_code] = (None,)
+                return None
+            out = ([int(r["date"]) for r in rows],
+                   [float(r["high"]) for r in rows],
+                   [float(r["low"]) for r in rows],
+                   [float(r["close"]) for r in rows])
+            self._sig_bars_cache[full_code] = out
+            return out
+        sbars = context.stra_get_bars(full_code, self._inst.period,
+                                      self._base.bar_cnt, isMain=False)
+        if sbars is None or len(sbars) == 0:
+            self._sig_bars_cache[full_code] = (None,)
+            return None
+        sd = self._nd_field(sbars, "date")
+        if sd is None:
+            self._sig_bars_cache[full_code] = (None,)
+            return None
+        out = ([int(d) for d in sd],
+               list(sbars.highs), list(sbars.lows), list(sbars.closes))
+        self._sig_bars_cache[full_code] = out
+        return out
+
+    def _load_contract_cache(self, full_code: str):
+        """storage/csv/contracts/<code>.json -> [{date,high,low,close}]
+
+        缓存来自 scripts/build_contract_signals.py 的抓取 (幂等, 缺文件
+        = 该合约无数据, 上层窗口截断处理)。"""
+        common = find_common(_GROUP_DIR)
+        storage = os.path.abspath(os.path.join(common, "..", "storage"))
+        path = os.path.join(storage, "csv", "contracts",
+                            f"{full_code}.json")
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+
+    def _signal_arrays(self, context, bars, highs, lows, closes,
+                       extra_date=None):
+        """contract 模式: 把指标窗口替换为**评估日主力合约**自身序列
+        (align_window 尾部对齐, 上市前头部截断, 缺失日内沿前收)。
+
+        返回 (highs, lows, closes) np 数组; None = 窗口不足, 调用方
+        跳过本次评估 (锚点不动)。hot/未解析 → 原样返回 (零漂移)。
+        """
+        if self._sig_source() != "contract":
+            return highs, lows, closes
+        hd = self._nd_field(bars, "date")
+        if hd is None or len(highs) not in (len(hd), len(hd) + 1):
+            return None
+        dates = [int(d) for d in hd]
+        if extra_date is not None and len(highs) == len(dates) + 1:
+            dates.append(int(extra_date))
+        eval_date = dates[-1]
+        dom = self._dominant_for(eval_date) if self._sig_calendar \
+            else self._sig_contract
+        if not dom:
+            return highs, lows, closes      # 未解析 → hot 退化
+        self._check_sig_roll(context, dom)
+        sb = self._sig_bars(context, dom)
+        if sb is None:
+            return None
+        sd, sh, sl, sc = sb
+        aligned = align_window(
+            dates, list(highs), list(lows), list(closes),
+            sd, sh, sl, sc, min_bars=self._need_bars())
+        if aligned is None:
+            context.stra_log_text(
+                f"{self.name()} signal window insufficient: "
+                f"{dom} bars < {self._need_bars()}", level=2)
+            return None
+        return (np.asarray(aligned[0], dtype=float),
+                np.asarray(aligned[1], dtype=float),
+                np.asarray(aligned[2], dtype=float))
+
 
     def _post_calculate(self, context: CtaContext, closes, n: float,
                         chan: dict, mark: bool = True):
@@ -2049,8 +2309,16 @@ class StraTurtle(BaseCtaStrategy):
         if last_date is None:
             return
         # 当日 m5 聚合 (his 无当日, 见 DATA_OPS F3)
+        # Phase 1: contract 模式用评估日主力合约自身 m5 合成 (真实价口径)
         synth = None
-        mbars = context.stra_get_bars(code, p.intrabar_period,
+        if self._sig_source() == "contract":
+            mcode = self._dominant_for(curTDate) if self._sig_calendar \
+                else self._sig_contract
+            if not mcode:
+                mcode = code
+        else:
+            mcode = code
+        mbars = context.stra_get_bars(mcode, p.intrabar_period,
                                       p.intrabar_cnt)
         if mbars is not None and len(mbars) > 0:
             dates = self._nd_field(mbars, "date")
@@ -2095,6 +2363,13 @@ class StraTurtle(BaseCtaStrategy):
         # on_warmup 默认放行 (与 _on_calc_daily/_catchup_eval 的
         # with_oi=True 不一致)。合成 bar 没有成交量, 过滤器使用最近
         # 完整 bar 的成交量是刻意口径 (优于 fail-open)。
+        # Phase 1: contract 模式指标窗口替换 (extra_date=合成 bar 日)
+        sig = self._signal_arrays(
+            context, bars, highs, lows, closes,
+            extra_date=(int(curTDate) if synth is not None else None))
+        if sig is None:
+            return
+        highs, lows, closes = sig
         atr, n, chan = self._eval_core(context, bars, highs, lows, closes,
                                        h, l, c, prev_close, with_oi=True,
                                        synth=synth)
@@ -2149,6 +2424,11 @@ class StraTurtle(BaseCtaStrategy):
         highs = np.asarray(bars.highs, dtype=float)
         lows = np.asarray(bars.lows, dtype=float)
         closes = np.asarray(bars.closes, dtype=float)
+        # Phase 1: contract 模式指标窗口替换 (None=窗口不足, 不消费闸)
+        sig = self._signal_arrays(context, bars, highs, lows, closes)
+        if sig is None:
+            return
+        highs, lows, closes = sig
         atr, n, chan = self._eval_core(
             context, bars, highs, lows, closes,
             float(highs[-1]), float(lows[-1]), float(closes[-1]),

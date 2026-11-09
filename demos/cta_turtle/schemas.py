@@ -68,6 +68,16 @@ class RiskConfig:
     # fill_timeout_secs (fees0>0) / 3x (免费品种, 旧 1800=600*3 等价)。
     fill_timeout_secs: float = 600.0
     exit_fill_timeout_secs: float = 120.0
+    # === Phase 1 资本模型 v2 (2026-11-10, 用户拍板真实可支配 25M) ===
+    # unit_var 派生: base.unit_var=0 时 1 单位 1N 风险 = 分配资金 ×
+    # unit_risk_frac (默认 1%, 与 max_risk_per_mkt 2%×2N 自洽:
+    # 1 unit 的 2N 止损 = 2% = 单笔上限, 不再出现 0.75 unit 截断)。
+    # 分配资金 = portfolio_capital × weight/Σweights (alloc_weights)。
+    # ⚠️ 观察期 (shadow_capital>0, portfolio_capital=0): 生产预算口径
+    # 不变, 只按 25M 口径旁路计算对比手数并日志 — 验证后翻转:
+    #   portfolio_capital=25M, base.unit_var=0, shadow_capital=0。
+    unit_risk_frac: float = 0.01
+    shadow_capital: float = 0.0     # shadow 观察期虚拟总资金 (0=关闭)
 
     def validate(self):
         for name in ("max_risk_per_mkt", "max_risk_per_market",
@@ -115,6 +125,11 @@ class RiskConfig:
                     or not 30.0 <= float(v) <= 86400.0:
                 raise ValueError(
                     f"risk.{name}={v!r} 需在 [30, 86400] 秒内")
+        if not 0.0 < float(self.unit_risk_frac) <= 0.10:
+            raise ValueError(
+                f"risk.unit_risk_frac={self.unit_risk_frac} 需在 (0,0.10]")
+        if self.shadow_capital < 0:
+            raise ValueError("risk.shadow_capital 不能为负 (0=关闭)")
 
 
 @dataclass
@@ -165,6 +180,13 @@ class TurtleBaseConfig:
     # ghost_fill 自愈开关: True 仅在 rebuild/独占账户自动裁剪+告警；
     # alert/共享账户即使 True 也只告警人工处置，防止误裁其他策略仓位。
     ghost_auto_trim: bool = True
+    # 信号价格源 (Phase 1, 2026-11-10 用户拍板口径):
+    #   hot      = 主力连续拼接序列 (默认, 旧行为零漂移; 换月跳空进窗口)
+    #   contract = 移仓后**新合约自身真实序列**重算信号 (无任何价格复权;
+    #              指标/通道永远在当前主力合约真实价上; 实盘按 hots.json
+    #              当前主力解析订阅, 回测按 common/roll_calendar.json 逐日
+    #              切换; 执行/持仓仍是 HOT 由框架换月映射)
+    signal_source: str = "hot"
     # 涨跌停锁死检测 (秒, 0=关闭): tick 价格钉住不动超过该时长且
     # 存在未闭合成交窗口时, 判定疑似锁死 → 告警并暂停该品种加仓
     # (出场/止损不受影响; 入场仍允许但由 ghost_fill 自愈兜底)。
@@ -250,6 +272,10 @@ class InstrumentConfig:
     profiles: list = field(default_factory=list)  # list[ProfileConfig];
                                      # 非空时唯一入口, 与 system/speeds 互斥,
                                      # 按 core.profiles 展开
+    # Phase 1 信号源逐品种覆盖 (空=继承 base.signal_source):
+    # CZCE (TA/MA/CF) 逐合约历史暂无免费数据源 (sina 日线下架/EM 不覆盖
+    # 已摘牌), 保持 hot 待 tqsdk 源补齐; 其余 9 品种可用 contract。
+    signal_source: str = ""
 
     def allows_direction(self, direction: int) -> bool:
         """direction: 1=多, -1=空"""

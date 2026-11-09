@@ -121,6 +121,10 @@ class ConfigLoader:
                 f"base.stop_n_mode 非法 '{base.stop_n_mode}', "
                 "仅支持 entry(冻结入场 N)|current(当根 N)|"
                 "ratchet(当根 N 但只收紧不放宽)")
+        if base.signal_source not in ("hot", "contract"):
+            raise ValueError(
+                f"base.signal_source 非法 '{base.signal_source}', "
+                "仅支持 hot(主力连续拼接)|contract(新合约自身序列, Phase1)")
         if not isinstance(base.truth_json, str):
             raise ValueError("base.truth_json 需为字符串路径 (或 '' / off)")
         if float(base.truth_max_age) <= 0:
@@ -146,6 +150,11 @@ class ConfigLoader:
             raise ValueError(f"risk 配置含未知字段: {unknown}")
         risk = RiskConfig(**risk_raw)
         risk.validate()
+        # Phase 1 资本模型: 派生口径必须有资金源
+        if base.unit_var <= 0 and risk.portfolio_capital <= 0:
+            raise ValueError(
+                "base.unit_var=0 (派生口径) 需要 risk.portfolio_capital>0 "
+                "作为分配资金源; 或恢复 unit_var 显式值")
         # 单位风险 vs 单笔风险上限一致性 (2026-10-20):
         # 1 个名义单位 2N 风险 = unit_var * stop_atr_mult;
         # 单笔上限 = fallback_capital * max_risk_per_mkt。
@@ -266,6 +275,7 @@ class ConfigLoader:
         # (2026-09-15 stop_n_mode current→ratchet 先例), 加载时留痕
         print(f"[ConfigLoader] {path}: instruments={len(instruments)} "
               f"entry_mode={base.entry_mode} stop_n_mode={base.stop_n_mode} "
+              f"signal_source={base.signal_source} "
               f"ghost_auto_trim={base.ghost_auto_trim} "
               f"truth_mode={base.truth_rebuild_mode} "
               f"gate={risk.account_gate_mode} "

@@ -84,6 +84,14 @@ risk:                     # 组合级风险预算 (helpers/RiskManager, 下单�
   daily_loss_stop_frac: 0.0     # 停止新开/加仓
   daily_loss_flatten_frac: 0.0  # 全平 (应 >= stop)
 
+  # === Phase 1 资本模型 v2 (2026-11-10, 用户拍板真实可支配 25M) ===
+  # 观察期: shadow_capital=25M 只旁路对比日志 (shadow_size 否决日志),
+  # 生产预算口径不变; 观察 1~2 周后翻转: portfolio_capital=25000000、
+  # base.unit_var=0 (派生 = 分配额×unit_risk_frac=1%, 1 unit 2N = 2%
+  # 单笔上限, 消除 0.75 unit 截断)、shadow_capital=0。
+  unit_risk_frac: 0.01      # 派生口径: 1 单位 1N 风险 = 分配资金 × 1%
+  shadow_capital: 25000000  # shadow 观察期虚拟总资金 (0=关闭)
+
 notify:                   # webhook 事件推送 (helpers/notifier.py)
   # ⚠️ 生产必须启用: 2026-09-17 裸露持仓两天无人知晓的事故根因就是
   # enabled=false — 所有 S 级检测 (ghost_fill/truth_mismatch/exec 卡死/

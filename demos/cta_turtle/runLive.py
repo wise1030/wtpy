@@ -185,7 +185,8 @@ def main():
     for inst in cfg.instruments:
         name = f"turtle_{inst.code.replace('.', '_')}"
         stra = StraTurtle(name, inst, cfg.base, risk_mgr=risk_mgr,
-                          notify=notifier)
+                          notify=notifier,
+                          alloc_total=len(cfg.instruments))
         engine.add_cta_strategy(stra)
         print(f"[runLive] add strategy {name}: {inst.period} "
               f"units={inst.units} dir={inst.direction} profiles="
