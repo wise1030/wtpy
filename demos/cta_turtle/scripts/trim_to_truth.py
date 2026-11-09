@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """trim_to_truth — 持仓裁剪手术: 引擎+信号双账重建到券商真值。
 
-背景与用途 (2026-11-09 otp 事件处置工具化):
-共享账户上第三方策略 (otcpricer 等) 的平仓单会平掉**我们的**持仓
-(CTP 账户级持仓可互换), 造成 信号/引擎账 > 券商实有。alert 模式
+背景与用途 (2026-11-09 riskmon 事故处置工具化):
+C++ SimpleRiskMon 在 IDD 触发时按 risk_scale 静默缩放执行层仓位目标
+(见 AGENTS 2026-11-09 条目), 造成 信号/引擎账 ≠ 券商实有。alert 模式
 拒绝自动重建是正确的, 但需要人工手术把双账收敛到 broker 真值,
 否则出场单量 > 实有仓 → 平完剩余空头后反向开出多仓 (翻转事故)。
 
 本脚本: 按 rtdata.json 当前值, 把指定品种 (或全部失配品种) 的
 引擎快照 (userdata/ud_<name>.json) 与信号账 (stradata/<name>.json)
-重建为单层 (手数=broker 净空头, 成本=引擎层 vwap), 仓位连续性保留
+重建为单层 (手数=broker 净仓, 成本=引擎层 vwap), 仓位连续性保留
 (s1_last/direction/锚点不动, _armed 置 None 由重启 rearm 重建)。
 
 ⚠️ 必须在 run.py 停止后运行 (运行期周期快照会覆盖落盘修改):
