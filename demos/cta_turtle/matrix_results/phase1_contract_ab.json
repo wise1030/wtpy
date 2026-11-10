@@ -1,0 +1,29 @@
+{
+ "note": "Phase 1 A/B: 移仓新合约自身信号 (无复权) vs HOT拼接 (旧黄金口径); 用户已拍板旧口径作废. 同窗口 2018-01~2023-04/5M/0tick/trigger.",
+ "window": "20180101~20230403",
+ "capital": 5000000,
+ "slippage": 0,
+ "contract_mode": {
+  "total_return_pct": 4.4274,
+  "max_drawdown_pct": 26.8,
+  "trades": 345,
+  "hashes": {
+   "signals.csv": "9a715f9864861f00dca64f901ed9f7908ac250696d1103b84854ac3c14c8a304",
+   "funds.csv": "a1932b714882617dbe12caa6238a7c4b7bd34240f8be7a52a2d693fc744be417",
+   "trades.csv": "a3a69e2d2d8ee44e684082b4578ec5a57953165e05763882001bdb3b8dff020d"
+  }
+ },
+ "hot_mode_golden": {
+  "total_return_pct": 9.7264464,
+  "max_drawdown_pct": 25.742474287640466,
+  "days": 1275,
+  "hashes": {
+   "signals.csv": "98ce6e93a4b4e6f396f32497c508be60ead732860fdde585146505e4d3e28a3a",
+   "funds.csv": "3c328b2a25136f3aedc44f385a5c4bc049aa5959dcbf24765271592ec61c2e41",
+   "trades.csv": "dbdce50a9a5f5c7b3760c350dafa4c1ce27a634d674a0616f9f5f34d9344e167"
+  }
+ },
+ "delta": {
+  "return_pp": -5.3
+ }
+}
