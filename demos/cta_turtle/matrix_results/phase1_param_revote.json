@@ -1,0 +1,46 @@
+{
+ "note": "contract 口径参数重验 v2 (真合约模式, signal source已验证) 2019-01~2026-08/5M; armT=arm_exclude_signal:true(生产), armF=false",
+ "results": {
+  "SHFE.rb.HOT": {
+   "armT": {
+    "ret_pct": 9.95,
+    "dd_pct": 26.86,
+    "trades": 311
+   },
+   "armF": {
+    "ret_pct": 31.28,
+    "dd_pct": 17.7,
+    "trades": 283
+   },
+   "close": {
+    "ret_pct": 20.58,
+    "dd_pct": 23.5,
+    "trades": 183
+   }
+  },
+  "DCE.p.HOT": {
+   "armT": {
+    "ret_pct": 41.77,
+    "dd_pct": 37.87,
+    "trades": 497
+   },
+   "armF": {
+    "ret_pct": 13.56,
+    "dd_pct": 42.01,
+    "trades": 480
+   }
+  },
+  "DCE.m.HOT": {
+   "armT": {
+    "ret_pct": -21.45,
+    "dd_pct": 34.16,
+    "trades": 441
+   },
+   "armF": {
+    "ret_pct": -27.46,
+    "dd_pct": 34.68,
+    "trades": 415
+   }
+  }
+ }
+}

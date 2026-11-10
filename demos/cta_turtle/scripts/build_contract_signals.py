@@ -277,12 +277,21 @@ def main():
               % (code, info["contracts_fetched"], info["segments"],
                  info["validate"], time.time() - t0), flush=True)
     cal_path = os.path.join(args.common, "roll_calendar.json")
+    # 合并写而非整体覆盖: 只更新本次处理的 code —— 整体覆盖曾两次
+    # 被 --codes 子集运行清空其它品种 (2026-11-10 实锤, AB 批误跑 hot)
+    try:
+        with open(cal_path, encoding="utf-8") as f:
+            prev = json.load(f) or {}
+    except (OSError, ValueError):
+        prev = {}
+    merged_codes = dict(prev.get("codes") or {})
+    merged_codes.update(cal_out)
     tmp = cal_path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"_note": "Phase1 逐合约信号日历: [start_date,end_date,"
                             " dominant_yymm]; 无复权, 移仓日切信号序列",
                    "generated": datetime.datetime.now().strftime("%F %T"),
-                   "codes": cal_out}, f, ensure_ascii=False)
+                   "codes": merged_codes}, f, ensure_ascii=False)
     os.replace(tmp, cal_path)
     rep_path = args.out or os.path.join(args.storage, "csv",
                                         "contracts", "_build_report.json")
