@@ -273,8 +273,9 @@ class InstrumentConfig:
                                      # 非空时唯一入口, 与 system/speeds 互斥,
                                      # 按 core.profiles 展开
     # Phase 1 信号源逐品种覆盖 (空=继承 base.signal_source):
-    # CZCE (TA/MA/CF) 逐合约历史暂无免费数据源 (sina 日线下架/EM 不覆盖
-    # 已摘牌), 保持 hot 待 tqsdk 源补齐; 其余 9 品种可用 contract。
+    # 12 品种全部具备 contract 数据源 (9 品种 sina 逐合约 + CZCE 三品种
+    # ks2wtpy/KS S3 源; 见 scripts/build_contract_signals.py --ks-csv-dir)。
+    # 默认仍 hot (生产零漂移), 切 contract 需逐品种/全局限配 + live 种子。
     signal_source: str = ""
 
     def allows_direction(self, direction: int) -> bool:

@@ -39,6 +39,73 @@ _FETCH_SLEEP = 0.35          # sina 频控
 WT_CSV_HEADER = "date,open,high,low,close,volume,turnover,open_interest"
 
 
+def ingest_ks_csv(ex: str, prod: str, ks_csv_dir: str, cache_dir: str,
+                  window_start: str = WINDOW_START,
+                  window_end: str = WINDOW_END) -> int:
+    """ks2wtpy 转换产物 -> 本管道 contracts 缓存 (Phase 1 CZCE 数据源)。
+
+    文件名 CZCE.<PROD><yyyy4>_d.csv (CF0001=2000-01) → 缓存键按 WT CZCE
+    3 位年月 (年尾数+月, CZCE.TA.601.json)。跳过 SPD(价差)/IPS(指数)/
+    HOT/main 派生序列, 只收真实合约。行内 open_interest 即 hold。
+    返回写入的缓存文件数。幂等 (按源文件 mtime 判断跳过)。"""
+    import csv as _csv
+    import re
+    pat = re.compile(rf"^{re.escape(ex)}\.{re.escape(prod)}(\d{{4}})_d\.csv$")
+    written = 0
+    groups = {}                       # yymm3 -> {date: row}
+    for fname in sorted(os.listdir(ks_csv_dir)):
+        m = pat.match(fname)
+        if not m:
+            continue
+        yyyy = int(m.group(1))
+        y, mm = 2000 + yyyy // 100, yyyy % 100
+        if not 1 <= mm <= 12:
+            continue
+        # CZCE 缓存键 3 位 (年尾数+月); 其余交易所 4 位
+        yymm3 = (f"{y % 10}{mm:02d}" if ex == "CZCE"
+                 else f"{y % 100:02d}{mm:02d}")
+        path = os.path.join(ks_csv_dir, fname)
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                for r in _csv.DictReader(f):
+                    d = (r.get("date") or "").replace("/", "").replace("-", "")
+                    if not (len(d) == 8 and window_start.replace("-", "")
+                            <= d <= window_end.replace("-", "")):
+                        continue
+                    try:
+                        row = {"date": d,
+                               "open": float(r.get("open") or 0),
+                               "high": float(r.get("high") or 0),
+                               "low": float(r.get("low") or 0),
+                               "close": float(r.get("close") or 0),
+                               "volume": float(r.get("volume") or 0),
+                               "hold": float(r.get("open_interest") or 0),
+                               "settle": float(r.get("close") or 0)}
+                    except (TypeError, ValueError):
+                        continue
+                    groups.setdefault(yymm3, {})[d] = row
+        except OSError:
+            continue
+    os.makedirs(cache_dir, exist_ok=True)
+    for yymm3, bydate in groups.items():
+        wt = wt_contract(ex, prod, yymm3)
+        cache = os.path.join(cache_dir, f"{wt}.json")
+        rows = [bydate[d] for d in sorted(bydate)]
+        # 幂等: 同bar数且缓存新于源则跳过 (简化: 内容一致即跳过)
+        try:
+            with open(cache, encoding="utf-8") as f:
+                if json.load(f) == rows:
+                    continue
+        except (OSError, ValueError):
+            pass
+        tmp = cache + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(rows, f)
+        os.replace(tmp, cache)
+        written += 1
+    return written
+
+
 def _fetch_one(symbol: str, cache: str) -> list:
     """拉单合约日线 -> [{date,open,high,low,close,volume,hold,settle}]。
 
@@ -180,6 +247,9 @@ def main():
     ap.add_argument("--common", default=os.path.abspath(
         os.path.join(_PKG, "..", "common")))
     ap.add_argument("--skip-fetch", action="store_true")
+    ap.add_argument("--ks-csv-dir", default="",
+                    help="ks2wtpy 转换产物目录: 这些品种改从 KS csv 摄取 "
+                         "(CZCE 数据源, 文件名 <EXCHG>.<PROD><yyyy4>_d.csv)")
     ap.add_argument("--out", default="")
     args = ap.parse_args()
     if args.codes:
@@ -192,6 +262,11 @@ def main():
     cache_dir = os.path.join(args.storage, "csv", "contracts")
     report = {}
     cal_out = {}
+    if args.ks_csv_dir:
+        for code in codes:
+            ex, prod = split_code(code)
+            n = ingest_ks_csv(ex, prod, args.ks_csv_dir, cache_dir)
+            print(f"[build] KS ingest {code}: {n} cache files", flush=True)
     for code in codes:
         t0 = time.time()
         info = build_product(code, os.path.join(args.storage, "csv"),
