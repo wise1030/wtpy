@@ -1,14 +1,14 @@
 {
   "hashes": {
-    "signals.csv": "98ce6e93a4b4e6f396f32497c508be60ead732860fdde585146505e4d3e28a3a",
-    "funds.csv": "3c328b2a25136f3aedc44f385a5c4bc049aa5959dcbf24765271592ec61c2e41",
-    "trades.csv": "dbdce50a9a5f5c7b3760c350dafa4c1ce27a634d674a0616f9f5f34d9344e167"
+    "signals.csv": "d12e65fb7a6221e697103a52c4d922fe9fa3867f15f8b9edcc467bce34b97542",
+    "funds.csv": "41cadabdd8d034e70ec6262ab0d67cf79bc7a42c7ba4185e7a4ea7c5fb9fcb4e",
+    "trades.csv": "574c787669e7cba740c1b34728a27b69c7ad22808645ea4dabe86802537cc13a"
   },
   "summary": {
-    "total_return": 9.7264464,
-    "annual_return": 1.7625572590274752,
-    "max_falldown": 25.742474287640466,
-    "sharpe_ratio": -0.014778783762338153,
+    "total_return": 38.06461960000001,
+    "annual_return": 6.259667322606899,
+    "max_falldown": 20.8639537733407,
+    "sharpe_ratio": 0.27556346003168003,
     "days": 1275
   },
   "spec": {
@@ -19,7 +19,7 @@
     "capital": 5000000,
     "slippage": 0
   },
-  "config_sha256": "edae718ac45f37b7496c9d4f6a3840675dc6fb8671751f6591100e18293365da",
+  "config_sha256": "f5852a4dbbccc7c70b4ce1154670a068a91596bbf5a0f264686eba8b38aae39e",
   "input_hashes": {
     "rb_d1": "830cfc74cb9aeb34220d405bf218d0c4f34227f1ebe3e16bd7ce844c96a424f2",
     "rb_m5": "bf5a91c0c9c43a456e3acfc6e375e156212cd0acafcb85cf8d328008365f88f9",

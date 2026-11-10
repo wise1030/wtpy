@@ -14,11 +14,12 @@ base:
   s2_entry: 55
   s2_exit: 20
   enable_s1_filter: true  # S1 盈利跳过过滤 (false=裸20/10突破)
-  entry_mode: trigger     # close=收盘确认(旧口径) | trigger=盘中触发(方案C,
-                          # 经典海龟原生: tick穿越通道即触发, 止损/加仓同理)
-  arm_exclude_signal: true  # trigger 武装位=current 通道（已排除刚闭合
-                          # 信号 bar），并忽略 envelope；false=next_* 最近
-                          # N 根通道。2026-10-26 修复旧实现会重新包络信号根
+  entry_mode: trigger     # 口径依赖参数: contract口径 close 胜(+88.7pp),
+                          # hot口径 trigger 胜(2026-11-10 双口径重验) —— 维持
+                          # trigger, 与 contract 信号源作为整体升级包一起切
+  arm_exclude_signal: false # 2026-11-10 contract口径组合级重验: armF 优于
+                          # armT +12.5pp (旧+53.9pp结论系污染口径已作废);
+                          # false=next_* 最近N根通道(旧行为)
   stop_n_mode: ratchet    # 止损/加仓步长的 N 口径 (P0-2):
                           # ratchet=当根 N 但只收紧不放宽 (默认: 风险口径唯一
                           #   自洽 — 记账 2N == 实际止损亏损; 12 品种
