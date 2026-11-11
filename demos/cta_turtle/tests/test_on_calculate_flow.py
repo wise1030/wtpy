@@ -42,6 +42,9 @@ class FullCtx:
         self.prepared = (code, period, cnt, isMain)
         self.prepared_all.append((code, period, cnt, isMain))
 
+    def stra_sub_ticks(self, code):
+        self.subscribed = code
+
     def stra_get_bars(self, code, period, cnt, isMain=False):
         return self.bars
 

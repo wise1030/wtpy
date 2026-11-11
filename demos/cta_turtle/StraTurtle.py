@@ -847,7 +847,7 @@ class StraTurtle(BaseCtaStrategy):
         # (实盘日线不闭合 F3 → session_end 用 m5 聚合合成当日日K评估)
         # bt_no_simtick: bt 且无 m5 数据 → 不订 tick/副K, 触发判定走
         # on_bar check_bar, 撮合退化为 bar 收盘口径
-        if self._mode.wants_ticks:
+        if self._mode.wants_tick_feed:
             context.stra_sub_ticks(code)
         # m5 副K: trigger 盘中触发 + 实盘日线 session_end 合成日K 共同
         # 原料 (F3: 实盘 d1 永不闭合, trigger 武装与 close 收盘决策都
@@ -1538,12 +1538,19 @@ class StraTurtle(BaseCtaStrategy):
         return f"{ex}.{prod}.{yymm}"
 
     def _full_contract_from_contract(self, contract: str) -> str:
-        """hots.json 规则 'to' 字段 (rb2701) -> SHFE.rb.2701。"""
+        """hots.json 规则 'to' 字段 -> WT 原生合约码。
+
+        'to' 两种格式: SHFE 系 'rb2701' (品种+4位) -> SHFE.rb.2701;
+        CZCE 'TA701' (品种+3位, contracts.json 键口径) -> CZCE.TA701
+        (2026-11-11 激活包实锤: 旧实现输出 CZCE.TA701.A701 双重前缀,
+        框架查无此合约, 信号副K静默无数据)。"""
         ex = self._inst.code.split(".")[0]
         if "." in contract:
             return contract
-        head = contract[: -4] if contract[-4:].isdigit() else contract
-        return f"{ex}.{head}.{contract[-4:]}"
+        if contract[-4:].isdigit():
+            head = contract[:-4]
+            return f"{ex}.{head}.{contract[-4:]}"
+        return f"{ex}.{contract}"
 
     def _load_roll_calendar(self, common: str):
         """roll_calendar.json -> [(start, end, yymm)] 或 None。"""
@@ -1925,12 +1932,17 @@ class StraTurtle(BaseCtaStrategy):
                                   float(lows[i]), float(closes[i]))
 
     def on_tick(self, context: CtaContext, stdCode: str, newTick):
-        """实盘 tick 驱动触发 (trigger 模式)"""
-        if self._mode.entry_mode != "trigger" or stdCode != self._inst.code:
-            return
+        """实盘 tick 驱动触发 (trigger 模式)。
+
+        心跳/断流基准在模式闸**之前**更新: tick 静默检测是模式无关
+        的运维防线 (close 模式同样依赖数据链健康, 2026-11-12 激活包
+        重启后 cu/al/sc tick_silent 误报实锤 —— 旧实现 close 首行
+        return 永不刷新 tick 时间戳)。周期快照/心跳写盘保持轻量。"""
         self._last_tick_ts = time.time()    # Phase 0: 心跳断流检测基准
         self._maybe_periodic_persist(context)   # 周期快照 (300s 节流)
         self._write_heartbeat(context)          # 心跳 (5s 节流)
+        if self._mode.entry_mode != "trigger" or stdCode != self._inst.code:
+            return
         self._process_open_intents(context)
         self._process_exit_orders(context)
         if self._exit_orders or self._open_intents:

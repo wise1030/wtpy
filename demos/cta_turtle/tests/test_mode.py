@@ -31,12 +31,13 @@ class TestModeTruthTable:
 
     def test_close_mode_live_d1(self):
         # 2026-11-11 Phase1 激活包: 实盘 d1 永不闭合 (F3), close 决策
-        # 改由 session_end 合成日K 驱动; 无 tick (盘中止损靠
-        # intrabar_stop 的 m5 主K扫描)
+        # 改由 session_end 合成日K 驱动; tick 订阅只为心跳断流基准
+        # (触发/意图仍不处理), 盘中止损靠 intrabar_stop 的 m5 主K扫描
         m = _mode(entry_mode="close", bt=False)
         assert m.session_flush == "daily_synth"
         assert m.wants_catchup
         assert not m.wants_ticks
+        assert m.wants_tick_feed          # close 实盘: 心跳基准需 tick
 
     def test_close_mode_live_intrabar(self):
         # close+盘中止损: session_end 驱动收盘决策 + m5 主K扫描止损,

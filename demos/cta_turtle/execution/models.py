@@ -67,6 +67,15 @@ class StrategyMode:
         return self.entry_mode == "trigger" and not self.bt_no_simtick
 
     @property
+    def wants_tick_feed(self) -> bool:
+        """tick 订阅: trigger 触发判定, 或 close 实盘的心跳断流基准。
+        close 不订 tick 则 on_tick 永不回调 → _last_tick_ts 恒 0 →
+        heartbeat_watch 永久 tick_silent 误报 (2026-11-12 激活包重启后
+        al/sc 实锤)。on_tick 对 close 只更新心跳基准, 不做触发/意图。"""
+        return not self.is_backtest and (
+            self.wants_ticks or self.entry_mode == "close")
+
+    @property
     def wants_catchup(self) -> bool:
         """实盘日线的日级 catchup 自愈 (h1/盘中模式/bt 关闭): trigger
         武装与 close 收盘决策共同依赖 —— 重启/数据缺口时首 tick 用
