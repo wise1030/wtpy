@@ -156,8 +156,14 @@ class TestCatchupGate:
         assert stra._catchup_date == 20260922      # 已是最新 → 结论性消费
 
     def test_gate_not_consumed_on_mode_disabled(self):
-        """模式性禁用 (bt/close 模式) → 消费闸 (避免每 tick 空转)"""
+        """模式性禁用 (bt) → 消费闸 (避免每 tick 空转)。
+        close+live 自 2026-11-11 Phase1 激活包起 catchup 已启用
+        (session_end 合成日K 的同源自愈), 不再是禁用模式 — 该用例
+        强制 bt 模式面"""
         stra = _make_stra(entry_mode="close")
+        from execution.models import StrategyMode
+        stra._mode = StrategyMode.resolve(stra._base, stra._inst,
+                                          True, False)
         ctx = _ShortBarsCtx(rows=10)
         stra._catchup_eval(ctx, 20260922)
         assert stra._catchup_date == 20260922

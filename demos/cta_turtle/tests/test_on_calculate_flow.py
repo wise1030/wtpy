@@ -30,6 +30,7 @@ class FullCtx:
         self.pos = 0
         self.avgpx = 0.0
         self.orders = []
+        self.prepared_all = []
         self.prewarmed = []
         self.logs = []
         self.kv = {}
@@ -39,6 +40,7 @@ class FullCtx:
     # 数据
     def stra_prepare_bars(self, code, period, cnt, isMain=False):
         self.prepared = (code, period, cnt, isMain)
+        self.prepared_all.append((code, period, cnt, isMain))
 
     def stra_get_bars(self, code, period, cnt, isMain=False):
         return self.bars
@@ -114,7 +116,11 @@ def test_on_init_registers_and_prepares():
     stra = _make_stra()
     ctx = FullCtx(FakeBars())
     stra.on_init(ctx)
-    assert ctx.prepared == ("SHFE.rb.HOT", "d1", 120, True)
+    # 主K d1 订阅必须发生 (实盘 close 由 session_end 合成驱动, 但
+    # 暖机/图表/catchup 仍读主K); m5 副K 是 2026-11-11 激活包新增
+    # (session_end 合成日K 原料)
+    assert ("SHFE.rb.HOT", "d1", 120, True) in ctx.prepared_all
+    assert ctx.prepared == ("SHFE.rb.HOT", "m5", 300, False)
     assert stra._volscale == 10.0
     assert any("inited" in t for _, t in ctx.logs)
 

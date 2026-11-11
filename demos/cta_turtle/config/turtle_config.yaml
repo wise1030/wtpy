@@ -14,12 +14,16 @@ base:
   s2_entry: 55
   s2_exit: 20
   enable_s1_filter: true  # S1 盈利跳过过滤 (false=裸20/10突破)
-  entry_mode: trigger     # 口径依赖参数: contract口径 close 胜(+88.7pp),
-                          # hot口径 trigger 胜(2026-11-10 双口径重验) —— 维持
-                          # trigger, 与 contract 信号源作为整体升级包一起切
+  entry_mode: close       # 2026-11-11 Phase1 激活包落地: contract 口径
+                          # close 胜 (+88.7pp 组合级重验, 10/12品种改善);
+                          # 实盘由 session_end 合成日K驱动 (F3: d1 永不闭合);
+                          # 盘中止损 = intrabar_stop m5 主K扫描 (12品种全开)
   arm_exclude_signal: false # 2026-11-10 contract口径组合级重验: armF 优于
                           # armT +12.5pp (旧+53.9pp结论系污染口径已作废);
                           # false=next_* 最近N根通道(旧行为)
+  signal_source: contract # 2026-11-11 Phase1 激活: 信号=当日主力合约
+                          # 自身真实序列 (无复权; live=hots 当前
+                          # 主力单合约副K, bt=roll_calendar 逐日主力)
   stop_n_mode: ratchet    # 止损/加仓步长的 N 口径 (P0-2):
                           # ratchet=当根 N 但只收紧不放宽 (默认: 风险口径唯一
                           #   自洽 — 记账 2N == 实际止损亏损; 12 品种
@@ -115,79 +119,79 @@ instruments:
     units: 1
     direction: both
     group: black
-    intrabar_stop: false
+    intrabar_stop: true 
   # 有色
   - code: SHFE.cu.HOT
     period: d1
     units: 1
     direction: both
     group: metal
-    intrabar_stop: false
+    intrabar_stop: true 
   - code: SHFE.al.HOT
     period: d1
     units: 1
     direction: both
     group: metal
-    intrabar_stop: false
+    intrabar_stop: true 
   # 能源
   - code: INE.sc.HOT
     period: d1
     units: 1
     direction: both
     group: energy
-    intrabar_stop: false
+    intrabar_stop: true 
   # 化工
   - code: CZCE.TA.HOT
     period: d1
     units: 1
     direction: both
     group: cheme
-    intrabar_stop: false
+    intrabar_stop: true 
   - code: CZCE.MA.HOT
     period: d1
     units: 1
     direction: both
     group: cheme
-    intrabar_stop: false
+    intrabar_stop: true 
   - code: DCE.pp.HOT
     period: d1
     units: 1
     direction: both
     group: cheme
-    intrabar_stop: false
+    intrabar_stop: true 
   - code: DCE.l.HOT
     period: d1
     units: 1
     direction: both
     group: cheme
-    intrabar_stop: false
+    intrabar_stop: true 
   # 油脂油料
   - code: DCE.m.HOT
     period: d1
     units: 1
     direction: both
     group: oils
-    intrabar_stop: false
+    intrabar_stop: true 
   - code: DCE.p.HOT
     period: d1
     units: 1
     direction: both
     group: oils
-    intrabar_stop: false
+    intrabar_stop: true 
   # 软商品
   - code: CZCE.CF.HOT
     period: d1
     units: 1
     direction: both
     group: soft
-    intrabar_stop: false
+    intrabar_stop: true 
   # 股指
   - code: CFFEX.IF.HOT
     period: d1
     units: 1
     direction: both
     group: equity
-    intrabar_stop: false
+    intrabar_stop: true 
 
 # === 单品种历史配置存档 (字段模板备查) ===
 #   period: d1            # d1 | h1, 每品种独立选择

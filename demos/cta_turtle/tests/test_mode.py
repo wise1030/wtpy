@@ -23,10 +23,28 @@ class TestModeTruthTable:
         assert m.session_flush == "daily_synth"
         assert m.wants_ticks and m.wants_catchup
 
-    def test_close_mode(self):
-        m = _mode(entry_mode="close")
+    def test_close_mode_bt(self):
+        # bt close: 日K 闭合, on_calculate 驱动, 无合成/catchup
+        m = _mode(entry_mode="close", bt=True)
         assert m.session_flush == "none"
         assert not m.wants_ticks and not m.wants_catchup
+
+    def test_close_mode_live_d1(self):
+        # 2026-11-11 Phase1 激活包: 实盘 d1 永不闭合 (F3), close 决策
+        # 改由 session_end 合成日K 驱动; 无 tick (盘中止损靠
+        # intrabar_stop 的 m5 主K扫描)
+        m = _mode(entry_mode="close", bt=False)
+        assert m.session_flush == "daily_synth"
+        assert m.wants_catchup
+        assert not m.wants_ticks
+
+    def test_close_mode_live_intrabar(self):
+        # close+盘中止损: session_end 驱动收盘决策 + m5 主K扫描止损,
+        # 两驱动互补
+        m = _mode(entry_mode="close", intrabar=True, bt=False)
+        assert m.main_period == "m5" and m.calc_path == "intrabar"
+        assert m.session_flush == "daily_synth"
+        assert not m.wants_ticks
 
     def test_h1(self):
         m = _mode(period="h1")

@@ -849,9 +849,16 @@ class StraTurtle(BaseCtaStrategy):
         # on_bar check_bar, 撮合退化为 bar 收盘口径
         if self._mode.wants_ticks:
             context.stra_sub_ticks(code)
-            if self._mode.calc_path == "daily":
-                context.stra_prepare_bars(code, p.intrabar_period,
-                                          p.intrabar_cnt, isMain=False)
+        # m5 副K: trigger 盘中触发 + 实盘日线 session_end 合成日K 共同
+        # 原料 (F3: 实盘 d1 永不闭合, trigger 武装与 close 收盘决策都
+        # 依赖会话末 m5 聚合; close+live 是 2026-11-11 Phase1 激活包的
+        # 新组合)
+        if self._mode.calc_path == "daily" and (
+                self._mode.wants_ticks
+                or (self._mode.session_flush == "daily_synth"
+                    and not self._is_backtest)):
+            context.stra_prepare_bars(code, p.intrabar_period,
+                                      p.intrabar_cnt, isMain=False)
         elif self._mode.entry_mode == "trigger":
             context.stra_log_text(
                 f"{self.name()} bt_no_simtick: trigger 判定走 "
@@ -1514,6 +1521,14 @@ class StraTurtle(BaseCtaStrategy):
         self._sig_contract = self._full_contract_from_contract(cur)
         context.stra_prepare_bars(self._sig_contract, self._inst.period,
                                   self._base.bar_cnt, isMain=False)
+        if self._inst.period == "d1":
+            # 主力合约 m5 副K: session_end 合成当日日K 的原料 (F3:
+            # 实盘 d1 永不闭合; trigger 武装与 close 收盘决策共同依赖;
+            # HOT m5 副K 的订阅在上方模式段)
+            context.stra_prepare_bars(self._sig_contract,
+                                      self._base.intrabar_period,
+                                      self._base.intrabar_cnt,
+                                      isMain=False)
         context.stra_log_text(
             f"{self.name()} signal source: {self._sig_contract} "
             f"(自身真实序列, 无复权; 执行仍为 {self._inst.code})")
@@ -2292,7 +2307,8 @@ class StraTurtle(BaseCtaStrategy):
                             f"drop stale pending {dropped} @ {tag}")
 
     def _session_eval_daily(self, context: CtaContext, curTDate: int):
-        """trigger 模式收盘评估: m5 聚合当日日K → 指标 → on_bar 武装"""
+        """实盘日线收盘评估 (trigger 武装 / close 决策): m5 聚合当日
+        日K → 指标 → on_bar (引擎按 entry_mode 各自产出武装或决策)"""
         code = self._inst.code
         p = self._base
         if self._d1_date is not None and int(self._d1_date) == int(curTDate):
