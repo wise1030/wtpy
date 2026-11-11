@@ -1,0 +1,92 @@
+{
+  "config": "/mnt/d/gf_pc/WonderTrader/wtpy/demos/cta_turtle/config/turtle_config.yaml",
+  "config_sha256": "f5852a4dbbccc7c70b4ce1154670a068a91596bbf5a0f264686eba8b38aae39e",
+  "manifest": {
+    "code_version": "4ebbd26+dirty",
+    "inputs": {
+      "config": "f5852a4dbbccc7c70b4ce1154670a068a91596bbf5a0f264686eba8b38aae39e",
+      "fees": "14769ed9f483c2627c578f4691452a77dcbdf8945b32da660b5e7d5d4378ac89",
+      "commodities": "4f8debbe0a57dad196661abeed0d4b7d5ffd2df4c4be04a63c311f3dac595a6e",
+      "hots": "42c18f1fdbc1f7406604602afeca302735d8c3c67b81fc1ce6a0941493526037",
+      "roll_calendar": "699d6339dbe798b9b25b9bb9d0815997315c477763f6a37b2535d6b1714dfcbd"
+    },
+    "data": {
+      "CFFEX.IF.HOT_d.csv": "99f48e9e0660b461fb28271e9b68ac8dc48b0f181249ca26d3ba5c36becea9a0",
+      "CFFEX.IF.HOT_m5.csv": "01afece1b7d96615ea8b72f56e0ff81aa0ee0d8db0fdb92ea5f5cf8c920875db",
+      "CZCE.CF.HOT_d.csv": "64f53dc8ecd901285e3c602ecaf7f8b704dbb7399e46a41c959b7c2c4a516eb8",
+      "CZCE.MA.HOT_d.csv": "560ad44f46379f72e4dc404cd580f20883e9e63e63c2247de4fde6d0d57b0083",
+      "CZCE.TA.HOT_d.csv": "bfe2a3af9a69821cd906833fedd6382859234f6645bdfa0f0f73b13ac4679360",
+      "DCE.l.HOT_d.csv": "b19b033b2817ddb4811ba27a40caa629ed11c9d1ec46236bd90b54604f01c6a7",
+      "DCE.m.HOT_d.csv": "f980d71fa4d4b00bce67e0786f77b4315e23df830978fcf11379f21d9a20d499",
+      "DCE.p.HOT_d.csv": "bf4b0b5a3e3f33a24b21493a944af39679a68c608319a6c53aa150d7b5f610be",
+      "DCE.pp.HOT_d.csv": "4c6f655783fd85c9ecd31187bff55b24236cb2e3f1361037a622704ef1deaf95",
+      "INE.sc.HOT_d.csv": "78d04ea40440b9aa92eca76995e8ecfb5339f4bf3eaf072e0c074677e8eed817",
+      "SHFE.al.HOT_d.csv": "6821cdff6b69d9a91af099b0f0c7c8e1e69e2ecdacc82002c64f2633e3691c7e",
+      "SHFE.cu.HOT_d.csv": "5f96ddc624d2fc6c728b1b2c439151e2310bb40fdc94826b6277e8c340a71d51",
+      "SHFE.rb.HOT_d.csv": "830cfc74cb9aeb34220d405bf218d0c4f34227f1ebe3e16bd7ce844c96a424f2",
+      "SHFE.rb.HOT_m5.csv": "bf5a91c0c9c43a456e3acfc6e375e156212cd0acafcb85cf8d328008365f88f9"
+    }
+  },
+  "capital": 60000000.0,
+  "start": 20190101,
+  "end": 20260831,
+  "eval_start": 20190102,
+  "eval_end": 20260831,
+  "n_days": 1859,
+  "slippage_ticks": 1,
+  "margin_usage": 0.6,
+  "entry_mode": "close",
+  "period": "d1",
+  "signal_source": "hot",
+  "codes": null,
+  "trigger_envelope": true,
+  "allow_same_bar_reversal": true,
+  "gap_stop": true,
+  "arm_exclude_signal": false,
+  "priority": "config",
+  "multi_profile_products": 0,
+  "book_mode": "gross_profile",
+  "fee_mode": "gross_per_sub",
+  "max_units_total": 6,
+  "max_units_per_group": 2,
+  "constrained": {
+    "metrics": {
+      "total_return": 0.62087,
+      "annual_return": 0.064336,
+      "max_drawdown": 0.306693,
+      "sharpe_ratio": 0.3697,
+      "calmar_ratio": 0.2098,
+      "days": 1859
+    },
+    "trades": 1937,
+    "orders": 1916,
+    "rejected": 371,
+    "fees": 2029898.68,
+    "realized": 32815981.66,
+    "margin_peak": 47020611.0,
+    "margin_breach_days": 0,
+    "roll_events": 0,
+    "roll_calendar_products": 0,
+    "final_equity": 97252212.98
+  },
+  "unconstrained": {
+    "metrics": {
+      "total_return": 0.956591,
+      "annual_return": 0.090519,
+      "max_drawdown": 0.38619,
+      "sharpe_ratio": 0.4412,
+      "calmar_ratio": 0.2344,
+      "days": 1859
+    },
+    "trades": 2477,
+    "orders": 2449,
+    "rejected": 0,
+    "fees": 2587288.74,
+    "realized": 52097860.6,
+    "margin_peak": 66611428.8,
+    "margin_breach_days": 0,
+    "roll_events": 0,
+    "roll_calendar_products": 0,
+    "final_equity": 117395431.86
+  }
+}

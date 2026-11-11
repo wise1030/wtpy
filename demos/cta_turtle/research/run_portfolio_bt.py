@@ -250,6 +250,97 @@ def load_roll_calendar(common_dir: str) -> dict:
     return out
 
 
+def load_signal_calendar(common_dir: str) -> dict:
+    """roll_calendar.json -> {code: [(start, end, yymm)]} (Phase 1
+    contract 信号源逐日主力日历; 与 load_roll_calendar 的 hots.json
+    执行价差日历是两个不同文件, 勿混)。"""
+    try:
+        with open(os.path.join(common_dir, "roll_calendar.json"),
+                  encoding="utf-8") as f:
+            raw = json.load(f) or {}
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for code, entry in (raw.get("codes") or {}).items():
+        segs = []
+        for s in (entry or {}).get("segments") or []:
+            try:
+                segs.append((int(s[0]), int(s[1]), str(s[2])))
+            except (TypeError, ValueError, IndexError):
+                continue
+        if segs:
+            out[code] = segs
+    return out
+
+
+def _dominant_yymm(cal: list, d: int) -> str:
+    """逐日主力 yymm; 窗外沿用最近段 (与 StraTurtle._dominant_for 一致)。"""
+    for s, e, y in cal:
+        if s <= d <= e:
+            return y
+    return cal[0][2] if d < cal[0][0] else cal[-1][2]
+
+
+def build_contract_series(bars: dict, cal: list, cache_dir: str,
+                          ex: str, prod: str) -> dict:
+    """逐日主力拼接序列 (无复权, Phase 1): 信号与执行统一用当日
+    主力合约自身序列 —— 用户拍板"移仓后用新合约自身序列重算"。
+
+    对齐 StraTurtle bt contract 语义 (hotsutil.align_window): 逐日
+    取 dom 真实 OHLC; 日历首段起点前 (上市前) 头部截断; 段内缺席日
+    (数据缺口) 沿用前收; volume/hold 一并拼接 (过滤链输入)。返回
+    与 load_bars 同构的 dict; 可用数据 < 10 根返回 {} (调用方 WARN
+    退化 hot)。执行也在拼接序列上成交 —— 与 StraTurtle bt 经框架
+    HOT 映射到当前主力撮合等价 (当日 HOT 价即当日主力价), 且从根
+    本上规避拼接跳空污染。"""
+    dom_cache: dict = {}
+
+    def _rows(yymm: str) -> dict:
+        if yymm not in dom_cache:
+            path = os.path.join(cache_dir, f"{ex}.{prod}.{yymm}.json")
+            try:
+                with open(path, encoding="utf-8") as f:
+                    raw = json.load(f) or []
+            except (OSError, ValueError):
+                raw = []
+            dom_cache[yymm] = {
+                int(r["date"]): r for r in raw
+                if str(r.get("date", "")).isdigit()}
+        return dom_cache[yymm]
+
+    out_d, out_o, out_h, out_l, out_c, out_v, out_oi = \
+        [], [], [], [], [], [], []
+    prev_c = None
+    for d in [int(x) for x in bars["dates"]]:
+        if d < cal[0][0]:
+            continue                      # 上市前: 头部截断
+        row = _rows(_dominant_yymm(cal, d)).get(d)
+        if row is None:
+            if prev_c is None:
+                continue                  # 尚无数据: 截断延续
+            row = {"open": prev_c, "high": prev_c, "low": prev_c,
+                   "close": prev_c, "volume": 0.0, "hold": 0.0}
+        out_d.append(d)
+        out_o.append(float(row.get("open") or row["close"]))
+        out_h.append(float(row["high"]))
+        out_l.append(float(row["low"]))
+        c = float(row["close"])
+        out_c.append(c)
+        out_v.append(float(row.get("volume") or 0.0))
+        out_oi.append(float(row.get("hold") or 0.0))
+        prev_c = c
+    if len(out_c) < 10:
+        return {}
+    return {"dates": np.asarray(out_d, dtype=np.int64),
+            "opens": np.asarray(out_o, dtype=float),
+            "highs": np.asarray(out_h, dtype=float),
+            "lows": np.asarray(out_l, dtype=float),
+            "closes": np.asarray(out_c, dtype=float),
+            "volumes": np.asarray(out_v, dtype=float),
+            "ois": np.asarray(out_oi, dtype=float),
+            "index": {int(d): i for i, d in enumerate(out_d)}}
+
+
 def contract_info(code: str, contracts: dict):
     parts = code.split(".")
     if len(parts) < 2:
@@ -462,6 +553,12 @@ class PortfolioSim:
         self.risk = RiskManager(risk_cfg)
         self.roll_calendar = load_roll_calendar(
             common_dir or os.path.abspath(os.path.join(ROOT, "..", "common")))
+        # Phase 1 contract 信号源: 逐日主力日历 (roll_calendar.json)
+        # 与 _no_roll_shift (无复权品种禁用执行层换月价差平移)
+        common = common_dir or os.path.abspath(
+            os.path.join(ROOT, "..", "common"))
+        self.sig_calendar = load_signal_calendar(common)
+        self._no_roll_shift = set()
         self.roll_seen = set()
         self.rolls = []
         self.sizer = PositionSizer(self.base.unit_var)
@@ -502,6 +599,26 @@ class PortfolioSim:
             csv_dir = self.csv_dir
             path = os.path.join(csv_dir, f"{code}_d.csv")
             bars = load_bars(path)
+            # Phase 1 contract 信号源: 逐日主力拼接序列 (无复权) 整体
+            # 替换 HOT —— 信号与执行统一用新合约自身序列; 数据不足
+            # WARN 退化 hot (零漂移默认)
+            sig_src = (getattr(inst, "signal_source", "") or
+                       getattr(self.base, "signal_source", "hot") or "hot")
+            if sig_src == "contract":
+                cal = self.sig_calendar.get(code)
+                cs = build_contract_series(
+                    bars, cal, os.path.join(csv_dir, "contracts"),
+                    *code.split(".")[:2]) \
+                    if cal and period == "d1" else {}
+                if cs:
+                    print(f"[pbt] {code}: contract 信号源 "
+                          f"{len({y for _, _, y in cal})} segments "
+                          f"逐日主力无复权 (信号+执行统一合约序列)")
+                    bars = cs
+                    self._no_roll_shift.add(code)
+                else:
+                    print(f"[pbt] WARN {code}: contract 信号源日历/数据"
+                          f"不足, 退化 hot")
             info = contract_info(code, contracts)
             if not bars or not info:
                 print(f"[pbt] WARN {code}: 缺数据/合约信息, 跳过")
@@ -545,7 +662,8 @@ class PortfolioSim:
                     "engine": engine, "open_dates": odays})
                 a, chan_by_profile[profile.key] = build_channels(
                     bars, self.base, profile.system, profile=profile,
-                    roll_rules=self.roll_calendar.get(code))
+                    roll_rules=None if code in self._no_roll_shift
+                    else self.roll_calendar.get(code))
                 atr = a if atr is None else atr
             self.engines[code] = self.subs[code][0]["engine"]  # 兼容别名
             self.chans[code] = {
@@ -614,7 +732,10 @@ class PortfolioSim:
     def _apply_rolls(self, d: int):
         """在当日事件前按换月日历平移持仓与估值锚，避免拼接价差进 PnL。"""
         for code, rules in self.roll_calendar.items():
-            if code not in self.engines:
+            if code not in self.engines \
+                    or code in self._no_roll_shift:
+                # contract 无复权品种: 执行即新合约真实价, 无拼接
+                # 价差需要平移 (否则反而引入虚假漂移)
                 continue
             for rule in rules:
                 key = (code, int(rule["date"]))
@@ -1387,7 +1508,9 @@ def _input_manifest(config_path: str, common_dir: str, sim) -> dict:
             "config": config_path,
             "fees": os.path.join(common_dir, "fees.json"),
             "commodities": os.path.join(common_dir, "commodities.json"),
-            "hots": os.path.join(common_dir, "hots.json")}.items():
+            "hots": os.path.join(common_dir, "hots.json"),
+            "roll_calendar": os.path.join(common_dir,
+                                          "roll_calendar.json")}.items():
         inputs[label] = _hash_file(path)
     data = {}
     for code in sorted(sim.data):
@@ -1396,6 +1519,16 @@ def _input_manifest(config_path: str, common_dir: str, sim) -> dict:
         m5 = os.path.join(sim.csv_dir, f"{code}_m5.csv")
         if os.path.exists(m5):
             data[f"{code}_m5.csv"] = _hash_file(m5)
+    # contract 信号源: 逐合约缓存哈希 (拼接序列的数据真值)
+    if getattr(sim, "_no_roll_shift", None):
+        cdir = os.path.join(sim.csv_dir, "contracts")
+        for code in sorted(sim._no_roll_shift):
+            prods = code.split(".")
+            pref = f"{prods[0]}.{prods[1]}."
+            for fn in sorted(os.listdir(cdir)):
+                if fn.startswith(pref) and fn.endswith(".json"):
+                    data[f"contracts/{fn}"] = _hash_file(
+                        os.path.join(cdir, fn))
     return {"code_version": _code_version(), "inputs": inputs, "data": data}
 
 
@@ -1440,11 +1573,19 @@ def main():
                     help="产出文件名附加后缀 (A/B 变体区分, 不覆盖基准)")
     ap.add_argument("--max-units", type=int, default=None)
     ap.add_argument("--max-group", type=int, default=None)
+    ap.add_argument("--signal-source", choices=["hot", "contract"],
+                    default=None,
+                    help="覆盖全部品种的信号源 (缺省=配置; contract="
+                         "逐日主力无复权, 需 roll_calendar.json+缓存)")
     ap.add_argument("--out-dir", default=os.path.join(ROOT,
                                                         "matrix_results"))
     args = ap.parse_args()
 
     cfg = ConfigLoader.load(args.config, warn=False)
+    if args.signal_source:
+        cfg = dataclasses.replace(
+            cfg, base=dataclasses.replace(
+                cfg.base, signal_source=args.signal_source))
     # S4 A/B: CLI 覆盖配置口径 (变体跑, 不改配置文件)
     if args.no_envelope or args.no_same_bar_reversal or args.no_gap_stop \
             or args.arm_exclude_signal:
@@ -1511,6 +1652,7 @@ def main():
         "margin_usage": args.margin_usage,
         "entry_mode": args.entry_mode,
         "period": args.period,
+        "signal_source": args.signal_source or cfg.base.signal_source,
         "codes": codes,
         "trigger_envelope": cfg.base.trigger_envelope,
         "allow_same_bar_reversal": cfg.base.allow_same_bar_reversal,
