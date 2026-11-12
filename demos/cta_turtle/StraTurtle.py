@@ -1527,14 +1527,10 @@ class StraTurtle(BaseCtaStrategy):
         self._sig_contract = self._full_contract_from_contract(cur)
         context.stra_prepare_bars(self._sig_contract, self._inst.period,
                                   self._base.bar_cnt, isMain=False)
-        if self._inst.period == "d1":
-            # 主力合约 m5 副K: session_end 合成当日日K 的原料 (F3:
-            # 实盘 d1 永不闭合; trigger 武装与 close 收盘决策共同依赖;
-            # HOT m5 副K 的订阅在上方模式段)
-            context.stra_prepare_bars(self._sig_contract,
-                                      self._base.intrabar_period,
-                                      self._base.intrabar_cnt,
-                                      isMain=False)
+        # 注意: 主力合约**不订 m5 副K** —— session_end 合成日K的原料
+        # 统一读 HOT m5 (主K级成熟订阅, 当日 HOT=当日主力映射, 等价
+        # 真实价口径); 2026-11-12 实锤新订阅副K命中 C++ reader 拼装
+        # 缓存冻结 (无夜盘品种当日完全空/夜盘品种白盘段缺失)
         context.stra_log_text(
             f"{self.name()} signal source: {self._sig_contract} "
             f"(自身真实序列, 无复权; 执行仍为 {self._inst.code})")
@@ -2363,16 +2359,16 @@ class StraTurtle(BaseCtaStrategy):
         last_date = self._bar_last_date(bars)
         if last_date is None:
             return
-        # 当日 m5 聚合 (his 无当日, 见 DATA_OPS F3)
-        # Phase 1: contract 模式用评估日主力合约自身 m5 合成 (真实价口径)
+        # 当日 m5 聚合 (his 无当日, 见 DATA_OPS F3)。
+        # 合成原料**统一读 HOT 的 m5** (主K级成熟订阅): 当日 HOT 由
+        # hots.json 主力映射 = 当日主力合约自身 m5, contract 口径的
+        # "真实价"语义不变 (hots 每日 20:35 更新 + 20:40 重启, 换月日
+        # 当日 HOT 即新主力)。2026-11-12 实锤: 直接读主力合约 m5
+        # (新订阅副K) 命中 C++ reader 拼装缓存冻结 —— SHFE 夜盘品种
+        # 缓存停在重启时刻只有夜盘段 (白盘 09:00-15:00 缺失, 当日
+        # 合成残缺), 无夜盘的 CZCE/IF 当日完全空 (session eval 跳过)。
         synth = None
-        if self._sig_source() == "contract":
-            mcode = self._dominant_for(curTDate) if self._sig_calendar \
-                else self._sig_contract
-            if not mcode:
-                mcode = code
-        else:
-            mcode = code
+        mcode = code
         mbars = context.stra_get_bars(mcode, p.intrabar_period,
                                       p.intrabar_cnt)
         if mbars is not None and len(mbars) > 0:
