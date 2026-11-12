@@ -2,7 +2,7 @@
 
 基于 WonderTrader/wtpy CTA 框架的经典海龟交易系统，商品期货主力合约趋势跟踪
 （日线信号，每品种独立配置）。核心能力：VaR 波动率仓位反算、**双模式信号确认**
-（`trigger` 盘中武装-触发，生产默认 / `close` 收盘确认）、**可插拔信号过滤器**
+（`close` 收盘确认=生产默认 / `trigger` 盘中武装-触发）、**可插拔信号过滤器**
 （方向闸/ADX/波动率带/流动性下限）、**组合级风险预算**（单品种本笔+单品种累计+
 总敞口+保证金+相关性组单位限制+共享账户资金闸）、**多 profile 信号**
 （`profiles[]` 统一入口：preset=窗口+过滤器预设，任意窗口×filter 组合可表达；
@@ -47,7 +47,7 @@ StraTurtle (框架壳)           生命周期/图表/执行/持久化/对账/盘
 | 组件 | 规则 |
 |---|---|
 | N | ATR(20) Wilder 平滑，交易周期上计算 |
-| S1 入场 | 突破 20 周期高/低点：`entry_mode: close`=收盘确认（边沿触发）；`trigger`=盘中触及即入场（经典海龟原生，生产默认） |
+| S1 入场 | 突破 20 周期高/低点：`entry_mode: close`=收盘确认（边沿触发，**生产默认 2026-11-11 激活包**，实盘由 session_end 合成日K驱动、收盘确认次日开盘成交）；`trigger`=盘中触及即入场（经典海龟原生，研究口径） |
 | S1 出场 | 反向 10 周期突破 或 2N 止损 |
 | S1 过滤 | 上次 S1 突破盈利 → 跳过本次；被跳过则武装 fail-safe：价格继续突破 55 周期强制入场；被跳过的模拟单 2N 止损后过滤器解除（`enable_s1_filter` 可关闭） |
 | S2 | 55 周期突破入场 / 20 周期出场，无过滤 |
@@ -190,7 +190,7 @@ base:
   pyramid_layers: 4       # 最大层数(含首仓), 1=不加仓
   pyramid_step_atr: 0.5
   bar_cnt: 120            # 需 >= s2_entry + atr_period
-  entry_mode: trigger     # trigger=盘中武装-触发(生产默认) | close=收盘确认
+  entry_mode: close       # close=收盘确认(生产默认) | trigger=盘中武装-触发
   stop_n_mode: ratchet    # 止损/加仓 N 口径: ratchet=只收紧(默认) | entry=冻结 | current=当根
   enable_s1_filter: true  # S1 盈利跳过开关(false=裸20/10)
   ghost_auto_trim: true   # ghost_fill 触发后信号层自动裁到与券商一致
@@ -317,7 +317,19 @@ WT 数据底盘只从 tick 合成 min1/min5/day、**不写 h1**，且 his DSB �
    +139.94%”不再作为决策证据。rb 黄金基线随两次口径修正显式刷新
    （33.37% → 9.73%，`golden_bt.py --update` 声明）：10-26 修正去除陈旧
    锚的类前视优势，10-29 引擎修复（S1 sim 跳空输赢/换月坐标等）叠加；
-   当前 9.73%/DD25.74%/Sharpe -0.015 为诚实口径的固定回归基线。
+   当前黄金基线（2026-11-12 声明，`golden_bt.py` 对拍强制）= rb d1
+   **close + contract + armF** +25.74%/DD19.94%/Sharpe 0.192
+   （2018-01~2023-04/5M），为诚实口径的固定回归基线。
+
+0.7. **信号源 `signal_source`（Phase 1，2026-11-10/11）**：默认 `hot`
+   （主力连续拼接序列）；`contract`=逐日主力合约自身真实序列、**无复权**
+   （用户拍板：移仓后用新合约自身序列重算信号）。bt=roll_calendar 逐日
+   主力（缓存直读绕开 C++ 副K段错误）；live=hots.json 当前主力单合约
+   （新主力上市初期历史不足时用 `align_window_hotfill`：HOT 为底+主力
+   重叠段覆盖）。组合级正式成绩（6000万/close+armF/2019-01~2026-08）：
+   contract 约束 +21.4%/dd40.9 vs hot +62.1%/dd30.7 —— 拼接换月跳空是
+   双向噪声且显著美化旧口径。生产 2026-11-11 激活包已切
+   close+contract+intrabar_stop×12。
 
 0. **主力连续日线需每日续接**（`scripts/update_hot_daily.py`，2026-09-16 实盘故障）：
    数据底盘（WtDt）每日只写**真实合约**日线（`his/day/<EXCHG>/<contract>.dsb`），
@@ -358,7 +370,7 @@ WT 数据底盘只从 tick 合成 min1/min5/day、**不写 h1**，且 his DSB �
    `ratchet` 用 ~2pp 的代价换回"记账 2N == 实际止损亏损"。单品种 rb
    （2018-01~2023-04，ratchet）32.92% / 回撤 35.31% / 314 笔。切换只需改
    `base.stop_n_mode`。
-2. **信号确认口径可配**（`entry_mode`）：`close`=收盘确认（无未来函数）；`trigger`=盘中突破即触发（经典海龟原生，生产默认）。trigger 模式回测成交价：有 m5 数据时由 m5 模拟 tick 撮合（≈触发价），**无 m5 数据时自动退化**（`bt_no_simtick`）为 check_bar 触发+当根收盘撮合——因 C++ 回放器 simTicks 只用非日K bar 生成模拟 tick（HisDataReplayer.cpp:1222 跳过 KP_DAY），日K 品种无 m5 则 tick 撮合链断裂；实盘 tick 即时成交于触发位附近——回测/实盘仅信号集合一致，执行价差异归入执行层
+2. **信号确认口径可配**（`entry_mode`）：`close`=收盘确认（无未来函数，**生产默认**）；`trigger`=盘中突破即触发（经典海龟原生）。实盘 F3 拓扑（d1 永不闭合）下 close 由 session_end 合成日K 驱动收盘决策、盘中止损由 `intrabar_stop`（m5 主K扫描）承载；trigger 模式回测成交价：有 m5 数据时由 m5 模拟 tick 撮合（≈触发价），**无 m5 数据时自动退化**（`bt_no_simtick`）为 check_bar 触发+当根收盘撮合——因 C++ 回放器 simTicks 只用非日K bar 生成模拟 tick（HisDataReplayer.cpp:1222 跳过 KP_DAY），日K 品种无 m5 则 tick 撮合链断裂；实盘 tick 即时成交于触发位附近——回测/实盘仅信号集合一致，执行价差异归入执行层
 3. **avgpx 符号约定**：框架空头 avgpx 为负值（avgpx×pos=成本>0），成交价反推与换月检测均已做符号处理
 4. **记账价 = 决策价 + 成交后回写**：confirm 时直接按决策价（触发位/收盘价）记账——**不再从框架 avgpx 反推**（`_implied_fill` 2026-09-15 删除：它读的是信号账面，`set_position` 即变而真实成交在下一个 tick 才落地，反推等于"新信号仓 × 旧成交均价"的混合值，加仓场景甚至等于加仓前的旧均价）；成交齐后自动回写真实成交价（逐笔成交优先，净均价兜底，偏差>0.5tick 才动，stop/add 武装位跟随）。该删除对回测**零影响**（rb 32.92%、12 品种矩阵三口径数字逐位不变）
 5. **真实持仓/成交改由交易通道真值源判定**（`core/LiveTruth.py`，P0-3 2026-09-15）：
