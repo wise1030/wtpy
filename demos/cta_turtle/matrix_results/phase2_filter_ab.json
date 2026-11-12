@@ -1,0 +1,70 @@
+{
+ "note": "过滤器 A/B — contract 真口径/6000万组合约束/close+armF/2019-01~2026-08; baseline=无辅助过滤器(生产现状); 负结论: 内置过滤器无一改善, ADX 唯一接近平价 (ret -1.6pp 换 dd -5.6pp)",
+ "baseline": {
+  "constrained_ret_pct": 21.4,
+  "dd_pct": 40.9,
+  "sharpe": 0.236
+ },
+ "variants": {
+  "adx": {
+   "label": "AdxTrend{14,25}",
+   "constrained": {
+    "ret_pct": 19.8,
+    "dd_pct": 35.3,
+    "sharpe": 0.218,
+    "trades": 1127,
+    "rejected": 53
+   },
+   "unconstrained": {
+    "ret_pct": 4.6,
+    "dd_pct": 43.4,
+    "sharpe": 0.16
+   }
+  },
+  "volband": {
+   "label": "VolatilityBand{250,10-90%}",
+   "constrained": {
+    "ret_pct": -1.9,
+    "dd_pct": 47.6,
+    "sharpe": 0.113,
+    "trades": 1561,
+    "rejected": 171
+   },
+   "unconstrained": {
+    "ret_pct": 21.3,
+    "dd_pct": 47.3,
+    "sharpe": 0.232
+   }
+  },
+  "liqfloor": {
+   "label": "LiquidityFloor{5,10000}",
+   "constrained": {
+    "ret_pct": 8.4,
+    "dd_pct": 44.3,
+    "sharpe": 0.202,
+    "trades": 1901,
+    "rejected": 379
+   },
+   "unconstrained": {
+    "ret_pct": 43.6,
+    "dd_pct": 52.9,
+    "sharpe": 0.316
+   }
+  },
+  "adx_vol": {
+   "label": "ADX+VolBand",
+   "constrained": {
+    "ret_pct": -24.9,
+    "dd_pct": 46.9,
+    "sharpe": -0.081,
+    "trades": 831,
+    "rejected": 23
+   },
+   "unconstrained": {
+    "ret_pct": -27.9,
+    "dd_pct": 50.4,
+    "sharpe": -0.079
+   }
+  }
+ }
+}
