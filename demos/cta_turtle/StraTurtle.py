@@ -26,8 +26,8 @@ from wtpy import BaseCtaStrategy, CtaContext
 from schemas import InstrumentConfig, TurtleBaseConfig, RiskConfig
 from filters import build_chain, FilterContext
 from core.aggregate import aggregate_h1, norm_m5_time
-from core.hotsutil import (align_window, find_common, load_hots,
-                           parse_contracts, split_code)
+from core.hotsutil import (align_window, align_window_hotfill, find_common,
+                           load_hots, parse_contracts, split_code)
 from core.indicators import wilder_atr, donchian, with_next_channels
 from core.TurtleEngine import (TurtleEngine)
 from core.PositionSizer import PositionSizer
@@ -836,9 +836,15 @@ class StraTurtle(BaseCtaStrategy):
             context.stra_prepare_bars(code, self._main_period,
                                       self._h1_m5_cnt(), isMain=True)
         elif path == "intrabar":
-            # 盘中止损模式: 信号周期(d1/h1)作副K
+            # 盘中止损模式: m5 主K驱动盘中扫描; 信号周期(d1)作副K —
+            # 副K必须显式订阅 (实盘 C++ 未订阅返回 None →
+            # _on_calc_intrabar 首行静默 return 零评估零扫描,
+            # 2026-11-12 激活包 intrabar 首活实锤, 注释原设计意图
+            # 即"信号周期作副K" 实现漏订)
             context.stra_prepare_bars(code, self._main_period,
                                       p.intrabar_cnt, isMain=True)
+            context.stra_prepare_bars(code, self._inst.period,
+                                      p.bar_cnt, isMain=False)
         else:
             context.stra_prepare_bars(code, self._main_period,
                                       p.bar_cnt, isMain=True)
@@ -1682,10 +1688,24 @@ class StraTurtle(BaseCtaStrategy):
             dates, list(highs), list(lows), list(closes),
             sd, sh, sl, sc, min_bars=self._need_bars())
         if aligned is None:
-            context.stra_log_text(
-                f"{self.name()} signal window insufficient: "
-                f"{dom} bars < {self._need_bars()}", level=2)
-            return None
+            if self._is_backtest:
+                context.stra_log_text(
+                    f"{self.name()} signal window insufficient: "
+                    f"{dom} bars < {self._need_bars()}", level=2)
+                return None
+            # live 新主力上市初期自身历史 < need_bars (换月盲区,
+            # 2026-11-12 激活包实锤 rb.2701 bars<57): 以 HOT 为底 +
+            # 主力重叠段覆盖 (align_window_hotfill; 与 bt 逐日主力
+            # 同构)。used=0 (主力完全无覆盖) → None 不得静默退 HOT。
+            aligned = align_window_hotfill(
+                dates, list(highs), list(lows), list(closes),
+                sd, sh, sl, sc, min_bars=self._need_bars())
+            if aligned is None:
+                context.stra_log_text(
+                    f"{self.name()} signal window insufficient: "
+                    f"{dom} bars < {self._need_bars()} (hotfill "
+                    f"unavailable)", level=2)
+                return None
         return (np.asarray(aligned[0], dtype=float),
                 np.asarray(aligned[1], dtype=float),
                 np.asarray(aligned[2], dtype=float))
@@ -1759,6 +1779,13 @@ class StraTurtle(BaseCtaStrategy):
         closes = bars.closes
         highs = bars.highs
         lows = bars.lows
+        # Phase 1: contract 信号源替换指标窗口 (与 _on_calc_daily 同
+        # 口径; None=窗口不足跳过本次; intrabar 路径 2026-11-12 激活
+        # 包首活时缺失, 信号会静默退回 HOT 口径)
+        sig = self._signal_arrays(context, bars, highs, lows, closes)
+        if sig is None:
+            return
+        highs, lows, closes = sig
         atr, n, chan = self._calc_indicators(highs, lows, closes)
         if n is None:
             return

@@ -207,3 +207,42 @@ def detect_rolls(dates, opens, prev_closes, ois=None,
                         "gap_pct": round(gap_pct, 6), "reason": reason})
             last_hit = i
     return out
+
+
+def align_window_hotfill(hot_dates, highs, lows, closes,
+                         sig_dates, sig_h, sig_l, sig_c,
+                         min_bars: int):
+    """live 新主力窗口不足时的填充口径 (纯函数, 2026-11-12 激活包)。
+
+    背景: live contract 信号源 = hots.json 当前主力单合约, 新主力上市
+    初期自身历史 < need_bars → align_window 头部截断后不足 → 信号盲区
+    (换月后数周无评估, 组合成绩系统性受损, 实盘 rb.2701 实锤)。
+
+    口径: 以 HOT 窗口为底 (上市前段 = HOT 当时映射 ≈ 旧主力自身,
+    与 bt roll_calendar 逐日主力语义同构), 主力合约有数据的日期覆盖
+    为真实 OHLC (移仓后 = 新合约自身, 无跳空污染)。used=0 (主力数据
+    完全没覆盖到窗口) 返回 None — 信号源配置失效不得静默退回纯 HOT。
+    """
+    sig = {}
+    for d, h, l, c in zip(sig_dates, sig_h, sig_l, sig_c):
+        try:
+            sig[int(d)] = (float(h), float(l), float(c))
+        except (TypeError, ValueError):
+            continue
+    out_h, out_l, out_c = [], [], []
+    used = 0
+    for i, d in enumerate(hot_dates):
+        d = int(d)
+        row = sig.get(d)
+        if row is not None:
+            out_h.append(row[0])
+            out_l.append(row[1])
+            out_c.append(row[2])
+            used += 1
+        else:
+            out_h.append(float(highs[i]))
+            out_l.append(float(lows[i]))
+            out_c.append(float(closes[i]))
+    if used == 0 or len(out_c) < min_bars:
+        return None
+    return out_h, out_l, out_c

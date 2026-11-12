@@ -20,7 +20,7 @@ from test_stra_trigger import TrigCtx  # noqa: E402
 from test_intrabar import _fill_daily  # noqa: E402
 
 import StraTurtle as st_mod  # noqa: E402
-from core.hotsutil import align_window  # noqa: E402
+from core.hotsutil import align_window, align_window_hotfill  # noqa: E402
 from schemas import InstrumentConfig, TurtleBaseConfig  # noqa: E402
 from StraTurtle import StraTurtle  # noqa: E402
 
@@ -106,6 +106,33 @@ def test_align_window_insufficient():
     z = [1.0, 2.0]
     assert align_window(hot_dates, z + [0] * 8, [0] * 10, [0] * 10,
                         sig_dates, z, z, z, min_bars=5) is None
+
+
+# align_window_hotfill (live 新主力窗口不足填充, 2026-11-12)
+def test_hotfill_covers_overlap_keeps_hot_base():
+    hot_dates = list(range(400, 410))
+    hot_c = [float(i) for i in range(10)]
+    sig_dates = list(range(406, 410))           # 主力只覆盖后 4 日
+    sig_c = [9000.0] * 4
+    out = align_window_hotfill(hot_dates, hot_c, hot_c, hot_c,
+                               sig_dates, sig_c, sig_c, sig_c, min_bars=5)
+    assert out is not None
+    oh, ol, oc = out
+    assert len(oc) == 10
+    assert oc[6] == 9000.0                       # 重叠段 = 主力真实价
+    assert oc[5] == 5.0                          # 前段 = HOT 底
+    assert oh[6] == 9000.0
+
+
+def test_hotfill_used_zero_returns_none():
+    """主力数据完全没覆盖窗口 → None (信号源失效不得静默退纯 HOT)"""
+    hot_dates = list(range(400, 410))
+    hot_c = [float(i) for i in range(10)]
+    sig_dates = list(range(300, 305))            # 与窗口不相交
+    sig_c = [9000.0] * 5
+    assert align_window_hotfill(hot_dates, hot_c, hot_c, hot_c,
+                                sig_dates, sig_c, sig_c, sig_c,
+                                min_bars=5) is None
 
 
 # ------------------------------------------------------------------
