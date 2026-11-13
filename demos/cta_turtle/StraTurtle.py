@@ -1850,6 +1850,44 @@ class StraTurtle(BaseCtaStrategy):
 
         self._post_calculate(context, closes, n, chan)
 
+    def _tick_stop_scan(self, context, tick):
+        """close 模式盘中 2N 止损触碰 (tick 级, 2026-11-14)。
+
+        close 的收盘确认决策本身无盘中触发; `intrabar_stop: true`
+        品种由 m5 主K扫描承载盘中保护, 但 **CZCE 三品种的 d1 副K
+        在实盘 reader 读取失败** (2026-11-12/13 实锤: session_end
+        与盘中评估双双静默, 因 intrabar 模式 d1=副K) → 回退
+        daily 模式后盘中保护由本扫描承载。命中挂出场批次
+        (_exit_orders 非空后续 tick 直接跳过, 不重复触发), 成交
+        确认走 FillTracker 证据链, 与收盘决策的 exit 完全同路径。
+        """
+        if self._exit_orders or self._open_intents:
+            return
+        px = float(getattr(tick, "price", 0.0) or 0.0)
+        if px <= 0:
+            return
+        for sub in self._subs:
+            e = sub["engine"]
+            if e.direction == 0 or not e.layers:
+                continue
+            stop = e.stop_price()
+            if stop != stop:            # NaN 守卫 (脏状态)
+                continue
+            hit = (e.direction > 0 and px <= stop) or \
+                  (e.direction < 0 and px >= stop)
+            if hit:
+                context.stra_log_text(
+                    f"{self.name()}[{sub['name']}] tick stop hit: "
+                    f"px={px:.2f} stop={stop:.2f} dir={e.direction}",
+                    level=2)
+                self._alert("tick_stop",
+                            f"{self._inst.code}[{sub['name']}] "
+                            f"tick stop {px:.2f} vs {stop:.2f}")
+                dec = {"decision": "exit", "reason": "stop_tick",
+                       "price": stop, "tag": "StopTick"}
+                self._execute(context, dec, self._last_n)
+                return                  # 单批次, 成交确认前不再扫描
+
     def _scan_intrabar_stop(self, context: CtaContext, mbars, mkey):
         """扫描新增主K段是否触及各子系统 2N 止损 → 即时离场 (净仓调整)"""
         actives = [s for s in self._subs
@@ -1964,7 +2002,20 @@ class StraTurtle(BaseCtaStrategy):
         self._last_tick_ts = time.time()    # Phase 0: 心跳断流检测基准
         self._maybe_periodic_persist(context)   # 周期快照 (300s 节流)
         self._write_heartbeat(context)          # 心跳 (5s 节流)
-        if self._mode.entry_mode != "trigger" or stdCode != self._inst.code:
+        if stdCode != self._inst.code:
+            return
+        if self._mode.entry_mode == "close":
+            # close 模式 tick: 心跳基准 (上方) + 意图/出场证据推进
+            # (与 trigger 同前段; 收盘确认批次成交后需及时确认引擎
+            # 状态, 否则要等下一 session_end) + 盘中 2N 止损触碰
+            # (intrabar_stop=false 品种的盘中保护; intrabar 品种由
+            # m5 主K扫描, 不经此路径)
+            self._process_open_intents(context)
+            self._process_exit_orders(context)
+            if self._exit_orders or self._open_intents:
+                self._persist(context)
+                return
+            self._tick_stop_scan(context, newTick)
             return
         self._process_open_intents(context)
         self._process_exit_orders(context)
@@ -2355,9 +2406,18 @@ class StraTurtle(BaseCtaStrategy):
         # synth), 有效长度 = len(bars)+1; 与 _catchup_eval 的 need 差异
         # 是刻意的 (那条路径不追加合成bar)
         if bars is None or len(bars) < need - 1:
+            # 2026-11-14 诊断: 曾静默 return 无痕迹 (CZCE d1 副K疑似
+            # 读取失败, session_end 整天无声); 升级 warning 钉死根因
+            context.stra_log_text(
+                f"{self.name()} session eval aborted: d1 bars="
+                f"{'None' if bars is None else len(bars)} < {need - 1}",
+                level=2)
             return
         last_date = self._bar_last_date(bars)
         if last_date is None:
+            context.stra_log_text(
+                f"{self.name()} session eval aborted: d1 bars 无日期字段",
+                level=2)
             return
         # 当日 m5 聚合 (his 无当日, 见 DATA_OPS F3)。
         # 合成原料**统一读 HOT 的 m5** (主K级成熟订阅): 当日 HOT 由

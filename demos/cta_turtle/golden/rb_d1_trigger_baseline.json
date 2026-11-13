@@ -19,7 +19,7 @@
     "capital": 5000000,
     "slippage": 0
   },
-  "config_sha256": "f5f50e2f5841dd9e241989ffb331271c5e8784d9ec34421be2dfad034bd4d350",
+  "config_sha256": "a1ea29c05e16ca0d1b00f75d0f79653d9b0b9226b7105d39cb407cdcdcf0e824",
   "input_hashes": {
     "rb_d1": "830cfc74cb9aeb34220d405bf218d0c4f34227f1ebe3e16bd7ce844c96a424f2",
     "rb_m5": "bf5a91c0c9c43a456e3acfc6e375e156212cd0acafcb85cf8d328008365f88f9",

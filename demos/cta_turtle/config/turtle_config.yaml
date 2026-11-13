@@ -146,13 +146,13 @@ instruments:
     units: 1
     direction: both
     group: cheme
-    intrabar_stop: true 
+    intrabar_stop: false
   - code: CZCE.MA.HOT
     period: d1
     units: 1
     direction: both
     group: cheme
-    intrabar_stop: true 
+    intrabar_stop: false
   - code: DCE.pp.HOT
     period: d1
     units: 1
@@ -184,7 +184,7 @@ instruments:
     units: 1
     direction: both
     group: soft
-    intrabar_stop: true 
+    intrabar_stop: false
   # 股指
   - code: CFFEX.IF.HOT
     period: d1
