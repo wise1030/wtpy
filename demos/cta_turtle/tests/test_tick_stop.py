@@ -34,6 +34,7 @@ class _Ctx:
 
     def stra_set_position(self, code, target, tag=""):
         self.orders.append((code, target, tag))
+        self.pos = target      # 模拟框架: 目标即信号簿 (重发判未归零用)
 
     def stra_log_text(self, txt, level=1):
         self.logs.append((level, txt))

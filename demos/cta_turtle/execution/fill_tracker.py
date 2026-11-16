@@ -5,6 +5,7 @@ FillTracker 持有策略回指 (self.s), 方法体与迁出前逐字等价
 黄金回测端到端回归覆盖。
 """
 import datetime as _dt
+import json
 import os
 import time
 from execution.paths import GROUP_DIR as _GROUP_DIR
@@ -132,6 +133,63 @@ class FillTracker:
         # enter/add。先弹出当前批次，避免重放队列状态仍指向旧批次。
         self.h._replay_deferred_decisions(context)
 
+    def _market_open_now(self, code: str) -> bool:
+        """品种当前是否处于交易时段 (sessions.json 节段 + 工作日)。
+
+        出场批次重发的闸门 — 非交易时段重发只会被柜台拒 (11/13 p
+        23:00 实锤)。按日懒加载缓存; 文件读失败按"开"放行 (被拒是
+        有界噪音, 错过时段是裸奔风险, 不对称性取放行)。
+        """
+        try:
+            now = _dt.datetime.now()
+            if now.weekday() >= 5:
+                return False
+            key = now.strftime("%Y%m%d")
+            cache = self.__dict__.setdefault("_sess_cache", {})
+            if cache.get("day") != key:
+                from core.hotsutil import find_common
+                common = find_common(_GROUP_DIR)
+                tpl = None
+                try:
+                    with open(os.path.join(common, "commodities.json"),
+                              encoding="utf-8") as f:
+                        info = (json.load(f) or {}).get(code.split(".")[0])
+                    info = (info or {}).get(code.split(".")[1])
+                    tpl_name = info.get("session") \
+                        if isinstance(info, dict) else None
+                    raw = None
+                    for enc in ("utf-8", "gbk"):
+                        try:
+                            with open(os.path.join(common, "sessions.json"),
+                                      encoding=enc) as f:
+                                raw = json.load(f)
+                            break
+                        except (UnicodeDecodeError, ValueError, OSError):
+                            continue
+                    tpl = (raw or {}).get(tpl_name) if tpl_name else None
+                except (OSError, ValueError, AttributeError):
+                    tpl = None
+                cache.clear()
+                cache["day"] = key
+                cache["tpl"] = tpl
+            tpl = cache.get("tpl")
+            if not tpl:
+                return True            # 无时段信息 → 放行
+            hhmm = now.hour * 100 + now.minute
+            for sec in (tpl.get("sections") or []):
+                try:
+                    f = int(sec.get("from"))
+                    t = int(sec.get("to"))
+                except (TypeError, ValueError):
+                    continue
+                if f == t:
+                    continue
+                if (f <= hhmm < t) if f < t else (hhmm >= f or hhmm < t):
+                    return True
+            return False
+        except Exception:
+            return True                # 判定本身失败 → 放行 (同上口径)
+
     def _process_dual_exit(self, context, fp: dict):
         intent = fp["intent"]
         code = intent.code
@@ -255,6 +313,27 @@ class FillTracker:
             direction = 1 if engine.direction > 0 else -1
             # 平多=卖出(-1)，平空=买入(+1)，与持仓方向相反。
             trade_side = -direction
+            # 出场批次重发 (2026-11-16 事故: 周五 23:00 收盘根止损单
+            # 被柜台拒 "not in trading time", 批次挂到周一全天无人重
+            # 发, 空头裸奔 2 天): 交易时段内且信号仓未归零 → 节流
+            # 重发 target=0。重启恢复/时段外被拒的批次都靠此收敛;
+            # 与决策路径的 set_position 幂等 (目标同值, C++ 信号簿
+            # 差分为 0 不下单, 仅未提交/复位时真正重发)。
+            if self._market_open_now(code):
+                now_ts = time.time()
+                if now_ts - float(fp.get("resend_ts") or 0.0) > 60.0:
+                    pos = context.stra_get_position(code)
+                    if pos != 0:
+                        fp["resend_ts"] = now_ts
+                        try:
+                            context.stra_set_position(
+                                code, 0, fp.get("tag") or "Exit")
+                            context.stra_log_text(
+                                f"{self.h.name()}[{key}] exit order "
+                                f"resent: target 0 (signal pos {pos}, "
+                                f"batch unconfirmed)", level=2)
+                        except Exception:
+                            pass
             # 证据 0: localid 归因链 (跨零/反向场景的订单级精确证据)
             if attr_on:
                 ap = self.h._attr_progress(str(key))
