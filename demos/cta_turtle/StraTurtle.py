@@ -1605,6 +1605,17 @@ class StraTurtle(BaseCtaStrategy):
         context.stra_log_text(f"{self.name()} {txt}", level=2)
         self._alert("signal_source_roll", txt)
 
+    def _sig_period_bars(self, context, cnt):
+        """信号周期 K 线读取 (isMain 口径随模式, 2026-11-19): daily
+        模式信号周期=主K (isMain=True) — CZCE 的 d1 **副K**在实盘
+        reader 读取失败 (2 段品种码副K链坑), 回退 daily 后
+        _session_eval_daily/_catchup_eval 仍 isMain=False 读副K →
+        四天零评估实锤; intrabar/h1 模式信号周期=副K (isMain=False
+        保持, SHFE 系正常)。"""
+        return context.stra_get_bars(
+            self._inst.code, self._inst.period, cnt,
+            isMain=self._mode.calc_path == "daily")
+
     def _sig_bars(self, context, full_code):
         """合约信号序列读取 (带缓存) -> (dates, h, l, c) 或 None。
 
@@ -2400,7 +2411,7 @@ class StraTurtle(BaseCtaStrategy):
         if self._d1_date is not None and int(self._d1_date) == int(curTDate):
             return                               # bt 日线到达路径已评估
         self._drop_stale_pending(context, f"session_eval {curTDate}")
-        bars = context.stra_get_bars(code, self._inst.period, p.bar_cnt)
+        bars = self._sig_period_bars(context, p.bar_cnt)
         need = self._need_bars()
         # need-1: 本路径把当日 m5 聚合出的合成日K追加到 his 之后 (下方
         # synth), 有效长度 = len(bars)+1; 与 _catchup_eval 的 need 差异
@@ -2515,9 +2526,8 @@ class StraTurtle(BaseCtaStrategy):
             if tdate is not None:
                 self._catchup_date = tdate
             return
-        code = self._inst.code
         p = self._base
-        bars = context.stra_get_bars(code, self._inst.period, p.bar_cnt)
+        bars = self._sig_period_bars(context, p.bar_cnt)
         need = self._need_bars()
         # 本路径只用 his (不追加合成bar), 故要求完整 need 根;
         # 未就绪 → 不消费闸 (下一 tick 重试)
