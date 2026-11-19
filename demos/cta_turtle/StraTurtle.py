@@ -2530,8 +2530,14 @@ class StraTurtle(BaseCtaStrategy):
         bars = self._sig_period_bars(context, p.bar_cnt)
         need = self._need_bars()
         # 本路径只用 his (不追加合成bar), 故要求完整 need 根;
-        # 未就绪 → 不消费闸 (下一 tick 重试)
+        # 未就绪 → 不消费闸 (下一 tick 重试)。2026-11-19 升级
+        # warning: CZCE  his 读取链路多层坑, 静默期长达 8 天无人知,
+        # 此后一切 his 未就绪必须留痕
         if bars is None or len(bars) < need:
+            context.stra_log_text(
+                f"{self.name()} catchup aborted: d1 bars="
+                f"{'None' if bars is None else len(bars)} < {need}",
+                level=2)
             return
         last_date = self._bar_last_date(bars)
         if last_date is None:
