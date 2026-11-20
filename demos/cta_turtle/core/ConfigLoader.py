@@ -17,7 +17,8 @@ from core.profiles import required_bars, describe_profiles, resolve_profiles
 # 防护是配置面最危险的洞)
 _TOP_KEYS = {"base", "risk", "notify", "instruments", "config_version"}
 _INST_KEYS = {"code", "period", "system", "units", "direction", "group",
-              "filters", "intrabar_stop", "speeds", "profiles"}
+              "filters", "intrabar_stop", "speeds", "profiles",
+              "signal_source", "live_csv_bars"}
 
 
 def allocated_capital(risk, code: str, codes: list) -> float:
@@ -246,7 +247,11 @@ class ConfigLoader:
                 units=units, direction=direction,
                 group=group, filters=filters,
                 speeds=speeds, profiles=profiles,
-                intrabar_stop=intrabar_stop))
+                intrabar_stop=intrabar_stop,
+                signal_source=str(item.get('signal_source', '') or ''),
+                live_csv_bars=(bool(item['live_csv_bars'])
+                               if item.get('live_csv_bars') is not None
+                               else None)))
 
         if not instruments:
             raise ValueError("instruments 为空")

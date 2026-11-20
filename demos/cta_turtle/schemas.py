@@ -187,6 +187,11 @@ class TurtleBaseConfig:
     #              当前主力解析订阅, 回测按 common/roll_calendar.json 逐日
     #              切换; 执行/持仓仍是 HOT 由框架换月映射)
     signal_source: str = "hot"
+    # live daily 模式的信号周期 K 线改由 storage/csv 直读 (2026-11-20:
+    # CZCE 的 d1 主K/副K 在实盘 C++ reader 双双有坑 — 主K his 自
+    # intrabar 激活日起停滞; csv 由 hotdaily 每日幂等续接。与 bt
+    # contract 缓存直读同哲学。仅 daily 模式生效, intrabar/bt 忽略)
+    live_csv_bars: bool = False
     # 涨跌停锁死检测 (秒, 0=关闭): tick 价格钉住不动超过该时长且
     # 存在未闭合成交窗口时, 判定疑似锁死 → 告警并暂停该品种加仓
     # (出场/止损不受影响; 入场仍允许但由 ghost_fill 自愈兜底)。
@@ -277,6 +282,9 @@ class InstrumentConfig:
     # ks2wtpy/KS S3 源; 见 scripts/build_contract_signals.py --ks-csv-dir)。
     # 默认仍 hot (生产零漂移), 切 contract 需逐品种/全局限配 + live 种子。
     signal_source: str = ""
+    # 逐品种覆盖 base.live_csv_bars (空=继承 base; CZCE d1 在实盘
+    # reader 主K/副K 双坑 → 三品种开 csv 直读)
+    live_csv_bars: bool = None
 
     def allows_direction(self, direction: int) -> bool:
         """direction: 1=多, -1=空"""

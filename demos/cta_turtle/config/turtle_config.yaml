@@ -147,12 +147,14 @@ instruments:
     direction: both
     group: cheme
     intrabar_stop: false
+    live_csv_bars: true  # CZCE d1 主K/副K 在实盘 reader 双坑
   - code: CZCE.MA.HOT
     period: d1
     units: 1
     direction: both
     group: cheme
     intrabar_stop: false
+    live_csv_bars: true  # CZCE d1 主K/副K 在实盘 reader 双坑
   - code: DCE.pp.HOT
     period: d1
     units: 1
@@ -185,6 +187,7 @@ instruments:
     direction: both
     group: soft
     intrabar_stop: false
+    live_csv_bars: true  # CZCE d1 主K/副K 在实盘 reader 双坑
   # 股指
   - code: CFFEX.IF.HOT
     period: d1

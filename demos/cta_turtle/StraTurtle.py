@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import time
+import types
 
 import numpy as np
 from wtpy import BaseCtaStrategy, CtaContext
@@ -1615,15 +1616,68 @@ class StraTurtle(BaseCtaStrategy):
         self._alert("signal_source_roll", txt)
 
     def _sig_period_bars(self, context, cnt):
-        """信号周期 K 线读取 (isMain 口径随模式, 2026-11-19): daily
-        模式信号周期=主K (isMain=True) — CZCE 的 d1 **副K**在实盘
-        reader 读取失败 (2 段品种码副K链坑), 回退 daily 后
-        _session_eval_daily/_catchup_eval 仍 isMain=False 读副K →
-        四天零评估实锤; intrabar/h1 模式信号周期=副K (isMain=False
-        保持, SHFE 系正常)。"""
-        return context.stra_get_bars(
-            self._inst.code, self._inst.period, cnt,
-            isMain=self._mode.calc_path == "daily")
+        """信号周期 K 线读取 (2026-11-20 终版):
+
+        - bt / intrabar 模式: 框架 stra_get_bars (isMain 随 calc_path;
+          intrabar 的 d1 副K 对 SHFE 系正常)。
+        - **live daily 模式: storage/csv 直读** — CZCE 的 d1 主K/副K
+          在实盘 C++ reader 双双有坑 (2 段品种码; 主K his 自 11/12
+          起停滞在 11/11, datakit 的 DSB 文件本身新鲜) — 与 bt
+          contract 缓存直读绕 C++ 同哲学。csv 由 hotdaily 每日幂等
+          续接 (最新到昨日), 足以承载 T+1 catchup 评估。
+        """
+        if self._is_backtest or self._mode.calc_path != "daily":
+            return context.stra_get_bars(
+                self._inst.code, self._inst.period, cnt,
+                isMain=self._mode.calc_path == "daily")
+        csv_on = getattr(self._inst, "live_csv_bars", None)
+        if csv_on is None:
+            csv_on = getattr(self._base, "live_csv_bars", False)
+        if not csv_on:
+            return context.stra_get_bars(
+                self._inst.code, self._inst.period, cnt,
+                isMain=self._mode.calc_path == "daily")
+        return self._load_live_csv_bars(cnt)
+
+    def _load_live_csv_bars(self, cnt):
+        """storage/csv/<code>_d.csv 尾部 cnt 根 → SimpleNamespace。
+
+        与 run_portfolio_bt.load_bars 同格式 (date,open,high,low,close,
+        volume,turnover,open_interest); 缺文件/空文件返回 None。"""
+        import csv as _csv
+        from core.hotsutil import find_common
+        try:
+            common = find_common(_GROUP_DIR)
+            path = os.path.abspath(os.path.join(
+                common, "..", "storage", "csv",
+                f"{self._inst.code}_d.csv"))
+            rows = []
+            with open(path, encoding="utf-8-sig") as f:
+                for r in _csv.DictReader(f):
+                    try:
+                        d = int(str(r.get("date") or "").replace("-", "")
+                                .replace("/", ""))
+                        rows.append((d, float(r["open"]), float(r["high"]),
+                                     float(r["low"]), float(r["close"]),
+                                     float(r.get("volume") or 0),
+                                     float(r.get("open_interest") or 0)))
+                    except (TypeError, ValueError, KeyError):
+                        continue
+        except OSError:
+            return None
+        if len(rows) < 2:
+            return None
+        rows = rows[-cnt:]
+        n = len(rows)
+        return types.SimpleNamespace(
+            date=np.asarray([r[0] for r in rows], dtype=np.int64),
+            time=np.full(n, 1500, dtype=np.int64),
+            opens=np.asarray([r[1] for r in rows], dtype=float),
+            highs=np.asarray([r[2] for r in rows], dtype=float),
+            lows=np.asarray([r[3] for r in rows], dtype=float),
+            closes=np.asarray([r[4] for r in rows], dtype=float),
+            volumes=np.asarray([r[5] for r in rows], dtype=float),
+            open_interests=np.asarray([r[6] for r in rows], dtype=float))
 
     def _sig_bars(self, context, full_code):
         """合约信号序列读取 (带缓存) -> (dates, h, l, c) 或 None。
@@ -2560,11 +2614,17 @@ class StraTurtle(BaseCtaStrategy):
             return
         last_date = self._bar_last_date(bars)
         if last_date is None:
+            context.stra_log_text(
+                f"{self.name()} catchup aborted: d1 bars 无日期字段",
+                level=2)
             return
         if self._d1_date is not None and int(self._d1_date) >= int(last_date):
             # his 末根已评估过 → 结论性, 消费闸 (避免每 tick 空转)
             if tdate is not None:
                 self._catchup_date = tdate
+            context.stra_log_text(
+                f"{self.name()} catchup already latest: d1_date="
+                f"{self._d1_date} >= his last={last_date}", level=2)
             return
         self._drop_stale_pending(context, f"catchup {last_date}")
         highs = np.asarray(bars.highs, dtype=float)
