@@ -817,6 +817,15 @@ class StraTurtle(BaseCtaStrategy):
         self._mode = StrategyMode.resolve(self._base, self._inst,
                                           self._is_backtest,
                                           self._bt_no_simtick)
+        # 模式面落盘 (2026-11-20): calc_path/session_flush/wants_* 的
+        # 配置漂移已实锤踩坑 4 次 (intrabar 漏订副K / close tick 心跳 /
+        # session_end 合成原料 / catchup 调用点), 一行 info 换永不再猜
+        m = self._mode
+        context.stra_log_text(
+            f"{self.name()} mode: calc={m.calc_path} "
+            f"flush={m.session_flush} catchup={m.wants_catchup} "
+            f"tick_feed={m.wants_tick_feed} "
+            f"intrabar={m.intrabar_stop} bt={m.is_backtest}")
         if self._is_backtest:
             self._truth = None
             self._truth_probed = True
@@ -2026,6 +2035,13 @@ class StraTurtle(BaseCtaStrategy):
             if self._exit_orders or self._open_intents:
                 self._persist(context)
                 return
+            # catchup 在 close 分支内 (2026-11-20 实锤: 调用点在
+            # trigger 专属段, close 分支提前 return 挡住 → CZCE
+            # daily 模式 catchup 永不被调, 8 天零评估的最后一层)
+            self._close_branch_ts = time.time()   # 心跳可观测: 分支达
+            tdate = context.stra_get_tdate()
+            if tdate and self._catchup_date != int(tdate):
+                self._catchup_eval(context, int(tdate))
             self._tick_stop_scan(context, newTick)
             return
         self._process_open_intents(context)
@@ -2269,6 +2285,9 @@ class StraTurtle(BaseCtaStrategy):
                 "last_tick_ts": self._last_tick_ts,
                 "tick_age": (now - self._last_tick_ts)
                 if self._last_tick_ts else None,
+                "close_branch_age": (now - self._close_branch_ts)
+                if getattr(self, "_close_branch_ts", None) else None,
+                "catchup_date": self._catchup_date,
                 "price": float(px) if (px and px == px and px > 0) else 0.0,
                 "direction": self._engine.direction,
                 "net_lots": self._combined_target(),

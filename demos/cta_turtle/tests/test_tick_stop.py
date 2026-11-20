@@ -45,6 +45,9 @@ class _Ctx:
     def user_save_data(self, key, data, flag=""):
         self.kv[key] = data
 
+    def stra_get_tdate(self):
+        return None      # None = catchup 不触发 (本组只测止损扫描)
+
 
 def _stra_close():
     base = TurtleBaseConfig(entry_mode="close")
